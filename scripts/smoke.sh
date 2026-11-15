@@ -17,6 +17,8 @@ BIN="${STRATA_BIN:-strata}"
 work=$(mktemp -d /tmp/strata-smoke.XXXXXX)
 # Readable by a containerised STRATA_BIN running as another uid.
 chmod 755 "$work"
+# The session cookie stays private.
+private=$(mktemp -d /tmp/strata-smoke-private.XXXXXX)
 dir=""
 upload=""
 cleanup() {
@@ -25,16 +27,23 @@ cleanup() {
   if [[ -n "$dir" ]]; then
     c -H 'content-type: application/json' --data "{\"paths\":[\"$dir\"]}" "$BASE/api/files/delete" >/dev/null 2>&1 || true
   fi
-  rm -rf "$work"
+  rm -rf "$work" "$private"
 }
 trap cleanup EXIT
-jar="$work/cookies"
+jar="$private/cookies"
 c() { curl -sS --fail-with-body ${CURL_EXTRA:-} -b "$jar" -c "$jar" -H 'x-strata: 1' "$@"; }
 step() { printf '%-30s ' "$1"; }
 ok() { echo "ok${1:+ ($1)}"; }
 
 step "healthz"; c "$BASE/healthz" >/dev/null; ok
-json_str() { local s=${1//\\/\\\\}; s=${s//\"/\\\"}; printf '"%s"' "$s"; }
+json_str() {
+  local s=${1//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\r'/\\r}
+  s=${s//$'\t'/\\t}
+  printf '"%s"' "$s"
+}
 step "login"
 # Body via stdin: the password never appears in the process list.
 printf '{"username":%s,"password":%s}' "$(json_str "$STRATA_USER")" "$(json_str "$STRATA_PASSWORD")" |

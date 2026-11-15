@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 /// Folder inside each local connection used for atomic writes; never listed.
 pub const ATOMIC_TMP_DIR: &str = ".strata-tmp";
 /// The server's internal folder (staging, thumbnails) inside the data dir.
-/// Reserved so a local connection can never point into it.
+/// The server refuses any local connection or raw path that resolves into it.
 pub const INTERNAL_DIR: &str = ".strata";
 
 /// Backend configuration. Serialised to JSON and encrypted at rest.
@@ -103,9 +103,10 @@ impl ConnectionConfig {
         }
         if rel
             .components()
-            .any(|c| c.as_os_str() == ATOMIC_TMP_DIR || c.as_os_str() == INTERNAL_DIR)
+            .next()
+            .is_some_and(|c| c.as_os_str() == ATOMIC_TMP_DIR)
         {
-            bail!("{ATOMIC_TMP_DIR} and {INTERNAL_DIR} are reserved");
+            bail!("{ATOMIC_TMP_DIR} is reserved");
         }
         Ok(Some(local_base.join(rel)))
     }
