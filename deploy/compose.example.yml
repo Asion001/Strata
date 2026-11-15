@@ -9,7 +9,8 @@ services:
     environment:
       DATABASE_URL: postgres://strata:${POSTGRES_PASSWORD}@strata-db/strata
     volumes:
-      - strata-data:/data
+      - strata-data:/data            # storage: user files and blobs
+      - strata-state:/var/lib/strata # server state: staging, thumbnails
     ports:
       - "8080:8080"
     depends_on: [strata-db]
@@ -26,4 +27,5 @@ services:
 
 volumes:
   strata-data:
+  strata-state:
   strata-db:

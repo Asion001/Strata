@@ -14,20 +14,21 @@ The image runs as an unprivileged user (uid 10001), listens on 8080, keeps all
 data under `/data`, and has a `HEALTHCHECK` on `/healthz` (200 when the database
 answers).
 
-Data layout inside `/data`:
+Two volumes:
 
-| Path           | What                                                        |
-|----------------|-------------------------------------------------------------|
-| `/data/blobs`  | default connection: every user's private hashed root        |
-| `/data/files`  | "Server files" connection, for raw mounts of plain files    |
-| `/data/.strata`| internal: upload staging, thumbnail cache (never mountable) |
+| Path               | What                                                       |
+|--------------------|------------------------------------------------------------|
+| `/data`            | storage base (`STRATA_LOCAL_BASE`) for local connections   |
+| `/data/blobs`      | default connection: every user's private hashed root       |
+| `/data/files`      | "Server files" connection, for raw mounts of plain files   |
+| `/var/lib/strata`  | server state (`STRATA_DATA_DIR`): upload staging, thumbnails |
 
-`/data` is also the base for admin "local folder" connections
-(`STRATA_LOCAL_BASE`); `blobs` and `files` are resolved below it, so changing
-`STRATA_LOCAL_BASE` moves them too. Mount a volume (or a host folder) at
-`/data`; a host folder must be writable by uid 10001
-(`chown -R 10001 /srv/strata`). Other folders can be bind mounted below
-`/data` and added as local connections by an admin.
+The state dir must not be inside the storage base (the server refuses to
+start otherwise), so no connection can ever reach it. Host folders mounted at
+either path must be writable by uid 10001 (`chown -R 10001 /srv/strata`).
+Other folders can be bind mounted below `/data` and added as local
+connections by an admin. `.strata-tmp` folders inside local connections hold
+in-progress atomic writes; they are hidden and cannot be mounted.
 
 ## Database
 

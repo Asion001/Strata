@@ -36,8 +36,7 @@ pub async fn app() -> Option<TestApp> {
     let cfg = Config {
         database_url: url.clone(),
         bind: "127.0.0.1:0".into(),
-        // Same as the default deployment: the data dir is the local base.
-        data_dir: dir.path().join("local"),
+        data_dir: dir.path().join("state"),
         local_base: dir.path().join("local"),
         default_store: "blobs".into(),
         files_dir: "files".into(),

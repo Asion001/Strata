@@ -19,16 +19,18 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tini curl \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --system --uid 10001 --home /data strata \
-    && mkdir -p /data && chown strata /data
+    && useradd --system --uid 10001 --home /var/lib/strata strata \
+    && mkdir -p /data /var/lib/strata && chown strata /data /var/lib/strata
 COPY --from=server /strata /usr/local/bin/strata
 COPY --from=web /web/build /app/web
 ENV STRATA_BIND=0.0.0.0:8080 \
-    STRATA_DATA_DIR=/data \
+    STRATA_DATA_DIR=/var/lib/strata \
+    STRATA_LOCAL_BASE=/data \
     STRATA_WEB_DIR=/app/web \
     RUST_LOG=info,sqlx=warn,tower_http=warn
 USER strata
-VOLUME /data
+# /data: storage (connections, default stores); /var/lib/strata: server state.
+VOLUME /data /var/lib/strata
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s CMD curl -fsS http://127.0.0.1:8080/healthz || exit 1
 ENTRYPOINT ["/usr/bin/tini", "--"]

@@ -104,25 +104,15 @@ impl VolumeLock {
     }
 }
 
-/// Is `abs` the server's internal folder (or inside it)?
-pub fn is_internal(st: &AppState, abs: &std::path::Path) -> bool {
-    let internal = st.cfg.data_dir.join(strata_storage::backend::INTERNAL_DIR);
-    let norm = |p: &std::path::Path| p.components().collect::<std::path::PathBuf>();
-    norm(abs).starts_with(norm(&internal))
-}
-
-/// Paths a raw local mount must never expose: the server's internal folder
-/// and the connection's atomic-write temp folder (checked on absolute paths).
-pub fn is_reserved(st: &AppState, m: &Mount, rel: &str) -> bool {
-    let Some(root) = &m.local_root else {
-        return false;
-    };
-    if m.is_hashed() {
-        return false;
-    }
-    let inside = paths::join(&m.base_path, rel);
-    inside.split('/').next() == Some(strata_storage::backend::ATOMIC_TMP_DIR)
-        || is_internal(st, &root.join(&inside))
+/// A raw local mount never exposes `.strata-tmp` folders (where atomic writes
+/// are staged), at any depth; no local connection or mount may point into
+/// one either. The server's own state lives outside the storage base.
+pub fn is_reserved(m: &Mount, rel: &str) -> bool {
+    m.connection_kind == "local"
+        && !m.is_hashed()
+        && paths::join(&m.base_path, rel)
+            .split('/')
+            .any(|c| c == strata_storage::backend::ATOMIC_TMP_DIR)
 }
 
 pub async fn hashed_store(st: &AppState, m: &Mount) -> ApiResult<HashedStore> {
@@ -330,7 +320,7 @@ async fn scan_dir_inner(
             continue;
         }
         let name = e.name().trim_end_matches('/').to_string();
-        if paths::validate_name(&name).is_err() || is_reserved(st, m, &paths::join(rel, &name)) {
+        if paths::validate_name(&name).is_err() || is_reserved(m, &paths::join(rel, &name)) {
             continue;
         }
         let meta = e.metadata();

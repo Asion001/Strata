@@ -33,10 +33,6 @@ pub struct Mount {
     /// Journal entries of the volume up to this seq predate the mount.
     pub journal_from: i64,
     pub created_at: DateTime<Utc>,
-    /// For local connections: the connection's folder on the server.
-    #[sqlx(skip)]
-    #[serde(skip)]
-    pub local_root: Option<std::path::PathBuf>,
 }
 
 impl Mount {
@@ -59,12 +55,6 @@ pub async fn user_mounts(st: &AppState, user_id: i64) -> ApiResult<Arc<Vec<Mount
         .fetch_all(&st.db)
         .await?;
     v.sort_by_key(|m| std::cmp::Reverse(m.path.len()));
-    for m in v.iter_mut().filter(|m| m.connection_kind == "local") {
-        m.local_root = st
-            .connection_config(m.connection_id)
-            .await?
-            .local_dir(&st.cfg.local_base)?;
-    }
     let v = Arc::new(v);
     st.mounts.insert(user_id, v.clone());
     Ok(v)
@@ -79,7 +69,7 @@ pub async fn resolve(st: &AppState, user_id: i64, path: &str) -> ApiResult<(Moun
     let mounts = user_mounts(st, user_id).await?;
     for m in mounts.iter() {
         if let Some(rest) = paths::strip_prefix(path, &m.path) {
-            if crate::vfs::is_reserved(st, m, rest) {
+            if crate::vfs::is_reserved(m, rest) {
                 return Err(ApiError::NotFound);
             }
             return Ok((m.clone(), rest.to_string()));
@@ -124,11 +114,9 @@ pub async fn create(
     }
     let base = paths::normalize(&req.base_path)?;
     check_access(&st, &u, req.connection_id).await?;
-    if let Some(dir) = st
-        .connection_config(req.connection_id)
-        .await?
-        .local_dir(&st.cfg.local_base)?
-        && crate::vfs::is_internal(&st, &dir.join(&base))
+    if base
+        .split('/')
+        .any(|c| c == strata_storage::backend::ATOMIC_TMP_DIR)
     {
         return Err(bad("that folder is reserved"));
     }

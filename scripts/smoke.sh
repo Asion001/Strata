@@ -42,6 +42,10 @@ json_str() {
   s=${s//$'\n'/\\n}
   s=${s//$'\r'/\\r}
   s=${s//$'\t'/\\t}
+  if [[ $s =~ [[:cntrl:]] ]]; then
+    echo "credentials contain control characters smoke.sh cannot encode" >&2
+    exit 2
+  fi
   printf '"%s"' "$s"
 }
 step "login"

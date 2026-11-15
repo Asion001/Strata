@@ -67,12 +67,7 @@ pub async fn thumbnail(
     {
         return Ok(StatusCode::NOT_MODIFIED.into_response());
     }
-    let dir = st
-        .cfg
-        .data_dir
-        .join(strata_storage::backend::INTERNAL_DIR)
-        .join("thumbs")
-        .join(&key[..2]);
+    let dir = st.cfg.data_dir.join("thumbs").join(&key[..2]);
     let file = dir.join(format!("{key}.jpg"));
     let bytes = match tokio::fs::read(&file).await {
         Ok(b) => b,

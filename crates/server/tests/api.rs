@@ -1060,49 +1060,78 @@ async fn healthz_and_bootstrap_layout() {
 }
 
 #[tokio::test]
-async fn internal_folders_are_never_exposed() {
+async fn reserved_folders_are_never_exposed() {
     let Some(t) = app().await else { return };
-    // no connection or mount may point into the internal folder
+    // no connection or mount may point into an atomic-write temp folder
     let (s, _) = t
         .json(
             "POST",
             "/api/connections",
-            json!({"name": "x", "config": {"kind": "local", "path": ".strata/staging"}}),
+            json!({"name": "x", "config": {"kind": "local", "path": "files/.strata-tmp"}}),
         )
         .await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
-    let c = local_conn(&t, "Root", "").await;
-    let (s, _) = t
-        .json(
-            "POST",
-            "/api/mounts",
-            json!({"path": "I", "connection_id": c, "base_path": ".strata", "mode": "raw"}),
-        )
-        .await;
-    assert_eq!(s, StatusCode::BAD_REQUEST);
-    // a raw mount over the whole data dir would also cover the hashed blob store
-    let (s, _) = t
-        .json(
-            "POST",
-            "/api/mounts",
-            json!({"path": "All", "connection_id": c, "mode": "raw"}),
-        )
-        .await;
-    assert_eq!(s, StatusCode::CONFLICT);
-    // a folder named .strata elsewhere is ordinary user data
     let f = local_conn(&t, "Files", "files").await;
+    for mode in ["raw", "hashed"] {
+        let (s, _) = t
+            .json("POST", "/api/mounts", json!({"path": format!("T{mode}"), "connection_id": f, "base_path": "a/.strata-tmp", "mode": mode}))
+            .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+    }
     t.ok(
         "POST",
         "/api/mounts",
         json!({"path": "F", "connection_id": f, "mode": "raw"}),
     )
     .await;
-    t.upload("F/.strata/mine.txt", b"mine").await;
-    assert_eq!(t.download("F/.strata/mine.txt").await, b"mine");
-    assert_eq!(t.names("F").await, vec![".strata"]);
-    // the atomic-write temp folder of a connection stays hidden
+    t.upload("F/a.txt", b"a").await; // the atomic write creates files/.strata-tmp
+    assert!(t.dir.path().join("local/files/.strata-tmp").exists());
+    assert_eq!(t.names("F").await, vec!["a.txt"]);
     assert_eq!(
         t.get("/api/files/list?path=F/.strata-tmp").await.0,
         StatusCode::NOT_FOUND
     );
+    // a folder named .strata is ordinary user data
+    t.upload("F/.strata/mine.txt", b"mine").await;
+    assert_eq!(t.download("F/.strata/mine.txt").await, b"mine");
+    // non-admins are refused local connections outright (403), whatever the path
+    t.ok(
+        "POST",
+        "/api/admin/users",
+        json!({"username": "eve", "password": "evepassword"}),
+    )
+    .await;
+    let mut eve = app_clone(&t);
+    eve.login("eve", "evepassword").await;
+    let (s, _) = eve
+        .json(
+            "POST",
+            "/api/connections/test",
+            json!({"config": {"kind": "local", "path": "files/.strata-tmp"}}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+}
+
+#[test]
+fn state_dir_inside_storage_base_is_refused() {
+    let mut cfg = strata_server::Config {
+        database_url: String::new(),
+        bind: String::new(),
+        data_dir: "/srv/data/state".into(),
+        local_base: "/srv/data".into(),
+        default_store: "blobs".into(),
+        files_dir: "files".into(),
+        web_dir: "/w".into(),
+        secret_key: "k".into(),
+        admin_user: None,
+        admin_password: None,
+        cookie_secure: true,
+        session_days: 1,
+        gc_grace_hours: 1,
+        raw_ttl_secs: 1,
+    };
+    assert!(cfg.clone().checked().is_err());
+    cfg.data_dir = "/var/lib/strata".into();
+    assert!(cfg.checked().is_ok());
 }

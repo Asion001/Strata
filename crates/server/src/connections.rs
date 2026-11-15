@@ -76,12 +76,7 @@ pub async fn check_access(st: &AppState, user: &User, connection_id: i64) -> Api
     }
 }
 
-fn validate(st: &AppState, user: &User, name: &str, cfg: &ConnectionConfig) -> ApiResult<()> {
-    if let Ok(Some(dir)) = cfg.local_dir(&st.cfg.local_base)
-        && crate::vfs::is_internal(st, &dir)
-    {
-        return Err(bad("that folder is reserved for the server"));
-    }
+fn validate(user: &User, name: &str, cfg: &ConnectionConfig) -> ApiResult<()> {
     if name.trim().is_empty() || name.len() > 100 {
         return Err(bad("name is required"));
     }
@@ -142,7 +137,7 @@ pub async fn create(
     AuthUser(u): AuthUser,
     Json(req): Json<UpsertReq>,
 ) -> ApiResult<Json<ConnectionView>> {
-    validate(&st, &u, &req.name, &req.config)?;
+    validate(&u, &req.name, &req.config)?;
     let op = req
         .config
         .operator(&st.cfg.local_base)
@@ -190,7 +185,7 @@ pub async fn update(
     Json(mut req): Json<UpsertReq>,
 ) -> ApiResult<Json<ConnectionView>> {
     check_access(&st, &u, id).await?;
-    validate(&st, &u, &req.name, &req.config)?;
+    validate(&u, &req.name, &req.config)?;
     let old = st.connection_config(id).await?;
     if old.kind() != req.config.kind() {
         return Err(bad("the backend type of a connection cannot change"));
@@ -291,7 +286,7 @@ pub async fn test(
     AuthUser(u): AuthUser,
     Json(mut req): Json<TestReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    validate(&st, &u, "test", &req.config)?;
+    validate(&u, "test", &req.config)?;
     if let Some(id) = req.id {
         check_access(&st, &u, id).await?;
         req.config.merge_secrets(&st.connection_config(id).await?);

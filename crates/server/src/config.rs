@@ -6,7 +6,8 @@ use anyhow::{Context, Result};
 pub struct Config {
     pub database_url: String,
     pub bind: String,
-    /// Server data dir: staging chunks, thumbnail cache, default local storage.
+    /// Server state: upload staging and thumbnail cache. Never inside
+    /// `local_base`, so no connection can reach it.
     pub data_dir: PathBuf,
     /// Local connections live below this folder.
     pub local_base: PathBuf,
@@ -35,12 +36,12 @@ fn env(name: &str) -> Option<String> {
 impl Config {
     pub fn from_env() -> Result<Self> {
         let data_dir = PathBuf::from(env("STRATA_DATA_DIR").unwrap_or_else(|| "./data".into()));
-        Ok(Self {
+        Self {
             database_url: env("DATABASE_URL").context("DATABASE_URL is required")?,
             bind: env("STRATA_BIND").unwrap_or_else(|| "0.0.0.0:8080".into()),
             local_base: env("STRATA_LOCAL_BASE")
                 .map(PathBuf::from)
-                .unwrap_or_else(|| data_dir.clone()),
+                .unwrap_or_else(|| data_dir.join("local")),
             default_store: env("STRATA_DEFAULT_STORE").unwrap_or_else(|| "blobs".into()),
             files_dir: env("STRATA_FILES_DIR").unwrap_or_else(|| "files".into()),
             web_dir: PathBuf::from(env("STRATA_WEB_DIR").unwrap_or_else(|| "./web/build".into())),
@@ -61,6 +62,22 @@ impl Config {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(30),
             data_dir,
-        })
+        }
+        .checked()
+    }
+
+    /// Refuse a state dir inside the storage base: users could reach it
+    /// through a local connection.
+    pub fn checked(self) -> Result<Self> {
+        let abs = |p: &std::path::Path| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+        let (d, l) = (abs(&self.data_dir), abs(&self.local_base));
+        if d.starts_with(&l) {
+            anyhow::bail!(
+                "STRATA_DATA_DIR ({}) must not be inside STRATA_LOCAL_BASE ({})",
+                d.display(),
+                l.display()
+            );
+        }
+        Ok(self)
     }
 }

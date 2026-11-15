@@ -62,10 +62,7 @@ impl AppState {
         sqlx::migrate!("./migrations").run(&db).await?;
         std::fs::create_dir_all(&cfg.data_dir)?;
         std::fs::create_dir_all(&cfg.local_base)?;
-        let staging = cfg
-            .data_dir
-            .join(strata_storage::backend::INTERNAL_DIR)
-            .join("staging");
+        let staging = cfg.data_dir.join("staging");
         std::fs::create_dir_all(&staging)?;
         let (events, _) = broadcast::channel(1024);
         Ok(AppState(Arc::new(Inner {
