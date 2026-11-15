@@ -114,7 +114,10 @@ pub async fn create(
     }
     let base = paths::normalize(&req.base_path)?;
     check_access(&st, &u, req.connection_id).await?;
-    if base.split('/').next() == Some(strata_storage::backend::ATOMIC_TMP_DIR) {
+    if matches!(
+        base.split('/').next(),
+        Some(strata_storage::backend::ATOMIC_TMP_DIR | strata_storage::backend::INTERNAL_DIR)
+    ) {
         return Err(bad("that folder is reserved"));
     }
     check_storage_overlap(&st, req.connection_id, &base, &req.mode).await?;

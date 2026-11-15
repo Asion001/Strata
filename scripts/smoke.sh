@@ -15,24 +15,41 @@ BASE="${BASE%/}"
 : "${STRATA_USER:?set STRATA_USER}" "${STRATA_PASSWORD:?set STRATA_PASSWORD}"
 BIN="${STRATA_BIN:-strata}"
 work=$(mktemp -d /tmp/strata-smoke.XXXXXX)
-trap 'rm -rf "$work"' EXIT
+# Readable by a containerised STRATA_BIN running as another uid.
+chmod 755 "$work"
+dir=""
+upload=""
+cleanup() {
+  # On failure, remove what we created on the server too.
+  if [[ -n "$upload" ]]; then c -X DELETE "$BASE/api/uploads/$upload" >/dev/null 2>&1 || true; fi
+  if [[ -n "$dir" ]]; then
+    c -H 'content-type: application/json' --data "{\"paths\":[\"$dir\"]}" "$BASE/api/files/delete" >/dev/null 2>&1 || true
+  fi
+  rm -rf "$work"
+}
+trap cleanup EXIT
 jar="$work/cookies"
 c() { curl -sS --fail-with-body ${CURL_EXTRA:-} -b "$jar" -c "$jar" -H 'x-strata: 1' "$@"; }
 step() { printf '%-30s ' "$1"; }
 ok() { echo "ok${1:+ ($1)}"; }
 
 step "healthz"; c "$BASE/healthz" >/dev/null; ok
+json_str() { local s=${1//\\/\\\\}; s=${s//\"/\\\"}; printf '"%s"' "$s"; }
 step "login"
-c -H 'content-type: application/json' \
-  --data "$(printf '{"username":"%s","password":"%s"}' "$STRATA_USER" "$STRATA_PASSWORD")" \
-  "$BASE/api/auth/login" >/dev/null; ok
+# Body via stdin: the password never appears in the process list.
+printf '{"username":%s,"password":%s}' "$(json_str "$STRATA_USER")" "$(json_str "$STRATA_PASSWORD")" |
+  c -H 'content-type: application/json' --data @- "$BASE/api/auth/login" >/dev/null
+ok
 
-dir="smoke-$(date +%s)-$RANDOM"
-step "mkdir $dir"
-c -H 'content-type: application/json' --data "{\"path\":\"$dir\"}" "$BASE/api/files/mkdir" >/dev/null; ok
+name="smoke-$(date +%s)-$RANDOM"
+step "mkdir $name"
+c -H 'content-type: application/json' --data "{\"path\":\"$name\"}" "$BASE/api/files/mkdir" >/dev/null
+dir="$name"
+ok
 
 f="$work/blob.bin"
 head -c $((20 * 1024 * 1024)) /dev/urandom > "$f"
+chmod 644 "$f"
 want=$($BIN hash "$f")
 chunks=$($BIN chunk "$f")
 spec=$(echo "$chunks" | awk 'BEGIN{printf "["} {printf "%s{\"hash\":\"%s\",\"size\":%s}", (NR>1?",":""), $3, $2} END{printf "]"}')
@@ -41,6 +58,7 @@ t0=$(date +%s)
 resp=$(c -H 'content-type: application/json' \
   --data "{\"path\":\"$dir/blob.bin\",\"size\":$(wc -c <"$f" | tr -d ' '),\"chunks\":$spec}" "$BASE/api/uploads")
 id=$(echo "$resp" | sed -E 's/.*"id":"([0-9a-f]+)".*/\1/')
+upload="$id"
 missing=$(echo "$resp" | sed -E 's/.*"missing":\[([0-9,]*)\].*/\1/' | tr ',' ' ')
 i=0
 while read -r off len hash; do
@@ -52,10 +70,12 @@ while read -r off len hash; do
   i=$((i + 1))
 done <<< "$chunks"
 c -X POST "$BASE/api/uploads/$id/commit" >/dev/null
+upload=""
 ok "$(( $(date +%s) - t0 ))s"
 
 step "download + compare"
 c "$BASE/api/files/content?path=$dir/blob.bin" -o "$work/back.bin"
+chmod 644 "$work/back.bin"
 got=$($BIN hash "$work/back.bin")
 [[ "$got" == "$want" ]] || { echo "HASH MISMATCH: $got != $want"; exit 1; }
 ok "blake3 match"
@@ -66,5 +86,7 @@ code=$(curl -sS ${CURL_EXTRA:-} -b "$jar" -o /dev/null -w '%{http_code}' -H 'ran
 ok
 
 step "delete"
-c -H 'content-type: application/json' --data "{\"paths\":[\"$dir\"]}" "$BASE/api/files/delete" >/dev/null; ok
+c -H 'content-type: application/json' --data "{\"paths\":[\"$dir\"]}" "$BASE/api/files/delete" >/dev/null
+dir=""
+ok
 echo "smoke test passed"

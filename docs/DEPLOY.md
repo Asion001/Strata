@@ -20,11 +20,14 @@ Data layout inside `/data`:
 |----------------|-------------------------------------------------------------|
 | `/data/blobs`  | default connection: every user's private hashed root        |
 | `/data/files`  | "Server files" connection, for raw mounts of plain files    |
-| `/data/staging`| chunks of uploads into raw volumes (cleaned after 2 days)   |
-| `/data/thumbs` | thumbnail cache                                             |
+| `/data/.strata`| internal: upload staging, thumbnail cache (never mountable) |
 
-Mount a volume (or a host folder) at `/data`. Other local folders can be bind
-mounted below `/data` and added as local connections by an admin.
+`/data` is also the base for admin "local folder" connections
+(`STRATA_LOCAL_BASE`); `blobs` and `files` are resolved below it, so changing
+`STRATA_LOCAL_BASE` moves them too. Mount a volume (or a host folder) at
+`/data`; a host folder must be writable by uid 10001
+(`chown -R 10001 /srv/strata`). Other folders can be bind mounted below
+`/data` and added as local connections by an admin.
 
 ## Database
 

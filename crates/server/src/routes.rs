@@ -17,21 +17,21 @@ async fn healthz(
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
     match sqlx::query("SELECT 1").execute(&st.db).await {
-        Ok(_) => Json(json!({ "ok": true })).into_response(),
-        Err(_) => (
-            axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({ "ok": false })),
-        )
-            .into_response(),
+        Ok(_) => Json(json!({ "ok": true, "version": env!("CARGO_PKG_VERSION") })).into_response(),
+        Err(e) => {
+            tracing::warn!("health check: database unavailable: {e}");
+            (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "ok": false })),
+            )
+                .into_response()
+        }
     }
 }
 
 pub fn router(st: AppState) -> Router {
     let api = Router::new()
-        .route(
-            "/health",
-            get(|| async { Json(json!({ "ok": true, "version": env!("CARGO_PKG_VERSION") })) }),
-        )
+        .route("/health", get(healthz))
         .route("/auth/login", post(auth::login))
         .route("/auth/logout", post(auth::logout))
         .route("/auth/me", get(auth::me))

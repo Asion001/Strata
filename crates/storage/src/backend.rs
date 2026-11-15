@@ -9,8 +9,11 @@ use opendal::layers::{RetryLayer, TimeoutLayer};
 use opendal::{Operator, services};
 use serde::{Deserialize, Serialize};
 
-/// Folder under the local storage base used for atomic writes; never listed.
+/// Folder inside each local connection used for atomic writes; never listed.
 pub const ATOMIC_TMP_DIR: &str = ".strata-tmp";
+/// The server's internal folder (staging, thumbnails) inside the data dir.
+/// Reserved so a local connection can never point into it.
+pub const INTERNAL_DIR: &str = ".strata";
 
 /// Backend configuration. Serialised to JSON and encrypted at rest.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -98,8 +101,11 @@ impl ConnectionConfig {
         if rel.components().any(|c| !matches!(c, Component::Normal(_))) {
             bail!("local path must stay inside the storage base");
         }
-        if rel.components().any(|c| c.as_os_str() == ATOMIC_TMP_DIR) {
-            bail!("{ATOMIC_TMP_DIR} is reserved");
+        if rel
+            .components()
+            .any(|c| c.as_os_str() == ATOMIC_TMP_DIR || c.as_os_str() == INTERNAL_DIR)
+        {
+            bail!("{ATOMIC_TMP_DIR} and {INTERNAL_DIR} are reserved");
         }
         Ok(Some(local_base.join(rel)))
     }
