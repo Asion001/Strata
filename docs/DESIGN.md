@@ -1,0 +1,119 @@
+# Strata design (summary)
+
+Strata is a self-hosted file cloud. It borrows ideas from Nextcloud but shares
+no code with it and offers no Nextcloud API compatibility (yet).
+
+## Stack
+
+* **Server**: Rust, axum on tokio, sqlx with PostgreSQL (SQLite may follow),
+  Apache OpenDAL for storage backends, BLAKE3 hashing, FastCDC chunking.
+* **Web UI**: SvelteKit + TypeScript, built as a static single-page app, served
+  by the Rust binary and installable as a PWA.
+* **Workspace**: `crates/server` (HTTP API), `crates/storage` (connections,
+  hashed store, chunker), `crates/sync` (placeholder for the sync client),
+  `web/`, `docs/`.
+
+## Storage model
+
+### Connections
+A connection is a storage backend (local folder, S3, FTP to start; all through
+OpenDAL) plus credentials. The config is stored as JSON encrypted with
+XChaCha20-Poly1305 (key derived from `STRATA_SECRET_KEY`). Each connection
+has a `capabilities` JSON column, e.g.
+
+```json
+{ "snapshots": "none|btrfs|zfs|s3_versioning|smb", "snapshots_create": false,
+  "rename": true, "range_read": true, "fs_type": "btrfs" }
+```
+
+For local connections the filesystem type is detected with `statfs(2)` when the
+connection is added, so phase 2 can use native btrfs/ZFS snapshots (falling
+back to Strata's own history elsewhere). Local folders always live below
+`STRATA_LOCAL_BASE` and only admins may create them. A background job probes
+every connection's health every 10 minutes.
+
+### Volumes and mounts
+A **volume** is `(connection, folder inside it, mode)`. A **mount** shows a
+volume at a folder of a user's tree: `(owner, path, volume)`. Each user has a
+private root mount (`path = ''`) on the server's default storage, created with
+the user. A user can mount any connection they own at any folder, including
+inside another mount, to any depth. A mount point shadows a real folder with
+the same name on its parent. Removing a mount never deletes data: remounting
+the same connection folder in the same mode brings the tree back.
+
+Modes, freely nestable inside each other:
+
+* **RAW**: backend folders match the tree. Listings are cached in `nodes`;
+  a folder is re-listed from the backend when its cache is older than
+  `STRATA_RAW_TTL_SECS` (default 30 s) or on a full rescan, which picks up
+  changes made outside Strata.
+* **HASHED**: content-addressed blobs named by their BLAKE3 hash, sharded as
+  `blobs/ab/cd/<hash>` under the volume folder. Files up to 4 MiB are one
+  blob; larger files are split with FastCDC (min 512 KiB, avg 2 MiB, max
+  8 MiB). The tree lives only in PostgreSQL (`nodes.chunks`,
+  `nodes.chunk_sizes`); a file's identity is BLAKE3 over its chunk hashes.
+
+Moves inside one hashed volume only update the database. Moves inside one raw
+volume use the backend's rename (a real `rename(2)` for local folders) or copy
+plus delete where there is none (S3). Moves across volumes copy, verify the
+destination's BLAKE3 against the source stream, then delete the source.
+Moving a mount point moves the mount itself.
+
+### Change journal
+Every tree change is recorded once, in the journal of its storage location
+(volume), so a folder seen by several users is stored once. Each volume (and
+each user's own tree, for mount points added, moved or removed) has a gap-free
+sequence allocated under a row lock in the inserting transaction, so sequence
+order is commit order. A user's feed (`GET /api/changes?cursor=TOKEN`, at most
+1,000 entries a page) merges the journals of the volumes they mount, mapped into
+each mount's path, with their own mount events. The cursor is an opaque token
+of scope -> seq; scopes the user cannot see are ignored. Without a cursor the
+endpoint returns the current position. Entries older than 30 days (or beyond
+1M per scope) are pruned; an older cursor gets `410` with `"resync": true`.
+Raw volumes on the same connection whose folders overlap both get a change
+(their listing cache is marked stale), and the UI warns when such an overlap is
+created. `GET /api/ws` pushes the newest cursor; instances learn about changes
+through PostgreSQL `LISTEN/NOTIFY`, carrying ids only.
+
+### Garbage collection
+Blobs no file and no pending upload reference are deleted after a grace
+period (`STRATA_GC_GRACE_HOURS`, default 24), in two steps: mark the row
+`deleting`, then (holding the row lock, re-checking) delete the object and the
+row. A `blobs` row is only inserted after its object is written; a writer that
+meets a `deleting` row rewrites the object and clears the flag, so a crash at
+any point never leaves a live row without its object. Re-using a blob bumps its
+age. One unreachable backend never stops GC elsewhere.
+
+### Write ordering
+Tree changes of one volume (including raw backend renames, the atomic close of
+a raw write, and raw rescans) run under a per-volume lock: an in-process queue
+in front of a PostgreSQL advisory lock, so journal order matches the order of
+the changes, even across server instances. Cross-volume moves copy and verify
+each file, then delete the source only if it is unchanged; folders are removed
+only once empty, so an entry that cannot be copied is never lost. Local writes
+go to a temp folder inside the connection and are renamed into place.
+
+## Uploads
+Resumable and chunked. The browser chunks with the same FastCDC parameters
+and gear table as the server (a parity test keeps them identical), hashes
+chunks with BLAKE3 (WASM), and asks which chunks it still has to send. For
+hashed volumes the answer only skips chunks the *same user* stored before, so
+it never reveals whether another user has a file; cross-user deduplication
+happens server-side (an already stored blob is not written twice). Raw volumes
+do not negotiate: every chunk is sent, staged per upload, and streamed to the
+backend on commit.
+
+Blob names are the plain BLAKE3 hash today. The store's naming function
+already accepts a per-connection key (BLAKE3 keyed mode) for when encryption
+at rest arrives, so the backend will not learn content hashes.
+
+## Security notes
+* Argon2id passwords; sessions are random tokens stored as BLAKE3 hashes.
+* Cookie sessions require an `X-Strata` header on mutating requests (CSRF).
+* File responses carry `Content-Security-Policy: sandbox` and `nosniff`; the UI
+  shows HTML as source text and SVG only through `<img>`.
+* Share links may have a password (Argon2) and an expiry.
+
+## Later phases
+Native snapshots and versions, sync client (`crates/sync`), WebDAV, video/PDF
+thumbnails, sharing between users, SQLite.
