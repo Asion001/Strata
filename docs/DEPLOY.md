@@ -10,9 +10,9 @@ docker build -t strata:local .          # on the target machine, or
 docker buildx build --platform linux/amd64 -t strata:local .
 ```
 
-The image runs as an unprivileged user (uid 10001), listens on 8080, keeps all
-data under `/data`, and has a `HEALTHCHECK` on `/healthz` (200 when the database
-answers).
+The image runs as an unprivileged user (uid 10001), listens on 8080, keeps
+storage under `/data` and server state under `/var/lib/strata` (back up both),
+and has a `HEALTHCHECK` on `/healthz` (200 when the database answers).
 
 Two volumes:
 
@@ -29,6 +29,9 @@ either path must be writable by uid 10001 (`chown -R 10001 /srv/strata`).
 Other folders can be bind mounted below `/data` and added as local
 connections by an admin. `.strata-tmp` folders inside local connections hold
 in-progress atomic writes; they are hidden and cannot be mounted.
+
+`STRATA_DEFAULT_STORE` and `STRATA_FILES_DIR` are used once, when the first
+account is created; after that the connections live in the database.
 
 ## Database
 

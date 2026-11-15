@@ -265,36 +265,24 @@ pub async fn create_user(
         Some(id) => id,
         None => {
             // First user: create the server's connections, owned by them:
-            // the default store for private roots, and a plain-files folder.
-            let files = ConnectionConfig::Local {
-                path: st.cfg.files_dir.clone(),
-            };
-            let fop = files.operator(&st.cfg.local_base)?;
-            let fcaps = Capabilities::detect(&files, &fop, &st.cfg.local_base);
-            let fenc = st.secrets.encrypt(&serde_json::to_vec(&files).unwrap())?;
-            sqlx::query(
-                "INSERT INTO connections (owner_id, name, kind, config_enc, capabilities)
-                 VALUES ($1, 'Server files', 'local', $2, $3)",
+            // a plain-files folder and the default store for private roots.
+            insert_local_connection(
+                st,
+                &mut tx,
+                user.id,
+                "Server files",
+                &st.cfg.files_dir,
+                false,
             )
-            .bind(user.id)
-            .bind(fenc)
-            .bind(sqlx::types::Json(fcaps))
-            .execute(&mut *tx)
             .await?;
-            let cfg = ConnectionConfig::Local {
-                path: st.cfg.default_store.clone(),
-            };
-            let op = cfg.operator(&st.cfg.local_base)?;
-            let caps = Capabilities::detect(&cfg, &op, &st.cfg.local_base);
-            let enc = st.secrets.encrypt(&serde_json::to_vec(&cfg).unwrap())?;
-            sqlx::query_scalar(
-                "INSERT INTO connections (owner_id, name, kind, config_enc, capabilities, is_default)
-                 VALUES ($1, 'Server storage', 'local', $2, $3, TRUE) RETURNING id",
+            insert_local_connection(
+                st,
+                &mut tx,
+                user.id,
+                "Server storage",
+                &st.cfg.default_store,
+                true,
             )
-            .bind(user.id)
-            .bind(enc)
-            .bind(sqlx::types::Json(caps))
-            .fetch_one(&mut *tx)
             .await?
         }
     };
@@ -321,6 +309,33 @@ pub async fn create_user(
     .await?;
     tx.commit().await?;
     Ok(user)
+}
+
+async fn insert_local_connection(
+    st: &AppState,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    owner: i64,
+    name: &str,
+    path: &str,
+    is_default: bool,
+) -> ApiResult<i64> {
+    let cfg = ConnectionConfig::Local {
+        path: path.to_string(),
+    };
+    let op = cfg.operator(&st.cfg.local_base)?;
+    let caps = Capabilities::detect(&cfg, &op, &st.cfg.local_base);
+    let enc = st.secrets.encrypt(&serde_json::to_vec(&cfg).unwrap())?;
+    Ok(sqlx::query_scalar(
+        "INSERT INTO connections (owner_id, name, kind, config_enc, capabilities, is_default)
+         VALUES ($1, $2, 'local', $3, $4, $5) RETURNING id",
+    )
+    .bind(owner)
+    .bind(name)
+    .bind(enc)
+    .bind(sqlx::types::Json(caps))
+    .bind(is_default)
+    .fetch_one(&mut **tx)
+    .await?)
 }
 
 /// Create the first admin from STRATA_ADMIN_USER / STRATA_ADMIN_PASSWORD when

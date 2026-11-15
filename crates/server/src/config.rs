@@ -71,6 +71,20 @@ impl Config {
     pub fn checked(self) -> Result<Self> {
         let abs = |p: &std::path::Path| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
         let (d, l) = (abs(&self.data_dir), abs(&self.local_base));
+        let store = strata_storage::paths::normalize(&self.default_store)
+            .map_err(|e| anyhow::anyhow!("STRATA_DEFAULT_STORE: {e}"))?;
+        let files = strata_storage::paths::normalize(&self.files_dir)
+            .map_err(|e| anyhow::anyhow!("STRATA_FILES_DIR: {e}"))?;
+        let overlap = |a: &str, b: &str| strata_storage::paths::strip_prefix(a, b).is_some();
+        if store.is_empty()
+            || files.is_empty()
+            || overlap(&store, &files)
+            || overlap(&files, &store)
+        {
+            anyhow::bail!(
+                "STRATA_DEFAULT_STORE and STRATA_FILES_DIR must be separate, non-empty folders"
+            );
+        }
         if d.starts_with(&l) {
             anyhow::bail!(
                 "STRATA_DATA_DIR ({}) must not be inside STRATA_LOCAL_BASE ({})",

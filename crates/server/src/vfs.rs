@@ -110,9 +110,7 @@ impl VolumeLock {
 pub fn is_reserved(m: &Mount, rel: &str) -> bool {
     m.connection_kind == "local"
         && !m.is_hashed()
-        && paths::join(&m.base_path, rel)
-            .split('/')
-            .any(|c| c == strata_storage::backend::ATOMIC_TMP_DIR)
+        && strata_storage::backend::has_reserved_component(&paths::join(&m.base_path, rel))
 }
 
 pub async fn hashed_store(st: &AppState, m: &Mount) -> ApiResult<HashedStore> {

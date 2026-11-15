@@ -11,11 +11,12 @@ async fn main() -> Result<()> {
     match args.get(1).map(String::as_str) {
         Some("chunk") => return chunk_file(args.get(2).map(String::as_str)),
         Some("hash") => {
-            let data = std::fs::read(
-                args.get(2)
-                    .ok_or_else(|| anyhow::anyhow!("usage: strata hash <file>"))?,
-            )?;
-            println!("{}", blake3::hash(&data).to_hex());
+            let path = args
+                .get(2)
+                .ok_or_else(|| anyhow::anyhow!("usage: strata hash <file>"))?;
+            let mut h = blake3::Hasher::new();
+            h.update_reader(std::fs::File::open(path)?)?;
+            println!("{}", h.finalize().to_hex());
             return Ok(());
         }
         _ => {}

@@ -62,6 +62,14 @@ impl AppState {
         sqlx::migrate!("./migrations").run(&db).await?;
         std::fs::create_dir_all(&cfg.data_dir)?;
         std::fs::create_dir_all(&cfg.local_base)?;
+        // Now that both exist, compare real paths (symlinks, `..`) too.
+        let (d, l) = (cfg.data_dir.canonicalize()?, cfg.local_base.canonicalize()?);
+        if d.starts_with(&l) {
+            anyhow::bail!(
+                "STRATA_DATA_DIR resolves inside STRATA_LOCAL_BASE ({})",
+                l.display()
+            );
+        }
         let staging = cfg.data_dir.join("staging");
         std::fs::create_dir_all(&staging)?;
         let (events, _) = broadcast::channel(1024);

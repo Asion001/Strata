@@ -102,7 +102,13 @@ pub fn router(st: AppState) -> Router {
         .fallback(ServeFile::new(&index));
 
     Router::new()
-        .route("/healthz", get(healthz))
+        .route(
+            "/healthz",
+            get(healthz).layer(SetResponseHeaderLayer::overriding(
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("no-store"),
+            )),
+        )
         .nest("/api", api)
         .fallback_service(static_files)
         .layer(
