@@ -10,6 +10,11 @@ pub struct Config {
     pub data_dir: PathBuf,
     /// Local connections live below this folder.
     pub local_base: PathBuf,
+    /// Folder (below `local_base`) of the default connection that holds every
+    /// user's private hashed root (`<store>/users/<id>`).
+    pub default_store: String,
+    /// Folder (below `local_base`) offered as a plain-files connection.
+    pub files_dir: String,
     /// Built SvelteKit app (adapter-static output).
     pub web_dir: PathBuf,
     /// Key material for credential encryption and share-link keys.
@@ -35,7 +40,9 @@ impl Config {
             bind: env("STRATA_BIND").unwrap_or_else(|| "0.0.0.0:8080".into()),
             local_base: env("STRATA_LOCAL_BASE")
                 .map(PathBuf::from)
-                .unwrap_or_else(|| data_dir.join("local")),
+                .unwrap_or_else(|| data_dir.clone()),
+            default_store: env("STRATA_DEFAULT_STORE").unwrap_or_else(|| "blobs".into()),
+            files_dir: env("STRATA_FILES_DIR").unwrap_or_else(|| "files".into()),
             web_dir: PathBuf::from(env("STRATA_WEB_DIR").unwrap_or_else(|| "./web/build".into())),
             secret_key: env("STRATA_SECRET_KEY")
                 .context("STRATA_SECRET_KEY is required (long random string)")?,

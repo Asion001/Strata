@@ -997,7 +997,7 @@ async fn store_blob_repairs_a_blob_gc_crashed_on() {
         .execute(&t.st.db)
         .await
         .unwrap();
-    std::fs::remove_dir_all(t.dir.path().join("local/users/1/blobs")).unwrap();
+    std::fs::remove_dir_all(t.dir.path().join("local/blobs/users/1/blobs")).unwrap();
     // the chunk is reported missing (row is `deleting`), re-sent and repaired
     assert_eq!(t.upload("b.txt", b"crash").await, vec![0]);
     assert_eq!(t.download("b.txt").await, b"crash");
@@ -1034,4 +1034,27 @@ async fn refused_move_creates_nothing() {
         .await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
     assert!(!t.dir.path().join("local/disk/r/a/sub").exists());
+}
+
+#[tokio::test]
+async fn healthz_and_bootstrap_layout() {
+    let Some(t) = app().await else { return };
+    let (s, v) = t.get("/healthz").await;
+    assert_eq!((s, v["ok"].as_bool()), (StatusCode::OK, Some(true)));
+    let (_, conns) = t.get("/api/connections").await;
+    let paths: Vec<(String, bool)> = conns
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| {
+            (
+                c["config"]["path"].as_str().unwrap().to_string(),
+                c["is_default"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    assert!(paths.contains(&("blobs".into(), true)));
+    assert!(paths.contains(&("files".into(), false)));
+    t.upload("x.txt", b"x").await;
+    assert!(t.dir.path().join("local/blobs/users/1/blobs").exists());
 }

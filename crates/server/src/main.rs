@@ -4,6 +4,22 @@ use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Small offline helpers (used by scripts/smoke.sh):
+    //   strata chunk <file>  -> "offset size blake3" per FastCDC chunk
+    //   strata hash <file>   -> BLAKE3 of the whole file
+    let args: Vec<String> = std::env::args().collect();
+    match args.get(1).map(String::as_str) {
+        Some("chunk") => return chunk_file(args.get(2).map(String::as_str)),
+        Some("hash") => {
+            let data = std::fs::read(
+                args.get(2)
+                    .ok_or_else(|| anyhow::anyhow!("usage: strata hash <file>"))?,
+            )?;
+            println!("{}", blake3::hash(&data).to_hex());
+            return Ok(());
+        }
+        _ => {}
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
@@ -35,4 +51,17 @@ async fn shutdown() {
     }
     #[cfg(not(unix))]
     let _ = ctrl_c.await;
+}
+
+fn chunk_file(path: Option<&str>) -> Result<()> {
+    let data = std::fs::read(path.ok_or_else(|| anyhow::anyhow!("usage: strata chunk <file>"))?)?;
+    let mut off = 0;
+    for len in strata_storage::chunker::chunk_lengths(&data) {
+        println!(
+            "{off} {len} {}",
+            blake3::hash(&data[off..off + len]).to_hex()
+        );
+        off += len;
+    }
+    Ok(())
 }

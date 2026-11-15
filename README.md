@@ -10,7 +10,7 @@ SvelteKit web app that installs as a PWA.
   downloads and media streaming, thumbnails, name search, share links with
   password and expiry, a per-volume change journal with websocket push.
 
-See [docs/DESIGN.md](docs/DESIGN.md) for how it works.
+See [docs/DESIGN.md](docs/DESIGN.md) for how it works and [docs/DEPLOY.md](docs/DEPLOY.md) for deployment.
 
 ## Quick start (Docker)
 

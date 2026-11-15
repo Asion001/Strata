@@ -264,9 +264,25 @@ pub async fn create_user(
     let conn_id: i64 = match default {
         Some(id) => id,
         None => {
-            // First user: create the server storage connection, owned by them.
+            // First user: create the server's connections, owned by them:
+            // the default store for private roots, and a plain-files folder.
+            let files = ConnectionConfig::Local {
+                path: st.cfg.files_dir.clone(),
+            };
+            let fop = files.operator(&st.cfg.local_base)?;
+            let fcaps = Capabilities::detect(&files, &fop, &st.cfg.local_base);
+            let fenc = st.secrets.encrypt(&serde_json::to_vec(&files).unwrap())?;
+            sqlx::query(
+                "INSERT INTO connections (owner_id, name, kind, config_enc, capabilities)
+                 VALUES ($1, 'Server files', 'local', $2, $3)",
+            )
+            .bind(user.id)
+            .bind(fenc)
+            .bind(sqlx::types::Json(fcaps))
+            .execute(&mut *tx)
+            .await?;
             let cfg = ConnectionConfig::Local {
-                path: String::new(),
+                path: st.cfg.default_store.clone(),
             };
             let op = cfg.operator(&st.cfg.local_base)?;
             let caps = Capabilities::detect(&cfg, &op, &st.cfg.local_base);

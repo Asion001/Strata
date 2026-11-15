@@ -11,6 +11,21 @@ use tower_http::trace::TraceLayer;
 use crate::state::AppState;
 use crate::{auth, connections, files, journal, mounts, shares, thumbs, uploads};
 
+/// Liveness and readiness: 200 only when the database answers.
+async fn healthz(
+    axum::extract::State(st): axum::extract::State<AppState>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match sqlx::query("SELECT 1").execute(&st.db).await {
+        Ok(_) => Json(json!({ "ok": true })).into_response(),
+        Err(_) => (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "ok": false })),
+        )
+            .into_response(),
+    }
+}
+
 pub fn router(st: AppState) -> Router {
     let api = Router::new()
         .route(
@@ -87,6 +102,7 @@ pub fn router(st: AppState) -> Router {
         .fallback(ServeFile::new(&index));
 
     Router::new()
+        .route("/healthz", get(healthz))
         .nest("/api", api)
         .fallback_service(static_files)
         .layer(
