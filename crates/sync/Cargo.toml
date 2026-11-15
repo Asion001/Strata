@@ -1,0 +1,8 @@
+[package]
+name = "strata-sync"
+description = "Placeholder for the Strata desktop/mobile sync engine (phase 3)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

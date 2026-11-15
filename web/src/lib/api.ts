@@ -1,0 +1,50 @@
+// Thin client for the Strata HTTP API.
+export class ApiError extends Error {
+  constructor(public status: number, message: string) {
+    super(message);
+  }
+}
+
+export async function api<T = any>(method: string, url: string, body?: unknown): Promise<T> {
+  const init: RequestInit = { method, headers: { 'x-strata': '1' }, credentials: 'same-origin' };
+  if (body !== undefined) {
+    (init.headers as Record<string, string>)['content-type'] = 'application/json';
+    init.body = JSON.stringify(body);
+  }
+  const r = await fetch(url, init);
+  if (!r.ok) {
+    let msg = r.statusText;
+    try {
+      msg = (await r.json()).error ?? msg;
+    } catch {}
+    if (r.status === 401 && !url.startsWith('/api/auth/') && !url.startsWith('/api/public/')) {
+      location.href = '/login?next=' + encodeURIComponent(location.pathname + location.search);
+    }
+    throw new ApiError(r.status, msg);
+  }
+  return r.json();
+}
+
+export const enc = encodeURIComponent;
+
+export interface Entry {
+  name: string;
+  is_dir: boolean;
+  size: number;
+  mtime: string;
+  etag: string | null;
+  mount_id: number | null;
+}
+
+export interface User {
+  id: number;
+  username: string;
+  is_admin: boolean;
+}
+
+export function contentUrl(path: string, download = false) {
+  return `/api/files/content?path=${enc(path)}${download ? '&download=1' : ''}`;
+}
+export function thumbUrl(path: string, etag: string | null, size = 128) {
+  return `/api/files/thumb?path=${enc(path)}&size=${size}&v=${enc(etag ?? '')}`;
+}

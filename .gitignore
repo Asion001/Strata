@@ -1,0 +1,8 @@
+/target
+/data
+node_modules
+/web/build
+/web/.svelte-kit
+.env
+*.env.local
+.private-patterns

@@ -1,0 +1,307 @@
+//! Resumable, chunked uploads.
+//!
+//! 1. `POST /api/uploads {path, size, chunks:[{hash,size}]}`: the client
+//!    splits the file with the shared FastCDC chunker and hashes each chunk
+//!    with BLAKE3. The answer lists the chunk indexes the server is missing.
+//! 2. `PUT /api/uploads/{id}/chunks/{hash}` for each missing chunk.
+//! 3. `POST /api/uploads/{id}/commit`.
+//!
+//! Hashed volumes: chunks go straight into the volume's blob store. The
+//! missing list only leaves out chunks *this user* stored before, so it never
+//! reveals whether someone else has a file; if another user already stored a
+//! chunk, the server still receives it and just skips writing it again.
+//!
+//! Raw volumes do not negotiate: every chunk of the file is sent and staged
+//! per upload on the server (the list only tracks resume progress), then
+//! streamed to the backend on commit.
+
+use std::collections::HashSet;
+
+use axum::Json;
+use axum::body::Bytes;
+use axum::extract::{Path, State};
+use chrono::{DateTime, Utc};
+use futures::StreamExt;
+use serde::Deserialize;
+use serde_json::json;
+use strata_storage::chunker::MAX_SIZE;
+use strata_storage::{Hash, paths};
+
+use crate::auth::{AuthUser, random_token};
+use crate::error::{ApiError, ApiResult, bad, conflict};
+use crate::mounts;
+use crate::state::AppState;
+use crate::vfs::{self, ByteStream};
+
+#[derive(Deserialize)]
+pub struct ChunkSpec {
+    pub hash: String,
+    pub size: i64,
+}
+
+#[derive(Deserialize)]
+pub struct CreateReq {
+    pub path: String,
+    pub size: i64,
+    pub chunks: Vec<ChunkSpec>,
+    pub mtime: Option<DateTime<Utc>>,
+}
+
+#[derive(sqlx::FromRow)]
+struct Upload {
+    path: String,
+    volume_id: i64,
+    size: i64,
+    chunks: Vec<Vec<u8>>,
+    chunk_sizes: Vec<i64>,
+    mtime: Option<DateTime<Utc>>,
+}
+
+async fn load(st: &AppState, user_id: i64, id: &str) -> ApiResult<Upload> {
+    sqlx::query_as("SELECT path, volume_id, size, chunks, chunk_sizes, mtime FROM uploads WHERE id = $1 AND user_id = $2")
+        .bind(id)
+        .bind(user_id)
+        .fetch_optional(&st.db)
+        .await?
+        .ok_or(ApiError::NotFound)
+}
+
+async fn is_hashed_volume(st: &AppState, volume_id: i64) -> ApiResult<bool> {
+    let mode: String = sqlx::query_scalar("SELECT mode FROM volumes WHERE id = $1")
+        .bind(volume_id)
+        .fetch_one(&st.db)
+        .await?;
+    Ok(mode == "hashed")
+}
+
+fn staging_dir(st: &AppState, id: &str) -> std::path::PathBuf {
+    st.staging.join(id)
+}
+
+/// Indexes of chunks the client still has to send.
+async fn missing(st: &AppState, user_id: i64, id: &str, up: &Upload) -> ApiResult<Vec<usize>> {
+    let present: HashSet<Vec<u8>> = if is_hashed_volume(st, up.volume_id).await? {
+        // Only chunks this user stored count (no cross-user disclosure), and
+        // only if GC is not deleting them; touching them keeps them until commit.
+        let owned: Vec<Vec<u8>> = sqlx::query_scalar(
+            "SELECT DISTINCT o.hash FROM blob_owners o
+             WHERE o.volume_id = $1 AND o.user_id = $2 AND o.hash = ANY($3)",
+        )
+        .bind(up.volume_id)
+        .bind(user_id)
+        .bind(&up.chunks)
+        .fetch_all(&st.db)
+        .await?;
+        let gone: HashSet<Vec<u8>> = vfs::touch_blobs(st, up.volume_id, &owned)
+            .await?
+            .into_iter()
+            .collect();
+        owned.into_iter().filter(|h| !gone.contains(h)).collect()
+    } else {
+        let dir = staging_dir(st, id);
+        let mut s = HashSet::new();
+        for c in up.chunks.iter().collect::<HashSet<_>>() {
+            if tokio::fs::try_exists(dir.join(hex::encode(c)))
+                .await
+                .unwrap_or(false)
+            {
+                s.insert(c.clone());
+            }
+        }
+        s
+    };
+    Ok(up
+        .chunks
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| !present.contains(*c))
+        .map(|(i, _)| i)
+        .collect())
+}
+
+pub async fn create(
+    State(st): State<AppState>,
+    AuthUser(u): AuthUser,
+    Json(req): Json<CreateReq>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let path = paths::normalize(&req.path)?;
+    let (m, rel) = mounts::resolve(&st, u.id, &path).await?;
+    if rel.is_empty() {
+        return Err(bad("cannot upload onto a mount point"));
+    }
+    if req.chunks.is_empty() || req.chunks.len() > 1_000_000 {
+        return Err(bad("bad chunk list"));
+    }
+    let mut hashes = Vec::with_capacity(req.chunks.len());
+    let mut sizes = Vec::with_capacity(req.chunks.len());
+    for c in &req.chunks {
+        let h: Hash = c.hash.parse().map_err(|_| bad("bad chunk hash"))?;
+        if c.size < 0 || c.size as usize > MAX_SIZE {
+            return Err(bad("chunk too large"));
+        }
+        hashes.push(h.0.to_vec());
+        sizes.push(c.size);
+    }
+    if sizes.iter().sum::<i64>() != req.size {
+        return Err(bad("chunk sizes do not add up to the file size"));
+    }
+    if let Ok(n) = vfs::stat(&st, &m, &rel).await
+        && n.is_dir
+    {
+        return Err(conflict("a folder with that name already exists"));
+    }
+    let id = random_token(16);
+    sqlx::query(
+        "INSERT INTO uploads (id, user_id, path, volume_id, size, chunks, chunk_sizes, mtime)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+    )
+    .bind(&id)
+    .bind(u.id)
+    .bind(&path)
+    .bind(m.volume_id)
+    .bind(req.size)
+    .bind(&hashes)
+    .bind(&sizes)
+    .bind(req.mtime)
+    .execute(&st.db)
+    .await?;
+    let up = load(&st, u.id, &id).await?;
+    let missing = missing(&st, u.id, &id, &up).await?;
+    Ok(Json(json!({ "id": id, "missing": missing })))
+}
+
+pub async fn status(
+    State(st): State<AppState>,
+    AuthUser(u): AuthUser,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let up = load(&st, u.id, &id).await?;
+    Ok(Json(
+        json!({ "id": id, "path": up.path, "size": up.size, "missing": missing(&st, u.id, &id, &up).await? }),
+    ))
+}
+
+pub async fn put_chunk(
+    State(st): State<AppState>,
+    AuthUser(u): AuthUser,
+    Path((id, hash)): Path<(String, String)>,
+    body: Bytes,
+) -> ApiResult<Json<serde_json::Value>> {
+    let up = load(&st, u.id, &id).await?;
+    let h: Hash = hash.parse().map_err(|_| bad("bad chunk hash"))?;
+    let idx = up
+        .chunks
+        .iter()
+        .position(|c| c[..] == h.0[..])
+        .ok_or_else(|| bad("chunk is not part of this upload"))?;
+    if up.chunk_sizes[idx] != body.len() as i64 {
+        return Err(bad("chunk size mismatch"));
+    }
+    let data = body;
+    let h2 = h;
+    let ok = tokio::task::spawn_blocking(move || (Hash::of(&data) == h2, data))
+        .await
+        .map_err(|e| ApiError::Internal(e.into()))?;
+    let (matches, data) = ok;
+    if !matches {
+        return Err(bad("chunk content does not match its hash"));
+    }
+    if is_hashed_volume(&st, up.volume_id).await? {
+        let m = volume_mount_for(&st, u.id, up.volume_id, &up.path).await?;
+        let store = vfs::hashed_store(&st, &m).await?;
+        vfs::store_blob(&st, &store, up.volume_id, &h, data).await?;
+        sqlx::query("INSERT INTO blob_owners (volume_id, hash, user_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING")
+            .bind(up.volume_id)
+            .bind(h.0.to_vec())
+            .bind(u.id)
+            .execute(&st.db)
+            .await?;
+    } else {
+        let dir = staging_dir(&st, &id);
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .map_err(|e| ApiError::Internal(e.into()))?;
+        let tmp = dir.join(format!(".{}.{}", h.hex(), rand::random::<u32>()));
+        tokio::fs::write(&tmp, &data)
+            .await
+            .map_err(|e| ApiError::Internal(e.into()))?;
+        tokio::fs::rename(&tmp, dir.join(h.hex()))
+            .await
+            .map_err(|e| ApiError::Internal(e.into()))?;
+    }
+    Ok(Json(json!({})))
+}
+
+/// The mount an upload targets (must still be the same volume).
+async fn volume_mount_for(
+    st: &AppState,
+    user_id: i64,
+    volume_id: i64,
+    path: &str,
+) -> ApiResult<mounts::Mount> {
+    let (m, _) = mounts::resolve(st, user_id, path).await?;
+    if m.volume_id != volume_id {
+        return Err(conflict(
+            "the destination folder changed; restart the upload",
+        ));
+    }
+    Ok(m)
+}
+
+pub async fn commit(
+    State(st): State<AppState>,
+    AuthUser(u): AuthUser,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let up = load(&st, u.id, &id).await?;
+    let miss = missing(&st, u.id, &id, &up).await?;
+    if !miss.is_empty() {
+        return Err(conflict(format!("{} chunks still missing", miss.len())));
+    }
+    let (m, rel) = mounts::resolve(&st, u.id, &up.path).await?;
+    if m.volume_id != up.volume_id {
+        return Err(conflict(
+            "the destination folder changed; restart the upload",
+        ));
+    }
+    let hashes: Vec<Hash> = up
+        .chunks
+        .iter()
+        .filter_map(|c| Hash::from_slice(c))
+        .collect();
+    if m.is_hashed() {
+        vfs::put_hashed_file(&st, &m, &rel, &hashes, &up.chunk_sizes, up.mtime).await?;
+    } else {
+        let dir = staging_dir(&st, &id);
+        let stream: ByteStream = Box::pin(futures::stream::iter(hashes.clone()).then(move |h| {
+            let f = dir.join(h.hex());
+            async move { tokio::fs::read(f).await.map(Bytes::from) }
+        }));
+        vfs::write_stream(&st, &m, &rel, stream).await?;
+    }
+    sqlx::query("DELETE FROM uploads WHERE id = $1")
+        .bind(&id)
+        .execute(&st.db)
+        .await?;
+    let _ = tokio::fs::remove_dir_all(staging_dir(&st, &id)).await;
+    let node = vfs::stat(&st, &m, &rel).await?;
+    Ok(Json(
+        json!({ "path": up.path, "name": node.name, "size": node.size, "mtime": node.mtime, "etag": node.etag }),
+    ))
+}
+
+pub async fn cancel(
+    State(st): State<AppState>,
+    AuthUser(u): AuthUser,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let r = sqlx::query("DELETE FROM uploads WHERE id = $1 AND user_id = $2")
+        .bind(&id)
+        .bind(u.id)
+        .execute(&st.db)
+        .await?;
+    if r.rows_affected() == 1 {
+        let _ = tokio::fs::remove_dir_all(staging_dir(&st, &id)).await;
+    }
+    Ok(Json(json!({})))
+}

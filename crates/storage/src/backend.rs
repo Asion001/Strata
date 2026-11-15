@@ -1,0 +1,297 @@
+//! Connections: a storage backend plus its credentials, turned into an OpenDAL
+//! [`Operator`].
+
+use std::path::{Component, Path, PathBuf};
+use std::time::Duration;
+
+use anyhow::{Result, bail};
+use opendal::layers::{RetryLayer, TimeoutLayer};
+use opendal::{Operator, services};
+use serde::{Deserialize, Serialize};
+
+/// Folder under the local storage base used for atomic writes; never listed.
+pub const ATOMIC_TMP_DIR: &str = ".strata-tmp";
+
+/// Backend configuration. Serialised to JSON and encrypted at rest.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum ConnectionConfig {
+    /// A folder on the server. `path` is relative to the server's
+    /// `STRATA_LOCAL_BASE`, so users cannot reach arbitrary server paths.
+    Local { path: String },
+    S3 {
+        bucket: String,
+        #[serde(default)]
+        region: Option<String>,
+        #[serde(default)]
+        endpoint: Option<String>,
+        access_key_id: String,
+        secret_access_key: String,
+        #[serde(default)]
+        root: Option<String>,
+    },
+    Ftp {
+        /// e.g. `ftp://host:21` or `ftps://host`
+        endpoint: String,
+        #[serde(default)]
+        user: Option<String>,
+        #[serde(default)]
+        password: Option<String>,
+        #[serde(default)]
+        root: Option<String>,
+    },
+}
+
+impl ConnectionConfig {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Local { .. } => "local",
+            Self::S3 { .. } => "s3",
+            Self::Ftp { .. } => "ftp",
+        }
+    }
+
+    /// A copy with secrets blanked, safe to send to the UI.
+    pub fn redacted(&self) -> Self {
+        let mut c = self.clone();
+        match &mut c {
+            Self::Local { .. } => {}
+            Self::S3 {
+                secret_access_key, ..
+            } => *secret_access_key = String::new(),
+            Self::Ftp { password, .. } => {
+                if password.is_some() {
+                    *password = Some(String::new())
+                }
+            }
+        }
+        c
+    }
+
+    /// Keep secrets from `old` when the UI sends a blank (redacted) value.
+    pub fn merge_secrets(&mut self, old: &Self) {
+        match (self, old) {
+            (
+                Self::S3 {
+                    secret_access_key, ..
+                },
+                Self::S3 {
+                    secret_access_key: o,
+                    ..
+                },
+            ) if secret_access_key.is_empty() => *secret_access_key = o.clone(),
+            (Self::Ftp { password, .. }, Self::Ftp { password: o, .. })
+                if password.as_deref() == Some("") =>
+            {
+                *password = o.clone()
+            }
+            _ => {}
+        }
+    }
+
+    /// Resolve a local connection's directory under `local_base`.
+    pub fn local_dir(&self, local_base: &Path) -> Result<Option<PathBuf>> {
+        let Self::Local { path } = self else {
+            return Ok(None);
+        };
+        let rel = Path::new(path.trim_start_matches('/'));
+        if rel.components().any(|c| !matches!(c, Component::Normal(_))) {
+            bail!("local path must stay inside the storage base");
+        }
+        if rel.components().any(|c| c.as_os_str() == ATOMIC_TMP_DIR) {
+            bail!("{ATOMIC_TMP_DIR} is reserved");
+        }
+        Ok(Some(local_base.join(rel)))
+    }
+
+    /// Build an OpenDAL operator rooted at this connection.
+    pub fn operator(&self, local_base: &Path) -> Result<Operator> {
+        static INIT: std::sync::Once = std::sync::Once::new();
+        INIT.call_once(opendal::install_default);
+        let op = match self {
+            Self::Local { .. } => {
+                let dir = self.local_dir(local_base)?.unwrap();
+                std::fs::create_dir_all(&dir)?;
+                // Writes land in a temp file and are renamed into place, so an
+                // interrupted upload never leaves a partial file at the target.
+                // Inside the connection's own folder: same filesystem, so the
+                // final rename never crosses devices.
+                let tmp = dir.join(ATOMIC_TMP_DIR);
+                std::fs::create_dir_all(&tmp)?;
+                Operator::new(
+                    services::Fs::default()
+                        .root(&dir.to_string_lossy())
+                        .atomic_write_dir(&tmp.to_string_lossy()),
+                )?
+            }
+            Self::S3 {
+                bucket,
+                region,
+                endpoint,
+                access_key_id,
+                secret_access_key,
+                root,
+            } => {
+                let mut b = services::S3::default()
+                    .bucket(bucket)
+                    .access_key_id(access_key_id)
+                    .secret_access_key(secret_access_key)
+                    .region(region.as_deref().unwrap_or("us-east-1"));
+                if let Some(e) = endpoint.as_deref().filter(|e| !e.is_empty()) {
+                    b = b.endpoint(e);
+                }
+                if let Some(r) = root.as_deref().filter(|r| !r.is_empty()) {
+                    b = b.root(r);
+                }
+                Operator::new(b)?
+            }
+            Self::Ftp {
+                endpoint,
+                user,
+                password,
+                root,
+            } => {
+                let mut b = services::Ftp::default().endpoint(endpoint);
+                if let Some(u) = user.as_deref().filter(|u| !u.is_empty()) {
+                    b = b.user(u);
+                }
+                if let Some(p) = password.as_deref().filter(|p| !p.is_empty()) {
+                    b = b.password(p);
+                }
+                if let Some(r) = root.as_deref().filter(|r| !r.is_empty()) {
+                    b = b.root(r);
+                }
+                Operator::new(b)?
+            }
+        };
+        Ok(op
+            .layer(TimeoutLayer::new().with_timeout(Duration::from_secs(60)))
+            .layer(RetryLayer::new().with_max_times(3)))
+    }
+}
+
+/// Native snapshot support a backend offers (used from phase 2 on).
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotKind {
+    #[default]
+    None,
+    Btrfs,
+    Zfs,
+    S3Versioning,
+    Smb,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct Capabilities {
+    pub snapshots: SnapshotKind,
+    /// Whether Strata can create snapshots itself (vs. only read existing ones).
+    pub snapshots_create: bool,
+    pub rename: bool,
+    pub range_read: bool,
+    /// Filesystem type name for local connections (e.g. "ext4", "btrfs").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fs_type: Option<String>,
+}
+
+impl Capabilities {
+    /// Detect what a connection can do. For local folders this inspects the
+    /// filesystem with statfs(2) to spot btrfs and ZFS.
+    pub fn detect(cfg: &ConnectionConfig, op: &Operator, local_base: &Path) -> Self {
+        let cap = op.info().capability();
+        let mut c = Capabilities {
+            rename: cap.rename,
+            range_read: cap.read,
+            ..Default::default()
+        };
+        if let Ok(Some(dir)) = cfg.local_dir(local_base) {
+            let fs = fs_type(&dir);
+            c.snapshots = match fs.as_deref() {
+                Some("btrfs") => SnapshotKind::Btrfs,
+                Some("zfs") => SnapshotKind::Zfs,
+                _ => SnapshotKind::None,
+            };
+            // Creating btrfs/ZFS snapshots needs privileges we do not assume yet.
+            c.snapshots_create = false;
+            c.fs_type = fs;
+        }
+        c
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub fn fs_type(dir: &Path) -> Option<String> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let c = CString::new(dir.as_os_str().as_bytes()).ok()?;
+    let mut s: libc::statfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statfs(c.as_ptr(), &mut s) } != 0 {
+        return None;
+    }
+    #[allow(clippy::unnecessary_cast)]
+    Some(
+        match s.f_type as i64 {
+            0x9123_683E => "btrfs",
+            0x2FC1_2FC1 => "zfs",
+            0xEF53 => "ext4",
+            0x5846_5342 => "xfs",
+            0x0102_1994 => "tmpfs",
+            0x794c_7630 => "overlayfs",
+            other => return Some(format!("0x{other:x}")),
+        }
+        .to_string(),
+    )
+}
+
+#[cfg(target_os = "macos")]
+pub fn fs_type(dir: &Path) -> Option<String> {
+    use std::ffi::{CStr, CString};
+    use std::os::unix::ffi::OsStrExt;
+    let c = CString::new(dir.as_os_str().as_bytes()).ok()?;
+    let mut s: libc::statfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statfs(c.as_ptr(), &mut s) } != 0 {
+        return None;
+    }
+    let name = unsafe { CStr::from_ptr(s.f_fstypename.as_ptr()) };
+    Some(name.to_string_lossy().into_owned())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn fs_type(_dir: &Path) -> Option<String> {
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_path_cannot_escape() {
+        let c = ConnectionConfig::Local {
+            path: "../etc".into(),
+        };
+        assert!(c.local_dir(Path::new("/data")).is_err());
+        let c = ConnectionConfig::Local {
+            path: "/users/a".into(),
+        };
+        assert_eq!(
+            c.local_dir(Path::new("/data")).unwrap().unwrap(),
+            Path::new("/data/users/a")
+        );
+    }
+
+    #[test]
+    fn redact_and_merge() {
+        let old = ConnectionConfig::S3 {
+            bucket: "b".into(),
+            region: None,
+            endpoint: None,
+            access_key_id: "a".into(),
+            secret_access_key: "s".into(),
+            root: None,
+        };
+        let mut new = old.redacted();
+        new.merge_secrets(&old);
+        assert_eq!(new, old);
+    }
+}

@@ -1,0 +1,29 @@
+# Standalone example: Strata + its own PostgreSQL.
+# Copy deploy/strata.env.example to strata.env and fill in the secrets.
+services:
+  strata:
+    image: ghcr.io/asion001/strata:latest
+    build: ..
+    restart: unless-stopped
+    env_file: strata.env
+    environment:
+      DATABASE_URL: postgres://strata:${POSTGRES_PASSWORD}@strata-db/strata
+    volumes:
+      - strata-data:/data
+    ports:
+      - "8080:8080"
+    depends_on: [strata-db]
+
+  strata-db:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: strata
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: strata
+    volumes:
+      - strata-db:/var/lib/postgresql
+
+volumes:
+  strata-data:
+  strata-db:
