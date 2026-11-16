@@ -45,6 +45,11 @@ export interface User {
 export function contentUrl(path: string, download = false) {
   return `/api/files/content?path=${enc(path)}${download ? '&download=1' : ''}`;
 }
+/** Image-preview route: the only place SVG is served as an image. Use it
+ *  only in <img> elements. */
+export function imageUrl(path: string) {
+  return `/api/files/image?path=${enc(path)}`;
+}
 export function thumbUrl(path: string, etag: string | null, size = 128) {
   return `/api/files/thumb?path=${enc(path)}&size=${size}&v=${enc(etag ?? '')}`;
 }

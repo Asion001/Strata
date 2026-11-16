@@ -65,7 +65,9 @@ pub async fn thumbnail(
         .get(header::IF_NONE_MATCH)
         .is_some_and(|v| v.as_bytes() == etag.as_bytes())
     {
-        return Ok(StatusCode::NOT_MODIFIED.into_response());
+        let mut resp = StatusCode::NOT_MODIFIED.into_response();
+        crate::safe::protect(resp.headers_mut());
+        return Ok(resp);
     }
     let dir = st.cfg.data_dir.join("thumbs").join(&key[..2]);
     let file = dir.join(format!("{key}.jpg"));
@@ -98,6 +100,7 @@ pub async fn thumbnail(
     };
     let mut resp = Response::new(Body::from(bytes));
     let h = resp.headers_mut();
+    crate::safe::protect(h);
     h.insert(header::CONTENT_TYPE, HeaderValue::from_static("image/jpeg"));
     h.insert(
         header::CACHE_CONTROL,

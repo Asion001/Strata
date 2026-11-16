@@ -110,8 +110,20 @@ at rest arrives, so the backend will not learn content hashes.
 ## Security notes
 * Argon2id passwords; sessions are random tokens stored as BLAKE3 hashes.
 * Cookie sessions require an `X-Strata` header on mutating requests (CSRF).
-* File responses carry `Content-Security-Policy: sandbox` and `nosniff`; the UI
-  shows HTML as source text and SVG only through `<img>`.
+* Uploaded files never run script in the app (`crates/server/src/safe.rs`).
+  Every response with user file bytes (content, downloads, the image-preview
+  route, thumbnails, and the share-link versions of all of them) sends
+  `Content-Security-Policy: sandbox; default-src 'none'; ...`, `nosniff`,
+  `Cross-Origin-Resource-Policy: same-origin` and `Referrer-Policy: no-referrer`.
+  The Content-Type comes from an allowlist keyed on magic bytes, never from the
+  extension alone: anything else is `text/plain; charset=utf-8` (if it looks
+  like text) or `application/octet-stream` as an attachment. HTML, SVG, XML, JS
+  and CSS are therefore served as plain text. SVG is `image/svg+xml` only on
+  `/files/image`, which the UI loads only through `<img>`. Content-Disposition
+  uses RFC 6266 `filename*` with control characters and quotes stripped.
+* The app's own pages have a strict CSP (scripts by hash, as the static SPA
+  has no per-request HTML for nonces; no `unsafe-eval`, only
+  `wasm-unsafe-eval` for the BLAKE3 WebAssembly).
 * Share links may have a password (Argon2) and an expiry.
 
 ## Later phases
