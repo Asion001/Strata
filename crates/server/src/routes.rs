@@ -11,12 +11,27 @@ use tower_http::trace::TraceLayer;
 use crate::state::AppState;
 use crate::{auth, connections, files, journal, mounts, shares, thumbs, uploads};
 
+/// Liveness and readiness: 200 only when the database answers.
+async fn healthz(
+    axum::extract::State(st): axum::extract::State<AppState>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match sqlx::query("SELECT 1").execute(&st.db).await {
+        Ok(_) => Json(json!({ "ok": true, "version": env!("CARGO_PKG_VERSION") })).into_response(),
+        Err(e) => {
+            tracing::warn!("health check: database unavailable: {e}");
+            (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "ok": false })),
+            )
+                .into_response()
+        }
+    }
+}
+
 pub fn router(st: AppState) -> Router {
     let api = Router::new()
-        .route(
-            "/health",
-            get(|| async { Json(json!({ "ok": true, "version": env!("CARGO_PKG_VERSION") })) }),
-        )
+        .route("/health", get(healthz))
         .route("/auth/login", post(auth::login))
         .route("/auth/logout", post(auth::logout))
         .route("/auth/me", get(auth::me))
@@ -87,6 +102,13 @@ pub fn router(st: AppState) -> Router {
         .fallback(ServeFile::new(&index));
 
     Router::new()
+        .route(
+            "/healthz",
+            get(healthz).layer(SetResponseHeaderLayer::overriding(
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("no-store"),
+            )),
+        )
         .nest("/api", api)
         .fallback_service(static_files)
         .layer(

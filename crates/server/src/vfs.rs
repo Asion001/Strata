@@ -104,13 +104,13 @@ impl VolumeLock {
     }
 }
 
-/// The atomic-write temp folder at the root of a local connection is Strata's,
-/// not the user's: hidden from listings and unreachable through raw mounts.
+/// A raw local mount never exposes `.strata-tmp` folders (where atomic writes
+/// are staged), at any depth; no local connection or mount may point into
+/// one either. The server's own state lives outside the storage base.
 pub fn is_reserved(m: &Mount, rel: &str) -> bool {
     m.connection_kind == "local"
         && !m.is_hashed()
-        && paths::join(&m.base_path, rel).split('/').next()
-            == Some(strata_storage::backend::ATOMIC_TMP_DIR)
+        && strata_storage::backend::has_reserved_component(&paths::join(&m.base_path, rel))
 }
 
 pub async fn hashed_store(st: &AppState, m: &Mount) -> ApiResult<HashedStore> {

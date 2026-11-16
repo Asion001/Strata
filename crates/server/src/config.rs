@@ -6,10 +6,16 @@ use anyhow::{Context, Result};
 pub struct Config {
     pub database_url: String,
     pub bind: String,
-    /// Server data dir: staging chunks, thumbnail cache, default local storage.
+    /// Server state: upload staging and thumbnail cache. Never inside
+    /// `local_base`, so no connection can reach it.
     pub data_dir: PathBuf,
     /// Local connections live below this folder.
     pub local_base: PathBuf,
+    /// Folder (below `local_base`) of the default connection that holds every
+    /// user's private hashed root (`<store>/users/<id>`).
+    pub default_store: String,
+    /// Folder (below `local_base`) offered as a plain-files connection.
+    pub files_dir: String,
     /// Built SvelteKit app (adapter-static output).
     pub web_dir: PathBuf,
     /// Key material for credential encryption and share-link keys.
@@ -30,12 +36,14 @@ fn env(name: &str) -> Option<String> {
 impl Config {
     pub fn from_env() -> Result<Self> {
         let data_dir = PathBuf::from(env("STRATA_DATA_DIR").unwrap_or_else(|| "./data".into()));
-        Ok(Self {
+        Self {
             database_url: env("DATABASE_URL").context("DATABASE_URL is required")?,
             bind: env("STRATA_BIND").unwrap_or_else(|| "0.0.0.0:8080".into()),
             local_base: env("STRATA_LOCAL_BASE")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| data_dir.join("local")),
+            default_store: env("STRATA_DEFAULT_STORE").unwrap_or_else(|| "blobs".into()),
+            files_dir: env("STRATA_FILES_DIR").unwrap_or_else(|| "files".into()),
             web_dir: PathBuf::from(env("STRATA_WEB_DIR").unwrap_or_else(|| "./web/build".into())),
             secret_key: env("STRATA_SECRET_KEY")
                 .context("STRATA_SECRET_KEY is required (long random string)")?,
@@ -54,6 +62,36 @@ impl Config {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(30),
             data_dir,
-        })
+        }
+        .checked()
+    }
+
+    /// Refuse a state dir inside the storage base: users could reach it
+    /// through a local connection.
+    pub fn checked(self) -> Result<Self> {
+        let abs = |p: &std::path::Path| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+        let (d, l) = (abs(&self.data_dir), abs(&self.local_base));
+        let store = strata_storage::paths::normalize(&self.default_store)
+            .map_err(|e| anyhow::anyhow!("STRATA_DEFAULT_STORE: {e}"))?;
+        let files = strata_storage::paths::normalize(&self.files_dir)
+            .map_err(|e| anyhow::anyhow!("STRATA_FILES_DIR: {e}"))?;
+        let overlap = |a: &str, b: &str| strata_storage::paths::strip_prefix(a, b).is_some();
+        if store.is_empty()
+            || files.is_empty()
+            || overlap(&store, &files)
+            || overlap(&files, &store)
+        {
+            anyhow::bail!(
+                "STRATA_DEFAULT_STORE and STRATA_FILES_DIR must be separate, non-empty folders"
+            );
+        }
+        if d.starts_with(&l) {
+            anyhow::bail!(
+                "STRATA_DATA_DIR ({}) must not be inside STRATA_LOCAL_BASE ({})",
+                d.display(),
+                l.display()
+            );
+        }
+        Ok(self)
     }
 }

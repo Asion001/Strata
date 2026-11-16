@@ -4,3 +4,9 @@ web/build
 web/.svelte-kit
 data
 .git
+deploy/local
+.env
+*.env
+**/.env
+**/*.env
+.private-patterns
