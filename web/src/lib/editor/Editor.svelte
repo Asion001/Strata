@@ -208,7 +208,10 @@
     // This tab's own entry: other tabs' drafts (and a recovery offer still
     // on screen) are never overwritten.
     await saveTabDraft(key, tab, { baseEtag: etag, baseHash, text, savedAt: Date.now() }).catch(() => {});
-    if (!isSignedIn(userId)) await clearTabDraft(key, tab).catch(() => {});
+    if (!isSignedIn(userId)) {
+      await clearTabDraft(key, tab).catch(() => {});
+      lastDraft = ''; // not stored after all: write it again once allowed
+    }
   }
 
   async function restoreDraft() {

@@ -96,7 +96,9 @@ pub async fn backfill_locations(st: &AppState) {
                     "recomputing connection locations (attempt {}): {e}",
                     attempt + 1
                 );
-                tokio::time::sleep(std::time::Duration::from_secs(1 << attempt)).await;
+                if attempt < 4 {
+                    tokio::time::sleep(std::time::Duration::from_secs(1 << attempt)).await;
+                }
             }
         }
     }

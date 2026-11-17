@@ -151,6 +151,11 @@ impl ConnectionConfig {
 
     /// Build an OpenDAL operator rooted at this connection.
     pub fn operator(&self, local_base: &Path) -> Result<Operator> {
+        // Same path rule as `location`: a root with `..` is refused, so
+        // every connection that can reach storage has a location.
+        if let Self::S3 { root, .. } | Self::Ftp { root, .. } = self {
+            canonical_folder(root.as_deref().unwrap_or(""))?;
+        }
         static INIT: std::sync::Once = std::sync::Once::new();
         INIT.call_once(opendal::install_default);
         let op = match self {
@@ -216,13 +221,16 @@ impl ConnectionConfig {
 }
 
 /// The one canonical form of a folder inside a storage, for every backend:
-/// `a//b`, `/a/b/` and `a/b` are the same place. `.` and `..` are refused
-/// rather than interpreted (FTP servers resolve them, S3 keys don't), so two
-/// spellings of one place can never look like different places.
+/// `a//b`, `/a/./b/` and `a/b` are the same place. `..` is refused (FTP
+/// servers resolve it, S3 keys don't), here and when building an operator,
+/// so a config that has one can't reach any storage at all.
 pub fn canonical_folder(p: &str) -> Result<String> {
-    let parts: Vec<&str> = p.split('/').filter(|c| !c.is_empty()).collect();
-    if parts.iter().any(|c| *c == "." || *c == "..") {
-        bail!("folder paths may not contain '.' or '..'");
+    let parts: Vec<&str> = p
+        .split('/')
+        .filter(|c| !c.is_empty() && *c != ".")
+        .collect();
+    if parts.contains(&"..") {
+        bail!("folder paths may not contain '..'");
     }
     Ok(parts.join("/"))
 }
@@ -426,6 +434,10 @@ mod tests {
             s3("a", Some("/data/store")).location(base).unwrap()
         );
         assert!(s3("a", Some("pub/../store")).location(base).is_err());
-        assert!(s3("a", Some("./data")).location(base).is_err());
+        assert!(s3("a", Some("pub/../store")).operator(base).is_err());
+        assert_eq!(
+            s3("a", Some("./data/.")).location(base).unwrap(),
+            s3("a", Some("data")).location(base).unwrap()
+        );
     }
 }

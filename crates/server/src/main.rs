@@ -31,7 +31,9 @@ async fn main() -> Result<()> {
     let bind = cfg.bind.clone();
     let st = AppState::new(cfg).await?;
     auth::bootstrap_admin(&st).await?;
-    strata_server::connections::backfill_locations(&st).await;
+    // In the background: start-up never waits on it.
+    let s = st.clone();
+    tokio::spawn(async move { strata_server::connections::backfill_locations(&s).await });
     background::spawn(st.clone());
     strata_server::journal::spawn_listener(st.clone());
     let app = routes::router(st);
