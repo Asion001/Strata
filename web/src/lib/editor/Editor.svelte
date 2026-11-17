@@ -278,7 +278,8 @@
     if (lastDraft !== null && (why === 'final' || Date.now() - lastTouch >= DRAFT_TOUCH_MS)) {
       touchTabDraft(key, tab);
       lastTouch = Date.now();
-      present = await hasTabDraft(key, tab).catch(() => false);
+      // Only needed when nothing new would be written anyway.
+      if (text === lastDraft) present = await hasTabDraft(key, tab).catch(() => false);
     }
     if (text === lastDraft && present) return 'stored';
     // Backing off: ticks wait; writes after a user action still try.
