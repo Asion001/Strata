@@ -17,9 +17,9 @@
     clearTabDraft,
     draftKey,
     expireDrafts,
-    holdTabLock,
+    DRAFT_TOUCH_MS,
     isSignedIn,
-    hasTabDraft,
+    touchTabDraft,
     AUTH_KEY,
     listDrafts,
     saveTabDraft,
@@ -74,6 +74,8 @@
   let draftTimer: ReturnType<typeof setInterval>;
   /** The text last stored as this tab's draft (null: nothing stored yet). */
   let lastDraft: string | null = null;
+  /** When this tab last stored or touched its draft. */
+  let lastTouch = 0;
   /** clean: nothing unsaved; waiting: backing off; signedOut: drafts are
    *  not kept for a signed-out user. */
   type DraftResult = 'clean' | 'stored' | 'waiting' | 'failed' | 'signedOut';
@@ -159,9 +161,6 @@
     editor?.setReadOnly(readOnly);
   }
 
-  /** While this editor is open, expiry leaves its draft alone. */
-  const releaseTabLock = holdTabLock(tab);
-
   onMount(async () => {
     showPreview = isMarkdown;
     expireDrafts().catch(() => {});
@@ -210,7 +209,6 @@
 
   onDestroy(() => {
     destroyed = true;
-    releaseTabLock();
     clearInterval(draftTimer);
     clearTimeout(previewTimer);
     editor?.destroy();
@@ -273,9 +271,14 @@
     if (!isSignedIn(userId)) return 'signedOut';
     const text = editor.getDoc();
     if (text === lastDraft) {
-      // The stored copy may have been removed meanwhile (e.g. cleared by
-      // another tab's save): a last chance checks it is there.
-      if (why !== 'final' || (await hasTabDraft(key, tab).catch(() => false))) return 'stored';
+      // Unchanged: mark it alive now and then (and always on a last
+      // chance), which also tells whether it is still there (another tab's
+      // save may have cleared it); if not, it is written again below.
+      if (why !== 'final' && Date.now() - lastTouch < DRAFT_TOUCH_MS) return 'stored';
+      if (await touchTabDraft(key, tab).catch(() => false)) {
+        lastTouch = Date.now();
+        return 'stored';
+      }
     }
     // Backing off: ticks wait; writes after a user action still try.
     if (why === 'tick' && inBackoff()) return 'waiting';
@@ -296,6 +299,7 @@
       return 'signedOut';
     }
     lastDraft = text;
+    lastTouch = Date.now();
     return 'stored';
   }
 

@@ -8,6 +8,9 @@ export interface Draft {
   baseHash?: string | null;
   text: string;
   savedAt: number;
+  /** Last time its tab was seen open (expiry counts from this); defaults
+   *  to `savedAt`. Kept apart so the edit time stays the edit time. */
+  aliveAt?: number;
   /** The editor instance (tab) that wrote it: a tab only clears its own. */
   tab?: string;
 }
@@ -36,10 +39,28 @@ export async function listDrafts(fileKey: string): Promise<Draft[]> {
   return all.sort((a, b) => b.savedAt - a.savedAt);
 }
 
-/** Is this tab's draft of a file stored? Only this tab writes its entry,
- *  and only through `saveTabDraft`, so it holds the last text it stored. */
-export async function hasTabDraft(fileKey: string, tab: string): Promise<boolean> {
-  return (await tx<number>('readonly', (s) => s.count(entryKey(fileKey, tab)))) > 0;
+/** Mark this tab's draft of a file alive (see `aliveAt`). False if it
+ *  isn't stored (any more). */
+export async function touchTabDraft(fileKey: string, tab: string, now = Date.now()): Promise<boolean> {
+  const db = await open();
+  try {
+    return await new Promise<boolean>((resolve, reject) => {
+      const t = db.transaction(STORE, 'readwrite');
+      const req = t.objectStore(STORE).openCursor(entryKey(fileKey, tab));
+      let found = false;
+      req.onsuccess = () => {
+        const c = req.result;
+        if (!c) return;
+        found = true;
+        c.update({ ...(c.value as Draft), aliveAt: now });
+      };
+      t.oncomplete = () => resolve(found);
+      t.onerror = () => reject(t.error);
+      t.onabort = () => reject(t.error ?? new Error('draft transaction aborted'));
+    });
+  } finally {
+    db.close();
+  }
 }
 
 /** Forget this tab's draft of a file. */
@@ -148,33 +169,12 @@ export const DRAFT_TTL_MS = 30 * 24 * 3600 * 1000;
 
 /** Remove drafts older than the TTL (one transaction, one draft in memory
  *  at a time). */
-export async function expireDrafts(now = Date.now()): Promise<void> {
-  const live = await liveTabs();
-  await deleteWhere((d) => now - d.savedAt > DRAFT_TTL_MS && !(d.tab && live.has(d.tab)));
-}
+export const expireDrafts = (now = Date.now()) =>
+  deleteWhere((d) => now - (d.aliveAt ?? d.savedAt) > DRAFT_TTL_MS);
 
-// An open editor holds a Web Lock named after its tab for its lifetime, so
-// expiry never removes the draft of a tab that is still open, however old.
-const LOCK_PREFIX = 'strata-draft-tab:';
-
-/** Hold this tab's lock until the returned function is called. */
-export function holdTabLock(tab: string): () => void {
-  let release = () => {};
-  const held = new Promise<void>((r) => (release = r));
-  try {
-    navigator.locks?.request(LOCK_PREFIX + tab, () => held).catch(() => {});
-  } catch {}
-  return release;
-}
-
-async function liveTabs(): Promise<Set<string>> {
-  try {
-    const q = await navigator.locks?.query();
-    return new Set((q?.held ?? []).map((l) => l.name ?? '').filter((n) => n.startsWith(LOCK_PREFIX)).map((n) => n.slice(LOCK_PREFIX.length)));
-  } catch {
-    return new Set();
-  }
-}
+/** How often an open tab marks its unchanged draft alive: well inside the
+ *  TTL, so an open tab's draft never expires. */
+export const DRAFT_TOUCH_MS = DRAFT_TTL_MS / 30;
 
 // Who is signed in, shared by every tab (localStorage is synchronous and
 // cross-tab). Autosave only writes while it names the draft's user.
