@@ -101,19 +101,18 @@ fn remember_class(st: &AppState, m: &Mount, rel: &str, node: &Node, class: safe:
     }
 }
 
-/// Classify from a separate read of the file's head (cached per version, so
-/// Range requests such as video seeking and repeat views skip it).
-async fn classify_cached(
+/// Classify from a separate read of the file's head, and cache the result.
+async fn classify_uncached(
     st: &AppState,
     m: &Mount,
     rel: &str,
     node: &Node,
 ) -> ApiResult<safe::Class> {
-    if let Some(c) = cached_class(st, m, rel, node) {
-        return Ok(c);
+    let head = head_bytes(st, m, rel, node).await?;
+    let class = safe::classify(&node.name, &head);
+    if head.len() as u64 == (node.size as u64).min(safe::SNIFF_LEN) {
+        remember_class(st, m, rel, node, class);
     }
-    let class = safe::classify(&node.name, &head_bytes(st, m, rel, node).await?);
-    remember_class(st, m, rel, node, class);
     Ok(class)
 }
 
@@ -162,9 +161,10 @@ pub async fn serve(
     // bytes therefore always come from the same version of the file.
     // The type is decided from the file's first SNIFF_LEN bytes (never
     // fewer, so a tiny Range probe can't decide it for everyone). When the
-    // body itself covers them, they come from the same read as the body:
-    // peek, then replay. Otherwise (mid-file or short ranges) the head is
-    // read on its own before the body is opened.
+    // body covers them, type and bytes come from the same read (peek, then
+    // replay). Mid-file or short ranges read the head separately first; on
+    // external backends a concurrent overwrite can then mislabel that one
+    // response, but the type is always a safe, non-executable one.
     let full_head = size.min(safe::SNIFF_LEN);
     let (class, stream) = match cached_class(st, m, rel, node) {
         Some(c) => (c, vfs::read_stream(st, m, rel, node, start, end).await?),
@@ -184,13 +184,16 @@ pub async fn serve(
                 }
             }
             let class = safe::classify(&node.name, &head);
-            remember_class(st, m, rel, node, class);
+            if head.len() as u64 == full_head {
+                // Only a complete head may decide for this version.
+                remember_class(st, m, rel, node, class);
+            }
             let replay = futures::stream::iter(peeked.into_iter().map(Ok));
             let stream: vfs::ByteStream = Box::pin(replay.chain(stream));
             (class, stream)
         }
         None => {
-            let class = classify_cached(st, m, rel, node).await?;
+            let class = classify_uncached(st, m, rel, node).await?;
             (class, vfs::read_stream(st, m, rel, node, start, end).await?)
         }
     };

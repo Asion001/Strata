@@ -186,16 +186,9 @@ fn mpeg_frame_len(h: &[u8]) -> Option<usize> {
 /// bytes of Windows-1251 text (e.g. "я...") can look like one.
 fn mpeg_frame(h: &[u8]) -> bool {
     match mpeg_frame_len(h) {
-        // The next header must follow, unless the frame is longer than the
-        // sniffed head (then `classify` lets text win if it looks like text).
-        Some(len) => {
-            if h.len() >= len + 4 {
-                mpeg_frame_len(&h[len..]).is_some()
-            } else {
-                // Frame longer than the head: only for a full head (big file).
-                h.len() as u64 >= SNIFF_LEN
-            }
-        }
+        // Frames are at most ~2.9 KB, so the next header is always inside a
+        // full head.
+        Some(len) => h.len() >= len + 4 && mpeg_frame_len(&h[len..]).is_some(),
         None => false,
     }
 }
@@ -522,7 +515,7 @@ mod tests {
             "application/octet-stream",
             "short file: needs 2 frames"
         );
-        // frame longer than a full head (free of second header): accepted
+        // MP3 frames always fit in the head: a missing second header fails
         let mut big = vec![0xFF, 0xFB, 0xE0, 0x00]; // 320 kbps at 44.1 kHz = 1044 bytes
         big.resize(SNIFF_LEN as usize, 0x01);
         assert_eq!(
@@ -541,6 +534,10 @@ mod tests {
             l1.push((x >> 16) as u8); // compressed audio looks random
         }
         assert_ne!(classify("a", &l1).base, "text/plain; charset=utf-16le");
+        // ...and with a second frame where it belongs, it is audio
+        let len = mpeg_frame_len(&l1).unwrap();
+        l1[len..len + 4].copy_from_slice(&[0xFF, 0xFE, 0x90, 0x00]);
+        assert_eq!(classify("a.mp2", &l1).base, "audio/mpeg");
         assert_eq!(
             classify("a.txt", &[0xFF, 0xE2, 0xE8, b'a']).base,
             "text/plain"
