@@ -18,6 +18,7 @@
     draftKey,
     expireDrafts,
     isSignedIn,
+    hasTabDraft,
     AUTH_KEY,
     listDrafts,
     saveTabDraft,
@@ -266,7 +267,11 @@
     if (!editor || !dirty) return 'clean';
     if (!isSignedIn(userId)) return 'signedOut';
     const text = editor.getDoc();
-    if (text === lastDraft) return 'stored';
+    if (text === lastDraft) {
+      // A last chance checks the copy is really there (it may have been
+      // removed meanwhile: expired, or cleared by another tab's save).
+      if (why !== 'final' || (await hasTabDraft(key, tab, text).catch(() => false))) return 'stored';
+    }
     // Backing off: ticks wait; writes after a user action still try.
     if (why === 'tick' && inBackoff()) return 'waiting';
     return persist(text, why !== 'tick');
@@ -279,9 +284,12 @@
   async function persist(text: string, byUser: boolean): Promise<DraftResult> {
     if (!isSignedIn(userId)) return 'signedOut';
     if (!(await storeDraft(text, byUser))) return 'failed';
-    // Signed out meanwhile: the sign-out's wipe of all drafts waits for
-    // this write to finish, so the entry goes with it.
-    if (!isSignedIn(userId)) return 'signedOut';
+    // Signed out meanwhile: don't leave the draft behind (if the wipe
+    // already ran, the database isn't recreated for this; see drafts.ts).
+    if (!isSignedIn(userId)) {
+      await clearTabDraft(key, tab).catch(() => {});
+      return 'signedOut';
+    }
     lastDraft = text;
     return 'stored';
   }
@@ -469,15 +477,14 @@
     // Close quietly only when nothing is unsaved or the draft is known to
     // be stored; a failed, slow or refused write asks first.
     const r = await atMost(autosave(true), 2000);
-    const why =
-      r === 'timeout'
-        ? 'The draft is still being written to this browser and may not be kept.'
-        : r === 'signedOut'
-          ? 'You were signed out, so no draft is kept.'
-          : r === 'failed' || r === undefined
-            ? 'The draft could not be stored in this browser.'
-            : null;
-    if (why && !confirm(`${why} Close anyway and lose the unsaved changes?`)) return;
+    if (r !== 'clean' && r !== 'stored') {
+      const why: Record<string, string> = {
+        timeout: 'The draft is still being written to this browser and may not be kept.',
+        signedOut: 'You were signed out, so no draft is kept.'
+      };
+      const msg = why[r ?? ''] ?? 'The draft could not be stored in this browser.';
+      if (!confirm(`${msg} Close anyway and lose the unsaved changes?`)) return;
+    }
     onclose();
   }
 
@@ -509,7 +516,11 @@
   onstorage={(e) => {
     // Signed out or in elsewhere: drafts may have been wiped, so store ours
     // again rather than trust the last write.
-    if (e.key === AUTH_KEY || e.key === null) lastDraft = null;
+    // Queued, so a write in flight can't set it back afterwards.
+    if (e.key === AUTH_KEY || e.key === null)
+      void afterDrafts(async () => {
+        lastDraft = null;
+      });
   }}
   onbeforeunload={beforeUnload} onpagehide={() => void autosave(true)} onkeydown={onKey} />
 

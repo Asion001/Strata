@@ -1,9 +1,21 @@
 // @vitest-environment jsdom
 import 'fake-indexeddb/auto';
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { DRAFT_TTL_MS, clearAfterSave, clearAllDrafts, clearDraft, listDrafts, markOfferSeen, offerSeen, saveTabDraft, draftKey, expireDrafts, getDraft, isSignedIn, keepOnlyUser, markSignedIn, markSignedOut, saveDraft } from './drafts';
 
 describe('drafts', () => {
+  beforeEach(() => markSignedIn(1));
+
+  it('a signed-out browser never recreates the wiped database', async () => {
+    await saveDraft({ key: 'k', baseEtag: null, text: 'x', savedAt: 1 });
+    markSignedOut();
+    await clearAllDrafts();
+    // a late writer from another tab
+    await expect(saveDraft({ key: 'k', baseEtag: null, text: 'late', savedAt: 2 })).rejects.toBeTruthy();
+    markSignedIn(1);
+    expect(await getDraft('k')).toBeUndefined();
+  });
+
   it('saves, reads and clears by user, mount and path', async () => {
     const k = draftKey(1, 7, 'docs/a.md');
     expect(k).toBe('1|7|docs/a.md');

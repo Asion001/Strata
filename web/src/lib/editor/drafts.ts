@@ -36,6 +36,12 @@ export async function listDrafts(fileKey: string): Promise<Draft[]> {
   return all.sort((a, b) => b.savedAt - a.savedAt);
 }
 
+/** Is exactly `text` stored as this tab's draft of a file? */
+export async function hasTabDraft(fileKey: string, tab: string, text: string): Promise<boolean> {
+  const d = await tx<Draft | undefined>('readonly', (s) => s.get(entryKey(fileKey, tab)) as IDBRequest<Draft | undefined>);
+  return d?.text === text;
+}
+
 /** Forget this tab's draft of a file. */
 export const clearTabDraft = (fileKey: string, tab: string) => clearDraft(entryKey(fileKey, tab));
 
@@ -101,7 +107,16 @@ function open(): Promise<IDBDatabase> {
     // Schema version 1 forever: a bump would lock out (and silently stop
     // the autosave of) tabs still running an older build.
     const req = indexedDB.open(DB, 1);
-    req.onupgradeneeded = () => req.result.createObjectStore(STORE, { keyPath: 'key' });
+    req.onupgradeneeded = () => {
+      // No one signed in: the drafts were wiped on sign-out (or never
+      // existed). A late writer from another tab must not bring the
+      // database back, so it isn't created.
+      if (!anyoneSignedIn()) {
+        req.transaction?.abort();
+        return;
+      }
+      req.result.createObjectStore(STORE, { keyPath: 'key' });
+    };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
   });
@@ -150,6 +165,14 @@ export function markSignedOut() {
     localStorage.removeItem(AUTH_KEY);
     localStorage.removeItem(SEEN_KEY);
   } catch {}
+}
+
+function anyoneSignedIn(): boolean {
+  try {
+    return localStorage.getItem(AUTH_KEY) !== null;
+  } catch {
+    return true; // no storage at all: drafts can't outlive the tab anyway
+  }
 }
 
 export function isSignedIn(userId: number): boolean {
