@@ -67,7 +67,15 @@ impl ConnectionConfig {
             // it), so moving the base doesn't make stored locations disagree.
             Self::Local { path } => {
                 self.local_dir(local_base)?; // validates the path
-                ("local".into(), path.trim_matches('/').to_string())
+                // Canonical form: `a//b`, `./a` and `a/` all become `a/b`, `a`.
+                let canon: Vec<String> = Path::new(path.trim_start_matches('/'))
+                    .components()
+                    .filter_map(|c| match c {
+                        Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
+                        _ => None,
+                    })
+                    .collect();
+                ("local".into(), canon.join("/"))
             }
             Self::S3 {
                 bucket,
@@ -400,5 +408,12 @@ mod tests {
             aws(Some("http://minio:9000")).location(base).unwrap(),
             aws(Some("https://MINIO:9000/")).location(base).unwrap()
         );
+        let local = |p: &str| {
+            ConnectionConfig::Local { path: p.into() }
+                .location(base)
+                .unwrap()
+        };
+        assert_eq!(local("store//users/5"), local("store/users/5"));
+        assert_eq!(local("store/users/5/"), local("/store/users/5"));
     }
 }

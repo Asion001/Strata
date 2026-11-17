@@ -174,17 +174,23 @@ pub async fn create(
     let enc = st
         .secrets
         .encrypt(&serde_json::to_vec(&req.config).unwrap())?;
+    let (sid, sfolder) = req
+        .config
+        .location(&st.cfg.local_base)
+        .map_err(|e| bad(format!("invalid config: {e}")))?;
     let id: i64 = sqlx::query_scalar(
-        "INSERT INTO connections (owner_id, name, kind, config_enc, capabilities) VALUES ($1, $2, $3, $4, $5) RETURNING id",
+        "INSERT INTO connections (owner_id, name, kind, config_enc, capabilities, storage_id, storage_folder)
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
     )
     .bind(u.id)
     .bind(req.name.trim())
     .bind(req.config.kind())
     .bind(enc)
     .bind(sqlx::types::Json(caps))
+    .bind(sid)
+    .bind(sfolder)
     .fetch_one(&st.db)
     .await?;
-    store_location(&st, id).await?;
     let res = probe_operator(&op).await;
     store_probe(&st, id, &res).await?;
     get_view(&st, id).await.map(Json)

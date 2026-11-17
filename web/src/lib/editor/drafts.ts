@@ -10,9 +10,6 @@ export interface Draft {
   savedAt: number;
   /** The editor instance (tab) that wrote it: a tab only clears its own. */
   tab?: string;
-  /** Someone declined to restore it: not offered again (the writing tab's
-   *  next autosave clears the mark; the data stays until it expires). */
-  dismissed?: boolean;
 }
 
 const DB = 'strata-editor';
@@ -70,9 +67,33 @@ async function deleteWhere(pred: (d: Draft) => boolean, range?: IDBKeyRange): Pr
 export const clearAfterSave = (fileKey: string, tab: string, saved: string) =>
   deleteWhere((d) => d.tab === tab || d.text === saved, fileRange(fileKey));
 
-/** Mark a draft as declined (never deletes another tab's work). */
-export async function dismissDraft(d: Draft): Promise<void> {
-  await saveDraft({ ...d, dismissed: true });
+// Offers declined or already restored here, remembered per draft version
+// (key + savedAt) outside IndexedDB: another tab's entry is never written or
+// deleted from this tab, since it may be that tab's live work.
+const SEEN_KEY = 'strata-draft-offers-seen';
+
+function seenMap(): Record<string, { savedAt: number; at: number }> {
+  try {
+    return JSON.parse(localStorage.getItem(SEEN_KEY) ?? '{}');
+  } catch {
+    return {};
+  }
+}
+
+/** Don't offer this draft version again (a newer autosave of it is offered). */
+export function markOfferSeen(d: Draft) {
+  try {
+    const m = seenMap();
+    const now = Date.now();
+    m[d.key] = { savedAt: d.savedAt, at: now };
+    // Keep the map small: marks older than the draft TTL are pointless.
+    for (const [k, v] of Object.entries(m)) if (now - v.at > DRAFT_TTL_MS) delete m[k];
+    localStorage.setItem(SEEN_KEY, JSON.stringify(m));
+  } catch {}
+}
+
+export function offerSeen(d: Draft): boolean {
+  return (seenMap()[d.key]?.savedAt ?? -1) >= d.savedAt;
 }
 
 function open(): Promise<IDBDatabase> {
@@ -127,6 +148,7 @@ export function markSignedIn(userId: number) {
 export function markSignedOut() {
   try {
     localStorage.removeItem(AUTH_KEY);
+    localStorage.removeItem(SEEN_KEY);
   } catch {}
 }
 

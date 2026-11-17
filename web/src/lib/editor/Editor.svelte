@@ -12,7 +12,8 @@
   import {
     clearAfterSave,
     clearDraft,
-    dismissDraft,
+    markOfferSeen,
+    offerSeen,
     clearTabDraft,
     draftKey,
     expireDrafts,
@@ -177,7 +178,7 @@
         // The newest unsaved work any tab left for this file.
         const all = await listDrafts(key).catch(() => [] as Draft[]);
         if (destroyed) return;
-        draftOffer = all.find((d) => !d.dismissed && d.text !== t.doc) ?? null;
+        draftOffer = all.find((d) => d.tab !== tab && !offerSeen(d) && d.text !== t.doc) ?? null;
         draftTimer = setInterval(autosave, 2000);
       }
     } catch (e) {
@@ -206,8 +207,6 @@
     lastDraft = text;
     // This tab's own entry: other tabs' drafts (and a recovery offer still
     // on screen) are never overwritten.
-    // (Writing the entry anew also drops any "dismissed" mark: live work
-    // is offered again if this tab later crashes.)
     await saveTabDraft(key, tab, { baseEtag: etag, baseHash, text, savedAt: Date.now() }).catch(() => {});
     if (!isSignedIn(userId)) await clearTabDraft(key, tab).catch(() => {});
   }
@@ -222,23 +221,20 @@
     editor.setDoc(d.text);
     draftOffer = null;
     lastDraft = '';
-    // The draft is this tab's now: write our copy first, and only once it is
-    // stored drop the old entry, so the text is never only in memory.
+    // Our own copy carries on from here; the old entry is left alone (it may
+    // be another tab's live work) and just isn't offered again here.
+    markOfferSeen(d);
     if (!isSignedIn(userId)) return;
-    try {
-      await saveTabDraft(key, tab, { baseEtag: etag, baseHash, text: d.text, savedAt: Date.now() });
-      lastDraft = d.text;
-      await clearDraft(d.key);
-    } catch {
-      // keep the old entry: nothing is lost
-    }
+    await saveTabDraft(key, tab, { baseEtag: etag, baseHash, text: d.text, savedAt: Date.now() }).catch(() => {});
+    lastDraft = d.text;
   }
 
-  async function discardDraft() {
+  function discardDraft() {
     const d = draftOffer;
     draftOffer = null;
-    // Only marked: it may be the live work of another open tab.
-    if (d) await dismissDraft(d).catch(() => {});
+    // Not deleted: it may be the live work of another open tab. It isn't
+    // offered again unless that tab saves newer text into it.
+    if (d) markOfferSeen(d);
   }
 
   async function put(target: string, body: Uint8Array<ArrayBuffer>, precondition: Record<string, string>) {

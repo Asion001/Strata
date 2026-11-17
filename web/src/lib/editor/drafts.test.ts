@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import 'fake-indexeddb/auto';
 import { describe, expect, it } from 'vitest';
-import { DRAFT_TTL_MS, clearAfterSave, clearAllDrafts, clearDraft, dismissDraft, listDrafts, saveTabDraft, draftKey, expireDrafts, getDraft, isSignedIn, keepOnlyUser, markSignedIn, markSignedOut, saveDraft } from './drafts';
+import { DRAFT_TTL_MS, clearAfterSave, clearAllDrafts, clearDraft, listDrafts, markOfferSeen, offerSeen, saveTabDraft, draftKey, expireDrafts, getDraft, isSignedIn, keepOnlyUser, markSignedIn, markSignedOut, saveDraft } from './drafts';
 
 describe('drafts', () => {
   it('saves, reads and clears by user, mount and path', async () => {
@@ -55,15 +55,14 @@ describe('drafts', () => {
     expect((await listDrafts(draftKey(5, 1, 'xy'))).length).toBe(1);
   });
 
-  it('dismissing keeps the data but marks it', async () => {
+  it('a declined offer is remembered per version without touching the entry', async () => {
     const f = draftKey(6, 1, 'z');
-    await saveTabDraft(f, 'A', { baseEtag: null, text: 'live', savedAt: Date.now() });
+    await saveTabDraft(f, 'A', { baseEtag: null, text: 'live', savedAt: 100 });
     const [d] = await listDrafts(f);
-    await dismissDraft(d);
-    const [again] = await listDrafts(f);
-    expect(again.text).toBe('live');
-    expect(again.dismissed).toBe(true);
-    await saveTabDraft(f, 'A', { baseEtag: null, text: 'live 2', savedAt: Date.now() });
-    expect((await listDrafts(f))[0].dismissed).toBeUndefined();
+    markOfferSeen(d);
+    expect(offerSeen(d)).toBe(true);
+    expect((await listDrafts(f))[0].text).toBe('live');
+    await saveTabDraft(f, 'A', { baseEtag: null, text: 'live 2', savedAt: 200 });
+    expect(offerSeen((await listDrafts(f))[0])).toBe(false);
   });
 });

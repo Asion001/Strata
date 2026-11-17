@@ -166,6 +166,45 @@ pub async fn create(
 }
 
 /// Where a volume's files physically live: (connection or local directory, folder).
+/// Do two storage locations overlap (same storage, one folder inside the
+/// other or equal)? The single rule used by mount guards and save locks.
+pub fn overlaps(a: &(String, String), b: &(String, String)) -> bool {
+    a.0 == b.0
+        && (paths::strip_prefix(&a.1, &b.1).is_some() || paths::strip_prefix(&b.1, &a.1).is_some())
+}
+
+/// Like `storage_root`, but `None` when the connection's config can't be
+/// read at all (such a connection can't reach any storage). Database errors
+/// are still errors.
+pub async fn storage_root_if_readable(
+    st: &AppState,
+    connection_id: i64,
+    base: &str,
+) -> ApiResult<Option<(String, String)>> {
+    let stored: (Option<String>, Option<String>, Vec<u8>) = sqlx::query_as(
+        "SELECT storage_id, storage_folder, config_enc FROM connections WHERE id = $1",
+    )
+    .bind(connection_id)
+    .fetch_one(&st.db)
+    .await?;
+    let (id, folder) = match stored {
+        (Some(id), Some(folder), _) => (id, folder),
+        (_, _, enc) => {
+            let cfg: Option<strata_storage::ConnectionConfig> = st
+                .secrets
+                .decrypt(&enc)
+                .ok()
+                .and_then(|p| serde_json::from_slice(&p).ok());
+            let Some(cfg) = cfg else { return Ok(None) };
+            let Ok(loc) = cfg.location(&st.cfg.local_base) else {
+                return Ok(None);
+            };
+            loc
+        }
+    };
+    Ok(Some((id, paths::join(&folder, base))))
+}
+
 pub async fn storage_root(
     st: &AppState,
     connection_id: i64,
@@ -218,17 +257,14 @@ pub async fn check_overlap_at(
         if Some(cid) == except {
             continue;
         }
-        let (oroot, ofolder) = match (sid, sfolder) {
+        let other = match (sid, sfolder) {
             (Some(r), Some(f)) => (r, paths::join(&f, &obase)),
-            _ => match storage_root(st, cid, &obase).await {
-                Ok(x) => x,
-                Err(_) => continue,
+            _ => match storage_root_if_readable(st, cid, &obase).await? {
+                Some(x) => x,
+                None => continue, // unreadable config: can't reach storage
             },
         };
-        if oroot == root
-            && (paths::strip_prefix(folder, &ofolder).is_some()
-                || paths::strip_prefix(&ofolder, folder).is_some())
-        {
+        if overlaps(&(root.to_string(), folder.to_string()), &other) {
             return Err(conflict(
                 "that folder overlaps a hashed store (or a raw folder holds this store); pick a separate folder",
             ));

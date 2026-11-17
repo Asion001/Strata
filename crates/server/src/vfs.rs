@@ -937,11 +937,10 @@ async fn overlapping_raw_volumes(st: &AppState, m: &Mount) -> ApiResult<Vec<i64>
             continue;
         }
         // A failure here must fail the save, never silently skip a lock.
-        let (r, f) = mounts::storage_root(st, cid, &base).await?;
-        if r == root
-            && (paths::strip_prefix(&f, &folder).is_some()
-                || paths::strip_prefix(&folder, &f).is_some())
-        {
+        let Some(other) = mounts::storage_root_if_readable(st, cid, &base).await? else {
+            continue; // unreadable config: can't reach storage, can't write
+        };
+        if mounts::overlaps(&(root.clone(), folder.clone()), &other) {
             out.push(id);
         }
     }
