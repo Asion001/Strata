@@ -336,8 +336,8 @@
         lastDraft = null;
         await clearAfterSave(key, tab, doc);
         // Typed during the save? That text's draft was just cleared with
-        // the rest: store it again now rather than after any backoff.
-        await writeDraft(true);
+        // the rest: store it again now (unless writes are backing off).
+        await writeDraft();
       });
       status = 'Saved';
       setTimeout(() => status === 'Saved' && (status = ''), 2000);
@@ -364,7 +364,9 @@
           // editor; the folder shows the copy.
           closeConflict();
           dirty = false;
-          await afterDrafts(() => clearTabDraft(key, tab));
+          // Wait briefly for the clean-up, but never let stuck storage keep
+          // the editor from closing.
+          await Promise.race([afterDrafts(() => clearTabDraft(key, tab)), new Promise((r) => setTimeout(r, 2000))]);
           alert(msg);
           onclose();
         }

@@ -936,12 +936,13 @@ async fn overlapping_raw_volumes(st: &AppState, m: &Mount) -> ApiResult<Vec<i64>
     .await?;
     let here = mounts::storage_root(st, m.connection_id, &m.base_path).await?;
     let mut out = vec![m.volume_id];
+    let mut locs = mounts::Locations::default();
     for (id, cid, base, sid, sfolder) in rows {
         if id == m.volume_id {
             continue;
         }
-        let Some(other) = mounts::location_of(st, cid, &base, (sid, sfolder)).await? else {
-            continue; // unreadable config: can't reach storage, can't write
+        let Some(other) = locs.of(st, cid, &base, (sid, sfolder)).await? else {
+            continue; // location unknown: can't reach storage, can't write
         };
         if mounts::overlaps(&here, &other) {
             out.push(id);

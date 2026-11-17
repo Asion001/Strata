@@ -119,11 +119,14 @@ pub async fn create(
     {
         return Err(bad("that folder is reserved"));
     }
-    // Check and create under the layout lock, so a concurrent volume or
-    // connection edit can't slip an overlap in between.
+    // Refuse an overlap before making any folder; the parent folder is made
+    // outside the layout lock (it may be slow remote storage).
+    check_storage_overlap(&st, req.connection_id, &base, &req.mode).await?;
     let (parent, name) = paths::split(&path).unwrap();
     // The mount point's parent must be a folder (create it if missing).
     vfs::mkdir_p(&st, u.id, parent).await?;
+    // Checked again and created under the layout lock, so a concurrent
+    // volume or connection edit can't slip an overlap in between.
     let (mut tx, _layout) = lock_layout(&st).await?;
     check_storage_overlap(&st, req.connection_id, &base, &req.mode).await?;
     let volume_id: i64 = sqlx::query_scalar(
@@ -177,48 +180,45 @@ pub fn overlaps(a: &(String, String), b: &(String, String)) -> bool {
         && (paths::strip_prefix(&a.1, &b.1).is_some() || paths::strip_prefix(&b.1, &a.1).is_some())
 }
 
-/// A volume's location from the stored columns of its connection (as
-/// fetched with a JOIN), falling back to reading the config; `None` if the
-/// config can't be read (such a connection can't reach any storage). The
-/// one rule shared by mount guards and save locks.
-pub async fn location_of(
-    st: &AppState,
-    connection_id: i64,
-    base: &str,
-    stored: (Option<String>, Option<String>),
-) -> ApiResult<Option<(String, String)>> {
-    match stored {
-        (Some(r), Some(f)) => Ok(Some((r, paths::join(&f, base)))),
-        _ => storage_root_if_readable(st, connection_id, base).await,
-    }
-}
+/// Volume locations for loops over many volumes: each connection's root is
+/// looked up once. A root comes from the connection's stored columns (as
+/// fetched with a JOIN), else from its config. It is unknown (`None`) when
+/// the config names no valid location, or can't be decrypted and no
+/// location was stored before: such a connection can't reach any storage
+/// now. The one rule shared by mount guards and save locks.
+#[derive(Default)]
+pub struct Locations(std::collections::HashMap<i64, Option<(String, String)>>);
 
-/// Like `storage_root`, but `None` when the connection's config names no
-/// valid location (such a connection can't reach any storage). A config
-/// that can't be decrypted is an error: where it points is unknown, so
-/// overlap checks fail closed until the server key is fixed.
-pub async fn storage_root_if_readable(
-    st: &AppState,
-    connection_id: i64,
-    base: &str,
-) -> ApiResult<Option<(String, String)>> {
-    let stored: (Option<String>, Option<String>, Vec<u8>) = sqlx::query_as(
-        "SELECT storage_id, storage_folder, config_enc FROM connections WHERE id = $1",
-    )
-    .bind(connection_id)
-    .fetch_one(&st.db)
-    .await?;
-    let (id, folder) = match stored {
-        (Some(id), Some(folder), _) => (id, folder),
-        (_, _, enc) => {
-            let cfg = st.decrypt_config(&enc)?;
-            let Ok(loc) = cfg.location(&st.cfg.local_base) else {
-                return Ok(None);
-            };
-            loc
-        }
-    };
-    Ok(Some((id, paths::join(&folder, base))))
+impl Locations {
+    pub async fn of(
+        &mut self,
+        st: &AppState,
+        connection_id: i64,
+        base: &str,
+        stored: (Option<String>, Option<String>),
+    ) -> ApiResult<Option<(String, String)>> {
+        let root = match self.0.get(&connection_id) {
+            Some(r) => r.clone(),
+            None => {
+                let r = match stored {
+                    (Some(id), Some(folder)) => Some((id, folder)),
+                    _ => {
+                        let enc: Vec<u8> =
+                            sqlx::query_scalar("SELECT config_enc FROM connections WHERE id = $1")
+                                .bind(connection_id)
+                                .fetch_one(&st.db)
+                                .await?;
+                        st.decrypt_config(&enc)
+                            .ok()
+                            .and_then(|c| c.location(&st.cfg.local_base).ok())
+                    }
+                };
+                self.0.insert(connection_id, r.clone());
+                r
+            }
+        };
+        Ok(root.map(|(id, folder)| (id, paths::join(&folder, base))))
+    }
 }
 
 pub async fn storage_root(
@@ -273,8 +273,7 @@ pub async fn check_storage_overlap(
 
 /// Are these (`root`, `folder`, `mode`) places clear of every volume of the
 /// opposite mode? Volumes on `except` (the connection being edited) are left
-/// out. A connection with no valid location can't touch any storage, so it
-/// can't overlap anything and is skipped.
+/// out, as are connections whose location is unknown (see `Locations`).
 pub async fn check_overlap_at(
     st: &AppState,
     places: &[(String, String, String)],
@@ -283,21 +282,23 @@ pub async fn check_overlap_at(
     if places.is_empty() {
         return Ok(());
     }
-    // Every volume, fetched once; each is placed once.
+    // Volumes of a mode opposite to some place's, fetched once.
     // (connection id, base path, mode, stored storage id, stored folder)
     type Row = (i64, String, String, Option<String>, Option<String>);
-    let all: Vec<Row> = sqlx::query_as(
+    let modes: Vec<&str> = places.iter().map(|(_, _, m)| m.as_str()).collect();
+    let others: Vec<Row> = sqlx::query_as(
         "SELECT v.connection_id, v.base_path, v.mode, c.storage_id, c.storage_folder
-         FROM volumes v JOIN connections c ON c.id = v.connection_id",
+         FROM volumes v JOIN connections c ON c.id = v.connection_id
+         WHERE v.mode <> ANY($1) AND c.id IS DISTINCT FROM $2",
     )
+    .bind(&modes)
+    .bind(except)
     .fetch_all(&st.db)
     .await?;
-    for (cid, obase, omode, sid, sfolder) in all {
-        if Some(cid) == except || places.iter().all(|(_, _, m)| *m == omode) {
-            continue;
-        }
-        let Some(other) = location_of(st, cid, &obase, (sid, sfolder)).await? else {
-            continue; // no valid location: can't reach storage
+    let mut locs = Locations::default();
+    for (cid, obase, omode, sid, sfolder) in others {
+        let Some(other) = locs.of(st, cid, &obase, (sid, sfolder)).await? else {
+            continue; // location unknown: can't reach storage
         };
         for (root, folder, mode) in places {
             if *mode != omode && overlaps(&(root.clone(), folder.clone()), &other) {

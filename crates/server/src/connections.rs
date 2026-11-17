@@ -63,10 +63,10 @@ impl Row {
 }
 
 /// Compute and store a connection's storage location (see migration 0006).
-/// When none can be computed the stored one is cleared rather than trusted:
-/// an invalid location (e.g. a bad path) can't reach storage, and an
-/// undecryptable config makes overlap checks fail closed (see
-/// `mounts::storage_root_if_readable`) until the server key is fixed.
+/// A config that names no valid location (e.g. a bad path) has its stored
+/// one cleared: it can't reach storage. One that can't be decrypted or
+/// parsed keeps the last known location (the fault may be the server's key,
+/// and overlap checks keep working from it) and returns the error.
 pub async fn store_location(st: &AppState, id: i64) -> ApiResult<(String, String)> {
     // The row lock orders this against a concurrent `update`, which writes
     // its config and location together.
@@ -77,9 +77,8 @@ pub async fn store_location(st: &AppState, id: i64) -> ApiResult<(String, String
             .fetch_optional(&mut *tx)
             .await?
             .ok_or(ApiError::NotFound)?;
-    let loc = st
-        .decrypt_config(&enc)
-        .and_then(|cfg| cfg.location(&st.cfg.local_base).map_err(ApiError::Internal));
+    let cfg = st.decrypt_config(&enc)?;
+    let loc = cfg.location(&st.cfg.local_base).map_err(ApiError::Internal);
     let (sid, folder) = match &loc {
         Ok((sid, folder)) => (Some(sid.as_str()), Some(folder.as_str())),
         Err(_) => (None, None),
@@ -98,7 +97,8 @@ pub async fn store_location(st: &AppState, id: i64) -> ApiResult<(String, String
 }
 
 /// Recompute every connection's location at start-up, so rows written by
-/// older versions (missing, or in an older format) always match today's rule.
+/// older versions (missing, or in an older format) match today's rule.
+/// Configs that can't be read keep theirs (see `store_location`).
 pub async fn backfill_locations(st: &AppState) {
     let mut ids: Option<Vec<i64>> = None;
     for attempt in 0..5 {
@@ -262,11 +262,18 @@ pub async fn update(
 ) -> ApiResult<Json<ConnectionView>> {
     check_access(&st, &u, id).await?;
     validate(&u, &req.name, &req.config)?;
-    let old = st.connection_config(id).await?;
-    if old.kind() != req.config.kind() {
-        return Err(bad("the backend type of a connection cannot change"));
+    // An old config that can't be decrypted (e.g. after a key change) can
+    // still be replaced, with its secrets entered again.
+    let old_enc: Vec<u8> = sqlx::query_scalar("SELECT config_enc FROM connections WHERE id = $1")
+        .bind(id)
+        .fetch_one(&st.db)
+        .await?;
+    if let Ok(old) = st.decrypt_config(&old_enc) {
+        if old.kind() != req.config.kind() {
+            return Err(bad("the backend type of a connection cannot change"));
+        }
+        req.config.merge_secrets(&old);
     }
-    req.config.merge_secrets(&old);
     let op = req
         .config
         .operator(&st.cfg.local_base)
