@@ -4,10 +4,12 @@
  *
  * Only the theme and utilities layers load. Tailwind's preflight (its CSS
  * reset) is left out, and the existing styles below stay unlayered, so they
- * keep winning over any utility. Both change in the next UI step, which
- * rebuilds the app shell: preflight comes in, and the old element styles
- * are scoped to the pages that still need them, so shadcn-svelte components
- * render as designed.
+ * keep winning over any utility. So shadcn-svelte components are not
+ * usable yet. The next UI step, which rebuilds the app shell with the first
+ * components, finishes the setup against real components: preflight and
+ * shadcn's base rule (theme border and outline colors), scoping the old
+ * element styles, tw-animate-css, and the rem scale (the root font size is
+ * 15px, so rem-based sizes come out about 6% smaller).
  *
  * `dark:` uses Tailwind's default, prefers-color-scheme, which is the same
  * switch the variables below use.
@@ -16,9 +18,12 @@
 @import 'tailwindcss/theme.css' layer(theme);
 @import 'tailwindcss/utilities.css' layer(utilities) source(none);
 
-/* Only app source generates utilities; unit tests are left out. */
-@source './**/*.{svelte,ts}';
-@source not './**/*.test.ts';
+/*
+ * Only shadcn-svelte components generate utilities for now, so words in the
+ * existing pages' styles can't turn into stray utility classes. The next
+ * step widens this to the pages it rebuilds.
+ */
+@source './lib/components/**/*.{svelte,ts}';
 
 /*
  * shadcn-svelte's palette, mapped onto Strata's existing variables so old and
@@ -58,6 +63,11 @@
   --sidebar-ring: var(--accent);
 }
 
+/* One font stack for old pages (the :root rule below) and font-sans. */
+@theme {
+  --font-sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+}
+
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -86,7 +96,6 @@
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
-  --font-sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
@@ -106,7 +115,7 @@
   --ok: #16a34a;
   --radius: 10px;
   color-scheme: light dark;
-  font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  font-family: var(--font-sans);
   font-size: 15px;
 }
 @media (prefers-color-scheme: dark) {
