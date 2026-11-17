@@ -50,6 +50,11 @@ export function contentUrl(path: string, download = false) {
 export function imageUrl(path: string) {
   return `/api/files/image?path=${enc(path)}`;
 }
+/** Where to load a file for previewing: SVG only through the image route. */
+export function previewUrl(path: string) {
+  return isSvg(path) ? imageUrl(path) : contentUrl(path);
+}
+export const isSvg = (name: string) => /\.svg$/i.test(name);
 export function thumbUrl(path: string, etag: string | null, size = 128) {
   return `/api/files/thumb?path=${enc(path)}&size=${size}&v=${enc(etag ?? '')}`;
 }

@@ -33,6 +33,8 @@ pub struct Inner {
     /// user id -> that user's mounts, longest path first
     pub mounts: DashMap<i64, Arc<Vec<Mount>>>,
     pub events: broadcast::Sender<ChangeEvent>,
+    /// Cache of file-serving decisions (see `files::serve`).
+    pub decisions: DashMap<String, crate::safe::Decision>,
     /// volume id -> in-process queue in front of the volume's advisory lock
     pub volume_locks: DashMap<i64, Arc<tokio::sync::Mutex<()>>>,
     /// Max concurrent volume-lock holders (each pins one pool connection).
@@ -80,6 +82,7 @@ impl AppState {
             ops: DashMap::new(),
             mounts: DashMap::new(),
             events,
+            decisions: DashMap::new(),
             volume_locks: DashMap::new(),
             lock_permits: Arc::new(tokio::sync::Semaphore::new(8)),
             staging,

@@ -14,7 +14,7 @@ use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 pub const FILE_CSP: &str = "sandbox; default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'";
 
 /// Bytes read from the start of a file to decide its type.
-pub const SNIFF_LEN: u64 = 512;
+pub const SNIFF_LEN: u64 = 4096; // enough for long XML/SVG prologs
 
 /// Set the protective headers on a response carrying user file bytes.
 pub fn protect(h: &mut HeaderMap) {
@@ -51,16 +51,29 @@ pub fn sniff(head: &[u8]) -> Option<&'static str> {
         "image/webp"
     } else if starts(b"RIFF") && at(8, b"WAVE") {
         "audio/wav"
-    } else if starts(b"BM") && head.len() >= 14 {
+    } else if starts(b"BM")
+        && head.len() >= 18
+        && head[6..10] == [0, 0, 0, 0]
+        && matches!(head[14], 12 | 40 | 52 | 56 | 64 | 108 | 124)
+        && head[15..18] == [0, 0, 0]
+    {
         "image/bmp"
     } else if starts(b"II*\0") || starts(b"MM\0*") {
         "image/tiff"
     } else if at(4, b"ftyp") {
         match head.get(8..12) {
             Some(b"avif") | Some(b"avis") => "image/avif",
+            Some(b"heic") | Some(b"heix") | Some(b"hevc") | Some(b"heim") | Some(b"heis") => {
+                "image/heic"
+            }
+            Some(b"mif1") | Some(b"msf1") => "image/heif",
             Some(b"M4A ") | Some(b"M4B ") => "audio/mp4",
             Some(b"qt  ") => "video/quicktime",
-            _ => "video/mp4",
+            Some(b"isom") | Some(b"iso2") | Some(b"iso4") | Some(b"iso5") | Some(b"iso6")
+            | Some(b"mp41") | Some(b"mp42") | Some(b"avc1") | Some(b"dash") | Some(b"M4V ")
+            | Some(b"mmp4") | Some(b"3gp4") | Some(b"3gp5") | Some(b"3g2a") => "video/mp4",
+            // Unknown brands (e.g. camera raw files): not a known media type.
+            _ => return None,
         }
     } else if starts(&[0x1A, 0x45, 0xDF, 0xA3]) {
         "video/webm"
@@ -68,7 +81,17 @@ pub fn sniff(head: &[u8]) -> Option<&'static str> {
         "audio/ogg"
     } else if starts(b"fLaC") {
         "audio/flac"
-    } else if starts(b"ID3") || (head.len() >= 2 && head[0] == 0xFF && head[1] & 0xE0 == 0xE0) {
+    } else if (starts(b"ID3") && head.len() >= 5 && matches!(head[3], 2..=4) && head[4] != 0xFF)
+        || (head.len() >= 3
+            && head[0] == 0xFF
+            && head[1] & 0xE0 == 0xE0
+            && head[1] != 0xFE // FF FE is the UTF-16LE byte-order mark
+            && head[1] & 0x06 != 0 // layer not reserved
+            && head[1] & 0x18 != 0x08 // MPEG version not reserved
+            && head[2] & 0xF0 != 0xF0 // bitrate index not "bad"
+            && head[2] & 0x0C != 0x0C)
+    // sample rate not reserved
+    {
         "audio/mpeg"
     } else if starts(b"%PDF-") {
         "application/pdf"
@@ -81,16 +104,33 @@ pub fn sniff(head: &[u8]) -> Option<&'static str> {
     })
 }
 
-/// Does the start of a file look like text (no NUL, valid UTF-8 apart from a
-/// possibly cut-off last character)?
-fn looks_like_text(head: &[u8]) -> bool {
+/// Text flavour of the start of a file, if it looks like text.
+fn text_kind(head: &[u8]) -> Option<&'static str> {
+    if head.starts_with(&[0xFF, 0xFE]) {
+        return Some("text/plain; charset=utf-16le");
+    }
+    if head.starts_with(&[0xFE, 0xFF]) {
+        return Some("text/plain; charset=utf-16be");
+    }
     if head.contains(&0) {
-        return false;
+        return None;
     }
     match std::str::from_utf8(head) {
-        Ok(_) => true,
-        Err(e) => e.error_len().is_none(), // only an incomplete trailing char
+        Ok(_) => return Some("text/plain; charset=utf-8"),
+        Err(e) if e.error_len().is_none() => return Some("text/plain; charset=utf-8"), // cut-off last char
+        Err(_) => {}
     }
+    // Legacy 8-bit encodings (Windows-1251, Latin-1, ...): text if almost no
+    // control bytes. The browser picks the charset; nosniff keeps it text.
+    let controls = head
+        .iter()
+        .filter(|&&b| b < 0x20 && !matches!(b, b'\t' | b'\n' | b'\r' | 0x0C | 0x1B))
+        .count();
+    (controls * 100 <= head.len()).then_some("text/plain")
+}
+
+fn looks_like_text(head: &[u8]) -> bool {
+    text_kind(head).is_some()
 }
 
 /// How to serve a file's bytes.
@@ -131,8 +171,7 @@ pub fn decide(name: &str, head: &[u8], purpose: Purpose) -> Decision {
     }
     let content_type = match sniff(head) {
         Some(t) => t,
-        None if looks_like_text(head) => "text/plain; charset=utf-8",
-        None => "application/octet-stream",
+        None => text_kind(head).unwrap_or("application/octet-stream"),
     };
     let inline = match purpose {
         Purpose::Content { download: true } => false,
@@ -148,6 +187,12 @@ pub fn decide(name: &str, head: &[u8], purpose: Purpose) -> Decision {
         content_type,
         inline,
     }
+}
+
+/// Unicode format characters that can disguise a file name (e.g. U+202E
+/// RIGHT-TO-LEFT OVERRIDE making "fdp.exe" read as "exe.pdf").
+fn is_bidi_or_invisible(c: char) -> bool {
+    matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}' | '\u{061C}')
 }
 
 const RFC5987: &AsciiSet = &NON_ALPHANUMERIC
@@ -170,7 +215,7 @@ const RFC5987: &AsciiSet = &NON_ALPHANUMERIC
 pub fn content_disposition(inline: bool, name: &str) -> HeaderValue {
     let clean: String = name
         .chars()
-        .filter(|c| !c.is_control() && *c != '"' && *c != '\\')
+        .filter(|c| !c.is_control() && !is_bidi_or_invisible(*c) && *c != '"' && *c != '\\')
         .collect();
     let clean = if clean.trim().is_empty() {
         "download".to_string()
@@ -270,11 +315,53 @@ mod tests {
     }
 
     #[test]
+    fn loose_markers_are_not_media() {
+        assert_eq!(
+            decide("a.txt", b"\xff\xfeh\0i\0", C).content_type,
+            "text/plain; charset=utf-16le"
+        );
+        assert_eq!(
+            decide("a.txt", b"BMW service log, 2026: oil changed", C).content_type,
+            "text/plain; charset=utf-8"
+        );
+        assert_eq!(
+            decide("a.txt", b"ID3 is a tag format", C).content_type,
+            "text/plain; charset=utf-8"
+        );
+        assert_eq!(sniff(b"\0\0\0\x18ftypheic"), Some("image/heic"));
+        assert_eq!(sniff(b"\0\0\0\x18ftypcrx "), None);
+        assert_eq!(sniff(b"ID3\x04\x00"), Some("audio/mpeg"));
+        assert_eq!(sniff(&[0xFF, 0xFB, 0x90, 0x00]), Some("audio/mpeg"));
+        // Windows-1251 Cyrillic text stays viewable
+        let cp1251 = [
+            0xCF, 0xF0, 0xE8, 0xE2, 0xE5, 0xF2, b' ', 0xEC, 0xE8, 0xF0, b'\n',
+        ];
+        assert_eq!(decide("a.txt", &cp1251, C).content_type, "text/plain");
+    }
+
+    #[test]
+    fn long_svg_prolog_is_still_an_image_on_the_preview_route() {
+        let mut svg = b"<?xml version='1.0'?>\n<!-- generator -->\n".to_vec();
+        svg.extend(std::iter::repeat_n(b' ', 1500));
+        svg.extend_from_slice(b"<svg xmlns='http://www.w3.org/2000/svg'/>");
+        assert_eq!(
+            decide("a.svg", &svg, Purpose::ImagePreview).content_type,
+            "image/svg+xml"
+        );
+    }
+
+    #[test]
+    fn bidi_overrides_are_stripped() {
+        let v = content_disposition(false, "invoice\u{202E}fdp.exe");
+        assert!(v.to_str().unwrap().contains("filename=\"invoicefdp.exe\""));
+    }
+
+    #[test]
     fn media_types() {
         assert_eq!(sniff(b"\0\0\0\x20ftypisom"), Some("video/mp4"));
         assert_eq!(sniff(b"\0\0\0\x20ftypM4A "), Some("audio/mp4"));
         assert_eq!(sniff(b"%PDF-1.7"), Some("application/pdf"));
-        assert_eq!(sniff(b"ID3\x04"), Some("audio/mpeg"));
+        assert_eq!(sniff(b"ID3\x04\x00"), Some("audio/mpeg"));
     }
 
     #[test]

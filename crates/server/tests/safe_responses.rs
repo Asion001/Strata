@@ -198,3 +198,39 @@ fn png() -> Vec<u8> {
     img.write_to(&mut out, image::ImageFormat::Png).unwrap();
     out.into_inner()
 }
+
+#[tokio::test]
+async fn revalidation_keeps_headers_and_cache_policy() {
+    let Some(t) = app().await else { return };
+    t.upload("p.png", &png()).await;
+    for uri in [
+        "/api/files/content?path=p.png",
+        "/api/files/thumb?path=p.png",
+    ] {
+        let (_, _, h) = t.raw("GET", uri, Body::empty(), &[]).await;
+        let etag = h["etag"].to_str().unwrap().to_string();
+        let cc = h["cache-control"].to_str().unwrap().to_string();
+        let (s, _, h2) = t
+            .raw("GET", uri, Body::empty(), &[("if-none-match", &etag)])
+            .await;
+        assert_eq!(s, StatusCode::NOT_MODIFIED, "{uri}");
+        assert_protected(&h2, uri);
+        assert_eq!(h2["etag"].to_str().unwrap(), etag);
+        assert_eq!(
+            h2["cache-control"].to_str().unwrap(),
+            cc,
+            "{uri}: 304 must not turn into no-store"
+        );
+    }
+    // range requests reuse the cached decision and keep the sniffed type
+    let (s, b, h) = t
+        .raw(
+            "GET",
+            "/api/files/content?path=p.png",
+            Body::empty(),
+            &[("range", "bytes=8-15")],
+        )
+        .await;
+    assert_eq!((s, b.len()), (StatusCode::PARTIAL_CONTENT, 8));
+    assert_eq!(ctype(&h), "image/png");
+}

@@ -84,6 +84,35 @@ async fn head_bytes(st: &AppState, m: &Mount, rel: &str, node: &Node) -> ApiResu
     Ok(out)
 }
 
+/// The serving decision needs the first bytes of the file. Cache it per
+/// (volume, path, etag, purpose) so Range requests (video seeking) don't pay
+/// an extra backend read each time.
+async fn decide_cached(
+    st: &AppState,
+    m: &Mount,
+    rel: &str,
+    node: &Node,
+    purpose: safe::Purpose,
+) -> ApiResult<safe::Decision> {
+    let key = node
+        .etag
+        .as_ref()
+        .map(|e| format!("{}|{rel}|{e}|{purpose:?}", m.volume_id));
+    if let Some(k) = &key
+        && let Some(d) = st.decisions.get(k)
+    {
+        return Ok(d.clone());
+    }
+    let d = safe::decide(&node.name, &head_bytes(st, m, rel, node).await?, purpose);
+    if let Some(k) = key {
+        if st.decisions.len() > 50_000 {
+            st.decisions.clear();
+        }
+        st.decisions.insert(k, d.clone());
+    }
+    Ok(d)
+}
+
 /// Serve file bytes safely (see `safe`): sniffed Content-Type, sandboxing
 /// headers, Range, ETag and a header-safe Content-Disposition.
 pub async fn serve(
@@ -99,20 +128,28 @@ pub async fn serve(
     }
     let size = node.size as u64;
     // The validator covers the decision too, so a cached response matches.
+    // `s1`: version of the serving rules, so responses cached under older
+    // rules are not revalidated into place.
     let etag = node.etag.as_ref().map(|e| match purpose {
-        safe::Purpose::ImagePreview => format!("\"i{e}\""),
-        safe::Purpose::Content { .. } => format!("\"{e}\""),
+        safe::Purpose::ImagePreview => format!("\"s1i-{e}\""),
+        safe::Purpose::Content { .. } => format!("\"s1-{e}\""),
     });
     if let (Some(et), Some(inm)) = (&etag, headers.get(header::IF_NONE_MATCH))
         && inm.as_bytes() == et.as_bytes()
     {
         let mut resp = StatusCode::NOT_MODIFIED.into_response();
-        safe::protect(resp.headers_mut());
+        let h = resp.headers_mut();
+        safe::protect(h);
+        h.insert(header::ETAG, HeaderValue::from_str(et).unwrap());
+        h.insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("private, no-cache"),
+        );
         return Ok(resp);
     }
     let range = parse_range(headers, size)?;
     let (start, end) = range.unwrap_or((0, size));
-    let decision = safe::decide(&node.name, &head_bytes(st, m, rel, node).await?, purpose);
+    let decision = decide_cached(st, m, rel, node, purpose).await?;
     let stream = vfs::read_stream(st, m, rel, node, start, end).await?;
     let mut resp = Response::new(Body::from_stream(stream));
     let h = resp.headers_mut();

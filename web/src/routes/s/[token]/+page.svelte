@@ -1,6 +1,6 @@
 <script lang="ts">
   import { page } from '$app/state';
-  import { api, type Entry } from '$lib/api';
+  import { api, isSvg, type Entry } from '$lib/api';
   import { bytes, when, join, icon, isImage } from '$lib/format';
   import Viewer from '$lib/Viewer.svelte';
 
@@ -13,8 +13,10 @@
   let viewerIndex = $state(-1);
 
   const q = (extra = '') => `path=${encodeURIComponent(sub)}${key ? `&k=${key}` : ''}${extra}`;
-  const imgUrl = (p: string) => `/api/public/${token}/image?path=${encodeURIComponent(p)}${key ? `&k=${key}` : ''}`;
-  const fileUrl = (p: string, dl = false) => `/api/public/${token}/content?path=${encodeURIComponent(p)}${key ? `&k=${key}` : ''}${dl ? '&download=1' : ''}`;
+  const shareUrl = (kind: string, p: string, extra = '') =>
+    `/api/public/${token}/${kind}?path=${encodeURIComponent(p)}${key ? `&k=${key}` : ''}${extra}`;
+  const imgUrl = (p: string) => shareUrl('image', p);
+  const fileUrl = (p: string, dl = false) => shareUrl('content', p, dl ? '&download=1' : '');
 
   async function load() {
     try { info = await api('GET', `/api/public/${token}?${q()}`); error = ''; }
@@ -47,7 +49,7 @@
     <div class="card stack">
       <h1>{info.name}</h1>
       <div class="muted">{bytes(info.size)} · {when(info.mtime)}</div>
-      {#if isImage(info.name) || /\.svg$/i.test(info.name)}<img class="preview" src={imgUrl('')} alt={info.name} />{/if}
+      {#if isImage(info.name) || isSvg(info.name)}<img class="preview" src={imgUrl('')} alt={info.name} />{/if}
       <div><a href={fileUrl('', true)}><button class="primary">Download</button></a></div>
     </div>
   {:else if info}
@@ -71,7 +73,7 @@
 </div>
 
 {#if viewerIndex >= 0}
-  <Viewer items={files.map((f: Entry) => ({ name: f.name, size: f.size, src: /\.svg$/i.test(f.name) ? imgUrl(join(sub, f.name)) : fileUrl(join(sub, f.name)), download: fileUrl(join(sub, f.name), true) }))}
+  <Viewer items={files.map((f: Entry) => ({ name: f.name, size: f.size, src: isSvg(f.name) ? imgUrl(join(sub, f.name)) : fileUrl(join(sub, f.name)), download: fileUrl(join(sub, f.name), true) }))}
     bind:index={viewerIndex} onclose={() => (viewerIndex = -1)} />
 {/if}
 

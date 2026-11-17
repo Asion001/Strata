@@ -1,6 +1,7 @@
 <script lang="ts">
   // Full-screen preview: image gallery (arrows, swipe, zoom), native video/audio, text.
   import { isAudio, isImage, isVideo, bytes } from './format';
+  import { isSvg } from './api';
 
   interface Item { name: string; size: number; src: string; download: string }
   let { items, index = $bindable(), onclose }: { items: Item[]; index: number; onclose: () => void } = $props();
@@ -50,7 +51,7 @@
     <button onclick={onclose} aria-label="Close">✕</button>
   </header>
   <div class="stage">
-    {#if isImage(item.name) || /\.svg$/i.test(item.name)}
+    {#if isImage(item.name) || isSvg(item.name)}
       <!-- SVG is shown only through <img>, which never runs scripts. -->
       <img src={item.src} alt={item.name} style="transform: scale({zoom})"
         ondblclick={() => (zoom = zoom === 1 ? 2.5 : 1)} />

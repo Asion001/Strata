@@ -66,7 +66,13 @@ pub async fn thumbnail(
         .is_some_and(|v| v.as_bytes() == etag.as_bytes())
     {
         let mut resp = StatusCode::NOT_MODIFIED.into_response();
-        crate::safe::protect(resp.headers_mut());
+        let h = resp.headers_mut();
+        crate::safe::protect(h);
+        h.insert(header::ETAG, HeaderValue::from_str(&etag).unwrap());
+        h.insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("private, max-age=86400"),
+        );
         return Ok(resp);
     }
     let dir = st.cfg.data_dir.join("thumbs").join(&key[..2]);
