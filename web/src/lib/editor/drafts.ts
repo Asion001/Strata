@@ -36,10 +36,10 @@ export async function listDrafts(fileKey: string): Promise<Draft[]> {
   return all.sort((a, b) => b.savedAt - a.savedAt);
 }
 
-/** Is exactly `text` stored as this tab's draft of a file? */
-export async function hasTabDraft(fileKey: string, tab: string, text: string): Promise<boolean> {
-  const d = await tx<Draft | undefined>('readonly', (s) => s.get(entryKey(fileKey, tab)) as IDBRequest<Draft | undefined>);
-  return d?.text === text;
+/** Is this tab's draft of a file stored? (Only this tab writes it, so its
+ *  text is the last one this tab stored.) */
+export async function hasTabDraft(fileKey: string, tab: string): Promise<boolean> {
+  return (await tx<number>('readonly', (s) => s.count(entryKey(fileKey, tab)))) > 0;
 }
 
 /** Forget this tab's draft of a file. */
@@ -167,20 +167,23 @@ export function markSignedOut() {
   } catch {}
 }
 
-function anyoneSignedIn(): boolean {
+/** Who is signed in here (null: no one; undefined: no storage at all, so
+ *  drafts can't outlive the tab anyway and any user counts). */
+function signedInId(): string | null | undefined {
   try {
-    return localStorage.getItem(AUTH_KEY) !== null;
+    return localStorage.getItem(AUTH_KEY);
   } catch {
-    return true; // no storage at all: drafts can't outlive the tab anyway
+    return undefined;
   }
 }
 
+function anyoneSignedIn(): boolean {
+  return signedInId() !== null;
+}
+
 export function isSignedIn(userId: number): boolean {
-  try {
-    return localStorage.getItem(AUTH_KEY) === String(userId);
-  } catch {
-    return true; // no storage at all: drafts can't outlive the tab anyway
-  }
+  const id = signedInId();
+  return id === undefined || id === String(userId);
 }
 
 /** Forget every draft in this browser (on sign-out: drafts hold file

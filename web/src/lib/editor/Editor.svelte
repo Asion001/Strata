@@ -73,6 +73,7 @@
   let draftTimer: ReturnType<typeof setInterval>;
   /** The text last stored as this tab's draft (null: nothing stored yet). */
   let lastDraft: string | null = null;
+  let lastDraftAt = 0;
   /** clean: nothing unsaved; waiting: backing off; signedOut: drafts are
    *  not kept for a signed-out user. */
   type DraftResult = 'clean' | 'stored' | 'waiting' | 'failed' | 'signedOut';
@@ -268,9 +269,12 @@
     if (!isSignedIn(userId)) return 'signedOut';
     const text = editor.getDoc();
     if (text === lastDraft) {
-      // A last chance checks the copy is really there (it may have been
-      // removed meanwhile: expired, or cleared by another tab's save).
-      if (why !== 'final' || (await hasTabDraft(key, tab, text).catch(() => false))) return 'stored';
+      // The stored copy may have been removed meanwhile (expired, or cleared
+      // by another tab's save): a last chance checks it is there (a failed
+      // check trusts it), and a tick rewrites it once a day.
+      if (why === 'final') {
+        if (await hasTabDraft(key, tab).catch(() => true)) return 'stored';
+      } else if (Date.now() - lastDraftAt < 86_400_000) return 'stored';
     }
     // Backing off: ticks wait; writes after a user action still try.
     if (why === 'tick' && inBackoff()) return 'waiting';
@@ -291,6 +295,7 @@
       return 'signedOut';
     }
     lastDraft = text;
+    lastDraftAt = Date.now();
     return 'stored';
   }
 
@@ -478,11 +483,11 @@
     // be stored; a failed, slow or refused write asks first.
     const r = await atMost(autosave(true), 2000);
     if (r !== 'clean' && r !== 'stored') {
-      const why: Record<string, string> = {
+      const why: Partial<Record<NonNullable<typeof r>, string>> = {
         timeout: 'The draft is still being written to this browser and may not be kept.',
         signedOut: 'You were signed out, so no draft is kept.'
       };
-      const msg = why[r ?? ''] ?? 'The draft could not be stored in this browser.';
+      const msg = (r && why[r]) ?? 'The draft could not be stored in this browser.';
       if (!confirm(`${msg} Close anyway and lose the unsaved changes?`)) return;
     }
     onclose();
