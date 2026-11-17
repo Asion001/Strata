@@ -172,12 +172,11 @@ pub async fn create(
     Ok(Json(v))
 }
 
-/// Where a volume's files physically live: (connection or local directory, folder).
 /// Do two storage locations overlap (same storage, one folder inside the
 /// other or equal)? The single rule used by mount guards and save locks.
-pub fn overlaps(a: &(String, String), b: &(String, String)) -> bool {
+pub fn overlaps(a: (&str, &str), b: (&str, &str)) -> bool {
     a.0 == b.0
-        && (paths::strip_prefix(&a.1, &b.1).is_some() || paths::strip_prefix(&b.1, &a.1).is_some())
+        && (paths::strip_prefix(a.1, b.1).is_some() || paths::strip_prefix(b.1, a.1).is_some())
 }
 
 /// Volume locations for loops over many volumes: each connection's root is
@@ -197,25 +196,25 @@ impl Locations {
         base: &str,
         stored: (Option<String>, Option<String>),
     ) -> ApiResult<Option<(String, String)>> {
-        let root = match self.0.get(&connection_id) {
-            Some(r) => r.clone(),
-            None => {
-                let r = match stored {
-                    (Some(id), Some(folder)) => Some((id, folder)),
-                    _ => {
-                        let enc: Vec<u8> =
-                            sqlx::query_scalar("SELECT config_enc FROM connections WHERE id = $1")
-                                .bind(connection_id)
-                                .fetch_one(&st.db)
-                                .await?;
-                        st.decrypt_config(&enc)
-                            .ok()
-                            .and_then(|c| c.location(&st.cfg.local_base).ok())
-                    }
-                };
-                self.0.insert(connection_id, r.clone());
-                r
-            }
+        let root = match stored {
+            (Some(id), Some(folder)) => Some((id, folder)),
+            // Only this fallback is cached: it reads and decrypts the config.
+            _ => match self.0.get(&connection_id) {
+                Some(r) => r.clone(),
+                None => {
+                    let enc: Vec<u8> =
+                        sqlx::query_scalar("SELECT config_enc FROM connections WHERE id = $1")
+                            .bind(connection_id)
+                            .fetch_one(&st.db)
+                            .await?;
+                    let r = st
+                        .decrypt_config(&enc)
+                        .ok()
+                        .and_then(|c| c.location(&st.cfg.local_base).ok());
+                    self.0.insert(connection_id, r.clone());
+                    r
+                }
+            },
         };
         Ok(root.map(|(id, folder)| (id, paths::join(&folder, base))))
     }
@@ -295,17 +294,13 @@ pub async fn check_overlap_at(
     .bind(except)
     .fetch_all(&st.db)
     .await?;
-    let here: Vec<((String, String), &String)> = places
-        .iter()
-        .map(|(r, f, m)| ((r.clone(), f.clone()), m))
-        .collect();
     let mut locs = Locations::default();
     for (cid, obase, omode, sid, sfolder) in others {
         let Some(other) = locs.of(st, cid, &obase, (sid, sfolder)).await? else {
             continue; // location unknown: can't reach storage
         };
-        for (place, mode) in &here {
-            if **mode != omode && overlaps(place, &other) {
+        for (root, folder, mode) in places {
+            if *mode != omode && overlaps((root, folder), (&other.0, &other.1)) {
                 return Err(conflict(
                     "that folder overlaps a hashed store (or a raw folder holds this store); pick a separate folder",
                 ));

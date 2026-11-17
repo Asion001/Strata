@@ -30,6 +30,9 @@ pub struct Inner {
     pub secrets: SecretBox,
     /// connection id -> operator
     pub ops: DashMap<i64, Operator>,
+    /// connection id -> times its operator was forgotten (a config change),
+    /// so an operator built from the old config isn't cached afterwards
+    pub op_gens: DashMap<i64, u64>,
     /// user id -> that user's mounts, longest path first
     pub mounts: DashMap<i64, Arc<Vec<Mount>>>,
     pub events: broadcast::Sender<ChangeEvent>,
@@ -82,6 +85,7 @@ impl AppState {
             db,
             cfg,
             ops: DashMap::new(),
+            op_gens: DashMap::new(),
             mounts: DashMap::new(),
             events,
             decisions: quick_cache::sync::Cache::new(100_000),
@@ -118,13 +122,22 @@ impl AppState {
         if let Some(op) = self.ops.get(&connection_id) {
             return Ok(op.clone());
         }
+        let seen = self.op_gens.get(&connection_id).map(|g| *g).unwrap_or(0);
         let cfg = self.connection_config(connection_id).await?;
         let op = cfg.operator(&self.cfg.local_base)?;
-        self.ops.insert(connection_id, op.clone());
+        // Cached only if no config change landed meanwhile (the entry is
+        // held across the insert, so a concurrent forget waits for it).
+        let g = self.op_gens.entry(connection_id).or_insert(0);
+        if *g == seen {
+            self.ops.insert(connection_id, op.clone());
+        }
+        drop(g);
         Ok(op)
     }
 
     pub fn forget_operator(&self, connection_id: i64) {
+        let mut g = self.op_gens.entry(connection_id).or_insert(0);
+        *g += 1;
         self.ops.remove(&connection_id);
     }
 }

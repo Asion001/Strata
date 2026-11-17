@@ -944,7 +944,7 @@ async fn overlapping_raw_volumes(st: &AppState, m: &Mount) -> ApiResult<Vec<i64>
         let Some(other) = locs.of(st, cid, &base, (sid, sfolder)).await? else {
             continue; // location unknown: can't reach storage, can't write
         };
-        if mounts::overlaps(&here, &other) {
+        if mounts::overlaps((&here.0, &here.1), (&other.0, &other.1)) {
             out.push(id);
         }
     }

@@ -262,30 +262,44 @@ pub async fn update(
 ) -> ApiResult<Json<ConnectionView>> {
     check_access(&st, &u, id).await?;
     validate(&u, &req.name, &req.config)?;
-    // Under the layout lock (the overlap check below) and the row lock, so
-    // concurrent edits each merge secrets into the config the other wrote.
-    let (mut tx, _layout) = crate::mounts::lock_layout(&st).await?;
-    let old_enc: Vec<u8> =
-        sqlx::query_scalar("SELECT config_enc FROM connections WHERE id = $1 FOR UPDATE")
+    let (kind, old_enc): (String, Vec<u8>) =
+        sqlx::query_as("SELECT kind, config_enc FROM connections WHERE id = $1")
             .bind(id)
-            .fetch_one(&mut *tx)
+            .fetch_one(&st.db)
             .await?;
-    let old = st.decrypt_config(&old_enc)?;
-    if old.kind() != req.config.kind() {
+    // The stored kind needs no decryption, so this holds even for a config
+    // the server can't read any more (which can still be replaced, with its
+    // secrets entered again).
+    if kind != req.config.kind() {
         return Err(bad("the backend type of a connection cannot change"));
     }
-    req.config.merge_secrets(&old);
+    if let Ok(old) = st.decrypt_config(&old_enc) {
+        req.config.merge_secrets(&old);
+    }
     let op = req
         .config
         .operator(&st.cfg.local_base)
         .map_err(|e| bad(format!("invalid config: {e}")))?;
     let caps = Capabilities::detect(&req.config, &op, &st.cfg.local_base);
-    // Re-pointing a connection must not make its volumes overlap volumes of
-    // the opposite mode (a raw view over a hashed store).
     let (sid, sfolder) = req
         .config
         .location(&st.cfg.local_base)
         .map_err(|e| bad(format!("invalid config: {e}")))?;
+    // Re-pointing a connection must not make its volumes overlap volumes of
+    // the opposite mode (a raw view over a hashed store): checked and
+    // written under the layout lock. The row lock and the compare make a
+    // concurrent edit (whose secrets were not merged here) a conflict.
+    let (mut tx, layout) = crate::mounts::lock_layout(&st).await?;
+    let now_enc: Vec<u8> =
+        sqlx::query_scalar("SELECT config_enc FROM connections WHERE id = $1 FOR UPDATE")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?;
+    if now_enc != old_enc {
+        return Err(conflict(
+            "the connection was changed meanwhile; reload it and try again",
+        ));
+    }
     let volumes: Vec<(String, String)> =
         sqlx::query_as("SELECT base_path, mode FROM volumes WHERE connection_id = $1")
             .bind(id)
@@ -311,6 +325,7 @@ pub async fn update(
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
+    drop(layout);
     st.forget_operator(id);
     let res = probe_operator(&op).await;
     store_probe(&st, id, &res).await?;
