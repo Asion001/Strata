@@ -81,6 +81,9 @@
    *  full store says little about the whole document). */
   let retryAfter = 0;
   let retryDelay = 0;
+  /** Text a closing or leaving write just failed to store (not retried by
+   *  the next one; cleared by any write that works). */
+  let finalFailed: string | null = null;
   /** Draft writes run one at a time, in order. */
   let draftQueue: Promise<void> = Promise.resolve();
 
@@ -212,12 +215,13 @@
   /** Queue a draft write. `final` (closing, leaving the page) tries even
    *  during a backoff: it is the last chance to keep this text. */
   function autosave(final = false): Promise<void> {
-    const run = () => writeDraft(final ? 'final' : 'tick');
+    // Never rejects: a draft that can't be written must not break the caller.
+    const run = () => writeDraft(final ? 'final' : 'tick').catch(() => {});
     draftQueue = draftQueue.then(run, run);
     return draftQueue;
   }
 
-  function inBackoff() {
+  function inBackoff(): boolean {
     return Date.now() < retryAfter;
   }
 
@@ -226,30 +230,27 @@
     let t: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([p, new Promise((r) => (t = setTimeout(r, ms)))]);
-    } catch {
-      // a failed draft operation must not stop what comes next
     } finally {
       clearTimeout(t);
     }
   }
 
-  /** Write this tab's draft. A regular write (`extra` false) moves the
-   *  backoff: a failure doubles it, success ends it. An extra one, made
-   *  during the wait, leaves it alone. */
-  async function storeDraft(text: string, extra: boolean): Promise<boolean> {
+  /** Write this tab's draft. A periodic write (`byUser` false) moves the
+   *  backoff: a failure doubles it, success ends it. One after a user action
+   *  leaves the wait alone; its success only ends the failure streak, so the
+   *  next periodic failure starts again at 5 s. */
+  async function storeDraft(text: string, byUser: boolean): Promise<boolean> {
     try {
       await saveTabDraft(key, tab, { baseEtag: etag, baseHash, text, savedAt: Date.now() });
     } catch {
-      if (!extra) {
+      if (!byUser) {
         retryDelay = Math.min(Math.max(retryDelay * 2, 5_000), 60_000);
         retryAfter = Date.now() + retryDelay;
       }
       return false;
     }
-    if (!extra) {
-      retryDelay = 0;
-      retryAfter = 0;
-    }
+    retryDelay = 0;
+    if (!byUser) retryAfter = 0;
     return true;
   }
 
@@ -267,18 +268,24 @@
    *  just removed. */
   async function writeDraft(why: 'tick' | 'final' | 'afterSave' = 'tick') {
     if (!editor || !dirty) return;
+    const byUser = why !== 'tick';
     // Only while this user is still the one signed in here (any tab may
     // have signed out); checked again after writing, since a sign-out can
     // land in between.
     if (!isSignedIn(userId)) return;
     const text = editor.getDoc();
     if (text === lastDraft) return;
-    const extra = inBackoff();
-    // Backing off: ticks wait; writes after a user action still try.
-    if (extra && why === 'tick') return;
+    // Backing off: ticks wait; writes after a user action still try, but
+    // one leave (navigation, then pagehide) doesn't repeat a failed write.
+    if (!byUser && inBackoff()) return;
+    if (why === 'final' && text === finalFailed) return;
     // This tab's own entry: other tabs' drafts (and a recovery offer still
     // on screen) are never overwritten.
-    if (!(await storeDraft(text, extra))) return;
+    if (!(await storeDraft(text, byUser))) {
+      if (why === 'final') finalFailed = text;
+      return;
+    }
+    finalFailed = null;
     if (!isSignedIn(userId)) {
       await clearTabDraft(key, tab).catch(() => {});
       return;
@@ -302,7 +309,7 @@
     // is still in flight can't land after it.
     await afterDrafts(async () => {
       lastDraft = null;
-      if (!isSignedIn(userId) || !(await storeDraft(d.text, inBackoff()))) return;
+      if (!isSignedIn(userId) || !(await storeDraft(d.text, true))) return;
       // A sign-out may have landed during the write: don't leave it behind.
       if (!isSignedIn(userId)) {
         await clearTabDraft(key, tab);
@@ -365,7 +372,7 @@
       // write in flight, and the next draft is written afresh.
       void afterDrafts(async () => {
         lastDraft = null;
-        await clearAfterSave(key, tab, doc);
+        await clearAfterSave(key, tab, doc).catch(() => {});
         // Typed during the save? That text's draft was just cleared with
         // the rest: store it again now (one write per save, even while
         // backing off).
@@ -469,6 +476,9 @@
     // The last seconds of typing too; stuck storage never keeps the editor
     // from closing.
     await atMost(autosave(true), 2000);
+    if (dirty && editor && editor.getDoc() !== lastDraft) {
+      if (!confirm('The draft could not be stored in this browser. Close anyway and lose the unsaved changes?')) return;
+    }
     onclose();
   }
 
