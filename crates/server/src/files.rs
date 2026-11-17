@@ -417,7 +417,11 @@ pub async fn put_content(
             },
         },
         (None, Some(v)) if single_etag(v)? == "*" => vfs::Expect::Absent,
-        (None, None) => return Err(ApiError::PreconditionRequired),
+        (None, None) => {
+            return Err(ApiError::PreconditionRequired(
+                "this write needs If-Match (or If-None-Match: * to create a file)",
+            ));
+        }
         _ => return Err(bad("use either If-Match: <etag> or If-None-Match: *")),
     };
     let input: vfs::ByteStream = Box::pin(futures::stream::once(async move { Ok(body) }));

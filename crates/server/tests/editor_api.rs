@@ -399,3 +399,39 @@ async fn coarse_mtime_storage_still_detects_same_size_changes() {
         StatusCode::BAD_REQUEST
     );
 }
+
+#[test]
+fn coarse_versions_are_recognised() {
+    use strata_server::vfs::{Node, is_coarse};
+    let node = |etag: Option<&str>, size: i64, chunks: bool| Node {
+        name: "f".into(),
+        is_dir: false,
+        size,
+        mtime: chrono::Utc::now(),
+        etag: etag.map(str::to_string),
+        chunks: chunks.then(Vec::new),
+        chunk_sizes: None,
+    };
+    // ours: size hex, then mtime ns
+    assert!(is_coarse(&node(Some("1a-0"), 26, false)));
+    assert!(is_coarse(&node(
+        Some(&format!("1a-{:x}", 1_700_000_000u128 * 1_000_000_000)),
+        26,
+        false
+    )));
+    assert!(!is_coarse(&node(
+        Some(&format!("1a-{:x}", 1_700_000_000_123_456_789u128)),
+        26,
+        false
+    )));
+    // nginx-style mtime-size backend etags
+    assert!(is_coarse(&node(Some("\"6553f100-1a\""), 26, false)));
+    // content etags and hashed nodes are not coarse; no etag at all is
+    assert!(!is_coarse(&node(
+        Some("\"9e107d9d372bb6826bd81d3542a419d6\""),
+        26,
+        false
+    )));
+    assert!(!is_coarse(&node(Some("abc"), 26, true)));
+    assert!(is_coarse(&node(None, 26, false)));
+}

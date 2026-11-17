@@ -11,10 +11,10 @@
   $effect(() => {
     if (isPublic || session.checked) return;
     api('GET', '/api/auth/me')
-      .then(async (u) => {
+      .then((u) => {
         session.user = u;
-        const { markSignedIn } = await import('$lib/editor/drafts');
-        markSignedIn(u.id);
+        // Best effort, and never a reason to send a signed-in user to /login.
+        import('$lib/editor/drafts').then((d) => d.markSignedIn(u.id)).catch(() => {});
       })
       .catch(() => goto('/login?next=' + encodeURIComponent(page.url.pathname + page.url.search)))
       .finally(() => (session.checked = true));

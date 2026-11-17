@@ -23,9 +23,9 @@ pub enum ApiError {
     /// Carries the current version's ETag, if the file exists.
     #[error("the file was changed by someone else")]
     PreconditionFailed(Option<String>),
-    /// Overwriting needs If-Match (or If-None-Match: * to create).
-    #[error("this write needs If-Match (or If-None-Match: * to create a file)")]
-    PreconditionRequired,
+    /// A precondition (header) the write needs is missing; says which.
+    #[error("{0}")]
+    PreconditionRequired(&'static str),
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
 }
@@ -77,7 +77,7 @@ impl IntoResponse for ApiError {
             ApiError::Conflict(_) => StatusCode::CONFLICT,
             ApiError::RangeNotSatisfiable => StatusCode::RANGE_NOT_SATISFIABLE,
             ApiError::PreconditionFailed(_) => StatusCode::PRECONDITION_FAILED,
-            ApiError::PreconditionRequired => StatusCode::PRECONDITION_REQUIRED,
+            ApiError::PreconditionRequired(_) => StatusCode::PRECONDITION_REQUIRED,
             ApiError::Internal(e) => {
                 tracing::error!("internal error: {e:#}");
                 StatusCode::INTERNAL_SERVER_ERROR

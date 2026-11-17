@@ -1,4 +1,5 @@
 import { expect, type Browser, type BrowserContext, type Page } from '@playwright/test';
+import { blake3 } from 'hash-wasm';
 
 export const enabled = !!process.env.STRATA_E2E_PASSWORD;
 
@@ -17,19 +18,22 @@ export async function newSession(browser: Browser): Promise<{ ctx: BrowserContex
   return { ctx, page };
 }
 
-/** Create or overwrite a text file through the API (as the logged-in page). */
+/** Create or overwrite a text file through the API (as the logged-in page),
+ *  the way the editor does: If-Match plus the hash of the current bytes. */
 export async function putFile(page: Page, path: string, text: string) {
-  const r = await page.evaluate(
-    async ([p, t]) => {
-      const url = `/api/files/content?path=${encodeURIComponent(p)}`;
-      const head = await fetch(url, { cache: 'no-store' });
-      const pre: Record<string, string> = head.ok ? { 'if-match': head.headers.get('etag')! } : { 'if-none-match': '*' };
-      const r = await fetch(url, { method: 'PUT', headers: { 'x-strata': '1', ...pre }, body: t });
-      return r.status;
-    },
-    [path, text]
+  const url = `/api/files/content?path=${encodeURIComponent(path)}`;
+  const cur = await page.evaluate(async (u) => {
+    const r = await fetch(u, { cache: 'no-store' });
+    return r.ok ? { etag: r.headers.get('etag')!, bytes: Array.from(new Uint8Array(await r.arrayBuffer())) } : null;
+  }, url);
+  const pre: Record<string, string> = cur
+    ? { 'if-match': cur.etag, 'x-strata-base-hash': await blake3(new Uint8Array(cur.bytes)) }
+    : { 'if-none-match': '*' };
+  const status = await page.evaluate(
+    async ([u, t, p]) => (await fetch(u, { method: 'PUT', headers: { 'x-strata': '1', ...p }, body: t })).status,
+    [url, text, pre] as const
   );
-  expect(r).toBe(200);
+  expect(status).toBe(200);
 }
 
 export async function readFile(page: Page, path: string): Promise<string> {

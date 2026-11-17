@@ -232,6 +232,14 @@
         status = '';
         return;
       }
+      if (r.status === 428 && etag) {
+        // The server can't verify what this edit was based on (e.g. a draft
+        // restored without its base hash): resolve it like a conflict.
+        const cur = await fetch(contentUrl(path), { method: 'HEAD', cache: 'no-store' });
+        conflict = { theirsEtag: cur.ok ? cur.headers.get('etag') ?? 'unknown' : null, showDiff: false };
+        status = '';
+        return;
+      }
       if (!r.ok) throw new Error(body.error ?? `HTTP ${r.status}`);
       etag = r.headers.get('etag') ?? body.etag;
       baseHash = nextHash;

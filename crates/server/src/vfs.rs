@@ -206,10 +206,10 @@ fn meta_mtime(meta: &opendal::Metadata) -> DateTime<Utc> {
 }
 
 /// Our own etag for raw entries whose backend gives none:
-/// `m:<size hex>-<mtime ns hex>` (the prefix lets `is_coarse` recognise it).
+/// `<size hex>-<mtime ns hex>`.
 fn raw_etag(meta: &opendal::Metadata) -> String {
     format!(
-        "m:{:x}-{:x}",
+        "{:x}-{:x}",
         meta.content_length(),
         meta.last_modified()
             .map(|t| t.into_inner().as_nanosecond())
@@ -666,12 +666,7 @@ pub async fn read_stream(
 /// BLAKE3 of a file's full content (used to verify copies).
 pub async fn content_digest(st: &AppState, m: &Mount, rel: &str) -> ApiResult<Hash> {
     let node = stat(st, m, rel).await?;
-    let mut s = read_stream(st, m, rel, &node, 0, node.size as u64).await?;
-    let mut h = blake3::Hasher::new();
-    while let Some(b) = s.next().await {
-        h.update(&b.map_err(|e| ApiError::Internal(e.into()))?);
-    }
-    Ok(Hash(*h.finalize().as_bytes()))
+    digest_node(st, m, rel, &node).await
 }
 
 // ---------------------------------------------------------------- writing
@@ -829,15 +824,19 @@ pub fn is_coarse(node: &Node) -> bool {
     if node.chunks.is_some() {
         return false;
     }
-    match node.etag.as_deref() {
-        None => true,
-        Some(e) => match e.strip_prefix("m:") {
-            Some(rest) => rest
-                .rsplit_once('-')
-                .and_then(|(_, ns)| u128::from_str_radix(ns, 16).ok())
-                .is_none_or(|ns| ns % 1_000_000_000 == 0),
-            None => false,
-        },
+    let Some(tag) = node.etag.as_deref() else {
+        return true;
+    };
+    let tag = tag.trim_start_matches("W/").trim_matches('"');
+    let size = format!("{:x}", node.size);
+    match tag.split_once('-') {
+        // Ours (`raw_etag`): size, then mtime in ns; coarse when whole seconds.
+        Some((s, ns)) if s == size => {
+            u128::from_str_radix(ns, 16).is_ok_and(|ns| ns % 1_000_000_000 == 0)
+        }
+        // `mtime-size` style backend etags (nginx and friends): second resolution.
+        Some((_, s)) if s == size => true,
+        _ => false,
     }
 }
 
@@ -865,13 +864,18 @@ async fn check_expect_content(
     check_expect(expect, current.as_ref())?;
     if let (Expect::Etag { base, .. }, Some(n)) = (expect, &current) {
         let Some(base) = base else {
-            return Err(ApiError::PreconditionRequired);
+            return Err(ApiError::PreconditionRequired(
+                "saving over a file on this storage also needs X-Strata-Base-Hash",
+            ));
         };
         // An edit can only be based on a file the editor could save
         // (BASE_CHECK_MAX); anything bigger has changed by definition.
         if n.size > BASE_CHECK_MAX || digest_node(st, m, rel, n).await? != *base {
             return Err(ApiError::PreconditionFailed(Some(etag_for(n))));
         }
+        // An outside writer (which doesn't take our lock) may have appended
+        // or rewritten the file while we read it: the version must still hold.
+        check_expect(expect, current_file(st, m, rel).await?.as_ref())?;
     }
     Ok(())
 }
@@ -984,10 +988,11 @@ pub async fn write_stream(
     Ok(write_stream_if(st, m, rel, input, &Expect::Any).await?.0)
 }
 
-/// `write_stream` with a precondition. Hashed: checked when the node is
-/// written. Raw: checked against the backend under the volume lock right
-/// before the atomic close that makes the new content visible; on failure
-/// the write is aborted and nothing changes. Returns the stream's BLAKE3 and
+/// `write_stream` with a precondition. Hashed: checked under the volume lock
+/// when the node is written. Raw: the volume lock is taken and the
+/// precondition checked (including the base content) before any byte is
+/// written, and held until the atomic close, so a refused save writes
+/// nothing. Returns the stream's BLAKE3 and
 /// the version written, taken under the lock (so it is never someone
 /// else's later version).
 pub async fn write_stream_if(
@@ -999,12 +1004,12 @@ pub async fn write_stream_if(
 ) -> ApiResult<(Hash, Node)> {
     // Refuse early (before writing anything, or creating parent folders)
     // when the precondition already fails; re-checked under the lock below.
-    // Refuse early on metadata (cheap) before storing blobs or opening a
-    // backend writer, which may create parent folders. The authoritative
-    // check runs under the lock: in `put_hashed_file_if`, or before the raw
-    // close below (including the base-content comparison).
-    if *expect != Expect::Any {
-        check_expect(expect, current_file(st, m, rel).await?.as_ref())?;
+    // Hashed: refuse early (a cheap DB lookup) before storing any blobs; the
+    // authoritative check runs under the lock in `put_hashed_file_if`. Raw
+    // conditional writes are checked under the lock before any byte is
+    // written (below), so they need no pre-check.
+    if m.is_hashed() && *expect != Expect::Any {
+        check_expect(expect, get_node(st, m.volume_id, rel).await?.as_ref())?;
     }
     let mut whole = blake3::Hasher::new();
     if m.is_hashed() {
