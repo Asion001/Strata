@@ -105,11 +105,26 @@ async fn exercise(t: &TestApp, dir: &str) {
     assert_eq!(v["etag"], e2);
     assert_eq!(h["etag"].to_str().unwrap(), e2);
     assert_eq!(t.download(&f).await, b"# two\n");
-    // weak or list ETags are refused
+    // lists are refused; a proxy-weakened tag still names the version
     assert_eq!(
-        put(t, &f, "x", &[("if-match", &format!("W/{e2}"))]).await.0,
+        put(t, &f, "x", &[("if-match", &format!("{e2}, {e1}"))])
+            .await
+            .0,
         StatusCode::BAD_REQUEST
     );
+    let base2 = blake3::hash(b"# two\n").to_hex().to_string();
+    let (s, _, h) = put(
+        t,
+        &f,
+        "# three\n",
+        &[
+            ("if-match", &format!("W/{e2}")),
+            ("x-strata-base-hash", &base2),
+        ],
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let e2 = h["etag"].to_str().unwrap().to_string();
     // a deleted file can't be saved over with its old ETag
     t.ok("POST", "/api/files/delete", json!({"paths": [f.clone()]}))
         .await;
@@ -434,4 +449,62 @@ fn coarse_versions_are_recognised() {
     )));
     assert!(!is_coarse(&node(Some("abc"), 26, true)));
     assert!(is_coarse(&node(None, 26, false)));
+}
+
+#[tokio::test]
+async fn saves_through_overlapping_raw_mounts_are_serialised() {
+    let Some(t) = app().await else { return };
+    let cid = t
+        .ok(
+            "POST",
+            "/api/connections",
+            json!({"name": "d", "config": {"kind": "local", "path": "d"}}),
+        )
+        .await["id"]
+        .as_i64()
+        .unwrap();
+    t.ok(
+        "POST",
+        "/api/mounts",
+        json!({"path": "All", "connection_id": cid, "mode": "raw"}),
+    )
+    .await;
+    t.ok(
+        "POST",
+        "/api/mounts",
+        json!({"path": "Docs", "connection_id": cid, "base_path": "docs", "mode": "raw"}),
+    )
+    .await;
+    put(&t, "All/docs/n.md", "base", &[("if-none-match", "*")]).await;
+    let e = get_etag(&t, "All/docs/n.md").await;
+    let e2 = get_etag(&t, "Docs/n.md").await;
+    assert_eq!(e, e2, "same file, same version through both mounts");
+    let base = blake3::hash(b"base").to_hex().to_string();
+    let mut tasks = Vec::new();
+    for (i, path) in ["All/docs/n.md", "Docs/n.md", "All/docs/n.md", "Docs/n.md"]
+        .into_iter()
+        .enumerate()
+    {
+        let router = t.router.clone();
+        let cookie = t.cookie.clone().unwrap();
+        let (e, base) = (e.clone(), base.clone());
+        tasks.push(tokio::spawn(async move {
+            use tower::ServiceExt;
+            let req = axum::http::Request::put(format!("/api/files/content?path={}", enc(path)))
+                .header("cookie", cookie)
+                .header("x-strata", "1")
+                .header("if-match", e)
+                .header("x-strata-base-hash", base)
+                .body(Body::from(format!("writer {i}")))
+                .unwrap();
+            router.oneshot(req).await.unwrap().status()
+        }));
+    }
+    let mut ok = 0;
+    for h in tasks {
+        if h.await.unwrap() == StatusCode::OK {
+            ok += 1;
+        }
+    }
+    assert_eq!(ok, 1, "exactly one save may win across overlapping mounts");
 }

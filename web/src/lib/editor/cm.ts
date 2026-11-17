@@ -77,7 +77,9 @@ export interface EditorOptions {
   normalizePaste: () => boolean;
   name: string;
   readOnly: boolean;
-  onChange: (doc: string) => void;
+  /** Called on every change with the new length and a lazy getter (making
+   *  the full string on each keystroke would be slow on big files). */
+  onChange: (length: number, getDoc: () => string) => void;
 }
 
 export async function createEditor(parent: HTMLElement, o: EditorOptions) {
@@ -109,7 +111,7 @@ export async function createEditor(parent: HTMLElement, o: EditorOptions) {
           ...searchKeymap
         ]),
         EditorView.updateListener.of((u) => {
-          if (u.docChanged) o.onChange(u.state.doc.toString());
+          if (u.docChanged) o.onChange(u.state.doc.length, () => u.state.doc.toString());
         }),
         lang.of([])
       ]

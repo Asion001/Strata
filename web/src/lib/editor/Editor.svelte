@@ -9,7 +9,7 @@
   import { contentUrl } from '$lib/api';
   import { join, parent } from '$lib/format';
   import { MAX_EDIT_BYTES, MAX_VIEW_BYTES, conflictName, decodeUtf8, fromEditor, looksBinary, toEditor, type Eol } from './textio';
-  import { clearDraft, draftKey, expireDrafts, getDraft, isSignedIn, saveDraft, type Draft } from './drafts';
+  import { clearDraft, clearOwnDraft, draftKey, expireDrafts, getDraft, isSignedIn, saveDraft, type Draft } from './drafts';
   import { createBLAKE3 } from 'hash-wasm';
 
   let {
@@ -60,6 +60,8 @@
   let lastDraft = '';
 
   let destroyed = false;
+  /** This editor instance: drafts record which tab wrote them. */
+  const tab = Math.random().toString(36).slice(2);
 
   async function readCapped(r: Response, cap: number): Promise<Uint8Array> {
     const reader = r.body!.getReader();
@@ -110,10 +112,11 @@
   function renderPreview(doc: string) {
     if (!isMarkdown) return;
     clearTimeout(previewTimer);
+    // Bigger documents re-render less often.
     previewTimer = setTimeout(async () => {
       const { renderMarkdown } = await import('./markdown');
       preview = renderMarkdown(doc);
-    }, 150);
+    }, doc.length > 200_000 ? 800 : 150);
   }
 
   /** Editing rules for what was loaded: big or non-UTF-8 files are read-only. */
@@ -146,9 +149,11 @@
         normalizePaste: () => eol !== 'keep',
         name,
         readOnly,
-        onChange: (doc) => {
-          dirty = doc !== savedDoc;
-          renderPreview(doc);
+        onChange: (length, getDoc) => {
+          // Cheap for big files: different length means changed; only when
+          // the length matches is the text compared (undo back to saved).
+          dirty = length !== savedDoc.length || (length < 1_000_000 ? getDoc() !== savedDoc : true);
+          if (isMarkdown) renderPreview(getDoc());
         }
       });
       if (destroyed) {
@@ -180,6 +185,9 @@
 
   async function autosave() {
     if (!editor || !dirty) return;
+    // A recovered draft is still on offer: don't overwrite it with this
+    // session's text until the user restores or discards it.
+    if (draftOffer) return;
     // Only while this user is still the one signed in here (any tab may
     // have signed out); checked again after writing, since a sign-out can
     // land in between.
@@ -187,17 +195,19 @@
     const text = editor.getDoc();
     if (text === lastDraft) return;
     lastDraft = text;
-    await saveDraft({ key, baseEtag: etag, baseHash, text, savedAt: Date.now() }).catch(() => {});
+    await saveDraft({ key, baseEtag: etag, baseHash, text, savedAt: Date.now(), tab }).catch(() => {});
     if (!isSignedIn(userId)) await clearDraft(key).catch(() => {});
   }
 
   function restoreDraft() {
     if (!draftOffer || !editor) return;
+    if (dirty && !confirm('Replace what you typed since opening with the recovered draft?')) return;
     // Keep the draft's base: if the file changed since, saving asks how to resolve.
     etag = draftOffer.baseEtag;
     baseHash = draftOffer.baseHash ?? null;
     editor.setDoc(draftOffer.text);
     draftOffer = null;
+    lastDraft = '';
   }
 
   async function discardDraft() {
@@ -246,7 +256,7 @@
       savedDoc = doc;
       dirty = editor.getDoc() !== savedDoc;
       lastDraft = '';
-      await clearDraft(key).catch(() => {});
+      await clearOwnDraft(key, tab).catch(() => {});
       status = 'Saved';
       setTimeout(() => status === 'Saved' && (status = ''), 2000);
     } catch (e) {
@@ -272,7 +282,7 @@
           // editor; the folder shows the copy.
           closeConflict();
           dirty = false;
-          await clearDraft(key).catch(() => {});
+          await clearOwnDraft(key, tab).catch(() => {});
           alert(msg);
           onclose();
         }
@@ -306,7 +316,7 @@
       applyRules(f);
       dirty = false;
       lastDraft = '';
-      await clearDraft(key).catch(() => {});
+      await clearOwnDraft(key, tab).catch(() => {});
       closeConflict();
       status = message;
     } catch (e) {
@@ -336,13 +346,18 @@
     conflict = null;
   }
 
-  function close() {
+  async function close() {
     if (dirty && !confirm('Close with unsaved changes? A draft stays in this browser for up to 30 days, until you sign out, or until someone else signs in here.')) return;
+    await autosave(); // the last seconds of typing too
     onclose();
   }
 
   beforeNavigate((nav) => {
-    if (dirty && !confirm('You have unsaved changes. Leave anyway?')) nav.cancel();
+    if (dirty && !confirm('You have unsaved changes. Leave anyway?')) {
+      nav.cancel();
+      return;
+    }
+    void autosave();
   });
 
   // Ctrl/Cmd+S anywhere while the editor is open (not only in the text area).
@@ -361,7 +376,7 @@
   }
 </script>
 
-<svelte:window onbeforeunload={beforeUnload} onkeydown={onKey} />
+<svelte:window onbeforeunload={beforeUnload} onpagehide={() => void autosave()} onkeydown={onKey} />
 
 <div class="editor" role="dialog" aria-modal="true" aria-label="Edit {name}" tabindex="-1">
   <header>

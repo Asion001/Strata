@@ -166,7 +166,7 @@ pub async fn create(
 }
 
 /// Where a volume's files physically live: (connection or local directory, folder).
-async fn storage_root(
+pub async fn storage_root(
     st: &AppState,
     connection_id: i64,
     base: &str,

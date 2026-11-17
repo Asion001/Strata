@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import 'fake-indexeddb/auto';
 import { describe, expect, it } from 'vitest';
-import { DRAFT_TTL_MS, clearAllDrafts, clearDraft, draftKey, expireDrafts, getDraft, isSignedIn, keepOnlyUser, markSignedIn, markSignedOut, saveDraft } from './drafts';
+import { DRAFT_TTL_MS, clearAllDrafts, clearDraft, clearOwnDraft, draftKey, expireDrafts, getDraft, isSignedIn, keepOnlyUser, markSignedIn, markSignedOut, saveDraft } from './drafts';
 
 describe('drafts', () => {
   it('saves, reads and clears by user, mount and path', async () => {
@@ -41,5 +41,14 @@ describe('drafts', () => {
     expect(isSignedIn(3)).toBe(true);
     markSignedOut();
     expect(isSignedIn(3)).toBe(false);
+  });
+
+  it('a tab only clears drafts it wrote itself', async () => {
+    const k = draftKey(5, 1, 'x');
+    await saveDraft({ key: k, baseEtag: null, text: 'from B', savedAt: Date.now(), tab: 'B' });
+    await clearOwnDraft(k, 'A');
+    expect((await getDraft(k))?.text).toBe('from B');
+    await clearOwnDraft(k, 'B');
+    expect(await getDraft(k)).toBeUndefined();
   });
 });

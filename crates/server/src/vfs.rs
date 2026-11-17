@@ -73,14 +73,27 @@ pub struct VolumeLock(
     sqlx::Transaction<'static, sqlx::Postgres>,
     #[allow(dead_code)]
     (
-        tokio::sync::OwnedMutexGuard<()>,
+        Vec<tokio::sync::OwnedMutexGuard<()>>,
         tokio::sync::OwnedSemaphorePermit,
     ), // held until release/drop
 );
 
 pub async fn lock_volume(st: &AppState, volume_id: i64) -> ApiResult<VolumeLock> {
-    let local = st.volume_locks.entry(volume_id).or_default().clone();
-    let guard = local.lock_owned().await;
+    lock_volumes(st, &[volume_id]).await
+}
+
+/// Lock several volumes at once (always in ascending id order, so two
+/// multi-locks can't deadlock; single locks are a special case of it).
+/// One permit and one transaction cover them all.
+pub async fn lock_volumes(st: &AppState, ids: &[i64]) -> ApiResult<VolumeLock> {
+    let mut ids = ids.to_vec();
+    ids.sort_unstable();
+    ids.dedup();
+    let mut guards = Vec::with_capacity(ids.len());
+    for id in &ids {
+        let local = st.volume_locks.entry(*id).or_default().clone();
+        guards.push(local.lock_owned().await);
+    }
     // Cap concurrent holders well below the pool size, so every holder can
     // still get the extra connections its locked work needs.
     let permit = st
@@ -90,11 +103,13 @@ pub async fn lock_volume(st: &AppState, volume_id: i64) -> ApiResult<VolumeLock>
         .await
         .map_err(|e| ApiError::Internal(e.into()))?;
     let mut tx = st.db.begin().await?;
-    sqlx::query("SELECT pg_advisory_xact_lock(1398035009, $1::int4)")
-        .bind(volume_id as i32)
-        .execute(&mut *tx)
-        .await?;
-    Ok(VolumeLock(tx, (guard, permit)))
+    for id in &ids {
+        sqlx::query("SELECT pg_advisory_xact_lock(1398035009, $1::int4)")
+            .bind(*id as i32)
+            .execute(&mut *tx)
+            .await?;
+    }
+    Ok(VolumeLock(tx, (guards, permit)))
 }
 
 impl VolumeLock {
@@ -802,7 +817,7 @@ pub enum Expect {
 
 /// Check a precondition against the current state (call under the volume
 /// lock, so nothing can change between the check and the write). Metadata
-/// only; see `check_expect_content` for the base-content comparison.
+/// only; raw saves also compare content (`verify_raw_base`).
 pub fn check_expect(expect: &Expect, current: Option<&Node>) -> ApiResult<()> {
     if let Some(n) = current
         && n.is_dir
@@ -850,16 +865,17 @@ async fn digest_node(st: &AppState, m: &Mount, rel: &str, node: &Node) -> ApiRes
     Ok(Hash(*h.finalize().as_bytes()))
 }
 
-/// Full check for a raw entry (call under the volume lock): metadata, then
-/// the content against the base hash the client's edit started from.
+/// Content check for a raw save (call *before* taking the lock): metadata,
+/// then the content against the base hash the client's edit started from.
 /// Raw metadata can be too coarse to see every change, so a raw `If-Match`
-/// without a base hash is refused (428) rather than trusted.
-async fn check_expect_content(
+/// without a base hash is refused (428) rather than trusted. Returns the
+/// version that was verified, to be re-checked cheaply under the lock.
+async fn verify_raw_base(
     st: &AppState,
     m: &Mount,
     rel: &str,
     expect: &Expect,
-) -> ApiResult<()> {
+) -> ApiResult<Option<Node>> {
     let current = current_file(st, m, rel).await?;
     check_expect(expect, current.as_ref())?;
     if let (Expect::Etag { base, .. }, Some(n)) = (expect, &current) {
@@ -873,11 +889,64 @@ async fn check_expect_content(
         if n.size > BASE_CHECK_MAX || digest_node(st, m, rel, n).await? != *base {
             return Err(ApiError::PreconditionFailed(Some(etag_for(n))));
         }
-        // An outside writer (which doesn't take our lock) may have appended
-        // or rewritten the file while we read it: the version must still hold.
-        check_expect(expect, current_file(st, m, rel).await?.as_ref())?;
+    }
+    Ok(current)
+}
+
+/// Under the lock: the version must still be the one `verify_raw_base`
+/// checked. Coarse versions can't prove that, so their content is hashed
+/// again (at most 5 MB).
+async fn recheck_raw_base(
+    st: &AppState,
+    m: &Mount,
+    rel: &str,
+    expect: &Expect,
+    verified: &Option<Node>,
+) -> ApiResult<()> {
+    let now = current_file(st, m, rel).await?;
+    check_expect(expect, now.as_ref())?;
+    if let (Some(a), Some(b)) = (verified, &now) {
+        let same = etag_for(a) == etag_for(b);
+        if !same {
+            return Err(ApiError::PreconditionFailed(Some(etag_for(b))));
+        }
+        if is_coarse(b)
+            && let Expect::Etag {
+                base: Some(base), ..
+            } = expect
+            && digest_node(st, m, rel, b).await? != *base
+        {
+            return Err(ApiError::PreconditionFailed(Some(etag_for(b))));
+        }
     }
     Ok(())
+}
+
+/// Raw volumes whose folders overlap this one's on the same storage
+/// (including this one): saving a file must lock them all, since the same
+/// physical file can be reached through each.
+async fn overlapping_raw_volumes(st: &AppState, m: &Mount) -> ApiResult<Vec<i64>> {
+    let rows: Vec<(i64, i64, String)> =
+        sqlx::query_as("SELECT id, connection_id, base_path FROM volumes WHERE mode = 'raw'")
+            .fetch_all(&st.db)
+            .await?;
+    let (root, folder) = mounts::storage_root(st, m.connection_id, &m.base_path).await?;
+    let mut out = vec![m.volume_id];
+    for (id, cid, base) in rows {
+        if id == m.volume_id {
+            continue;
+        }
+        let Ok((r, f)) = mounts::storage_root(st, cid, &base).await else {
+            continue;
+        };
+        if r == root
+            && (paths::strip_prefix(&f, &folder).is_some()
+                || paths::strip_prefix(&folder, &f).is_some())
+        {
+            out.push(id);
+        }
+    }
+    Ok(out)
 }
 
 /// Current state of a file for a precondition check (None if missing).
@@ -928,7 +997,9 @@ pub async fn put_hashed_file_if(
         mkdir_in(st, m, parent).await?;
     }
     let lock = lock_volume(st, m.volume_id).await?;
-    check_expect(expect, get_node(st, m.volume_id, rel).await?.as_ref())?;
+    if *expect != Expect::Any {
+        check_expect(expect, get_node(st, m.volume_id, rel).await?.as_ref())?;
+    }
     let content = manifest_hash(chunks);
     let size: i64 = sizes.iter().sum();
     let mtime = mtime.unwrap_or_else(Utc::now);
@@ -1053,8 +1124,11 @@ pub async fn write_stream_if(
         // temp files on backends that can't abort, no parent folders).
         // Plain writes (uploads, copies) lock only around the final close.
         let early = if *expect != Expect::Any {
-            let l = lock_volume(st, m.volume_id).await?;
-            check_expect_content(st, m, rel, expect).await?;
+            // The (up to 5 MB) content comparison runs before the lock; under
+            // the lock only a cheap re-check that nothing changed since.
+            let verified = verify_raw_base(st, m, rel, expect).await?;
+            let l = lock_volumes(st, &overlapping_raw_volumes(st, m).await?).await?;
+            recheck_raw_base(st, m, rel, expect, &verified).await?;
             Some(l)
         } else {
             None

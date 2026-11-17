@@ -365,10 +365,12 @@ fn single_etag(v: &HeaderValue) -> ApiResult<String> {
         .to_str()
         .map_err(|_| bad("invalid precondition header"))?
         .trim();
-    if s.contains(',') || s.starts_with("W/") {
-        return Err(bad("If-Match takes exactly one strong ETag"));
+    if s.contains(',') {
+        return Err(bad("If-Match takes exactly one ETag"));
     }
-    Ok(s.to_string())
+    // Our tags are strong; a proxy may have weakened one in transit (e.g.
+    // when compressing). The opaque part still names the same version.
+    Ok(s.trim_start_matches("W/").to_string())
 }
 
 /// `PUT /api/files/content?path=`: save a whole file (the text editor).

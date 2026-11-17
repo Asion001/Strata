@@ -8,6 +8,8 @@ export interface Draft {
   baseHash?: string | null;
   text: string;
   savedAt: number;
+  /** The editor instance (tab) that wrote it: a tab only clears its own. */
+  tab?: string;
 }
 
 const DB = 'strata-editor';
@@ -19,8 +21,13 @@ export function draftKey(userId: number, mountId: number | null, path: string): 
 
 function open(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB, 1);
-    req.onupgradeneeded = () => req.result.createObjectStore(STORE, { keyPath: 'key' });
+    const req = indexedDB.open(DB, 2);
+    req.onupgradeneeded = (e) => {
+      const db = req.result;
+      const store =
+        e.oldVersion < 1 ? db.createObjectStore(STORE, { keyPath: 'key' }) : req.transaction!.objectStore(STORE);
+      if (!store.indexNames.contains('savedAt')) store.createIndex('savedAt', 'savedAt');
+    };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
   });
@@ -46,13 +53,49 @@ export const getDraft = (key: string) =>
   tx<Draft | undefined>('readonly', (s) => s.get(key) as IDBRequest<Draft | undefined>);
 export const clearDraft = (key: string) => tx('readwrite', (s) => s.delete(key)).then(() => undefined);
 
+/** Delete the draft only if this tab wrote it (one transaction), so saving in
+ *  one tab never throws away another tab's unsaved work on the same file. */
+export async function clearOwnDraft(key: string, tab: string): Promise<void> {
+  const db = await open();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const t = db.transaction(STORE, 'readwrite');
+      const s = t.objectStore(STORE);
+      const req = s.get(key);
+      req.onsuccess = () => {
+        const d = req.result as Draft | undefined;
+        if (d && d.tab === tab) s.delete(key);
+      };
+      t.oncomplete = () => resolve();
+      t.onerror = () => reject(t.error);
+    });
+  } finally {
+    db.close();
+  }
+}
+
 /** Drafts are kept for 30 days at most. */
 export const DRAFT_TTL_MS = 30 * 24 * 3600 * 1000;
 
-/** Remove drafts older than the TTL. */
+/** Remove drafts older than the TTL (keys only, one transaction). */
 export async function expireDrafts(now = Date.now()): Promise<void> {
-  const all = await tx<Draft[]>('readonly', (s) => s.getAll() as IDBRequest<Draft[]>);
-  for (const d of all) if (now - d.savedAt > DRAFT_TTL_MS) await clearDraft(d.key);
+  const db = await open();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const t = db.transaction(STORE, 'readwrite');
+      const req = t.objectStore(STORE).index('savedAt').openKeyCursor(IDBKeyRange.upperBound(now - DRAFT_TTL_MS, true));
+      req.onsuccess = () => {
+        const c = req.result;
+        if (!c) return;
+        t.objectStore(STORE).delete(c.primaryKey);
+        c.continue();
+      };
+      t.oncomplete = () => resolve();
+      t.onerror = () => reject(t.error);
+    });
+  } finally {
+    db.close();
+  }
 }
 
 // Who is signed in, shared by every tab (localStorage is synchronous and
@@ -95,6 +138,6 @@ export function clearAllDrafts(): Promise<void> {
 
 /** Drop drafts that belong to other users (when someone signs in here). */
 export async function keepOnlyUser(userId: number): Promise<void> {
-  const all = await tx<Draft[]>('readonly', (s) => s.getAll() as IDBRequest<Draft[]>);
-  for (const d of all) if (!d.key.startsWith(`${userId}|`)) await clearDraft(d.key);
+  const keys = await tx<IDBValidKey[]>('readonly', (s) => s.getAllKeys());
+  for (const k of keys) if (!String(k).startsWith(`${userId}|`)) await clearDraft(String(k));
 }
