@@ -69,7 +69,10 @@
   let showPreview = $state(false);
   let previewTimer: ReturnType<typeof setTimeout>;
   let draftTimer: ReturnType<typeof setInterval>;
-  let lastDraft = '';
+  /** The text last stored as this tab's draft (null: nothing stored yet). */
+  let lastDraft: string | null = null;
+  /** After a failed draft write, wait before trying the same text again. */
+  let retryAfter = 0;
 
   let destroyed = false;
   /** This editor instance: drafts record which tab wrote them. */
@@ -202,6 +205,7 @@
     // have signed out); checked again after writing, since a sign-out can
     // land in between.
     if (!isSignedIn(userId)) return;
+    if (Date.now() < retryAfter) return;
     const text = editor.getDoc();
     if (text === lastDraft) return;
     lastDraft = text;
@@ -210,12 +214,14 @@
     try {
       await saveTabDraft(key, tab, { baseEtag: etag, baseHash, text, savedAt: Date.now() });
     } catch {
-      lastDraft = ''; // not stored: try again on the next tick
+      lastDraft = null; // not stored: try again, but not on every tick
+      retryAfter = Date.now() + 30_000;
       return;
     }
+    retryAfter = 0;
     if (!isSignedIn(userId)) {
       await clearTabDraft(key, tab).catch(() => {});
-      lastDraft = ''; // not stored after all: write it again once allowed
+      lastDraft = null; // not stored after all: write it again once allowed
     }
   }
 
@@ -228,7 +234,7 @@
     baseHash = d.baseHash ?? null;
     editor.setDoc(d.text);
     draftOffer = null;
-    lastDraft = '';
+    lastDraft = null;
     // Our own copy carries on from here. The old entry is left alone (it may
     // be another tab's live work); once our copy is stored, it just isn't
     // offered again here. If storing fails, both stay recoverable.
@@ -293,7 +299,7 @@
       baseHash = nextHash;
       savedDoc = doc;
       dirty = editor.getDoc() !== savedDoc;
-      lastDraft = '';
+      lastDraft = null;
       await clearAfterSave(key, tab, doc).catch(() => {});
       status = 'Saved';
       setTimeout(() => status === 'Saved' && (status = ''), 2000);
@@ -353,7 +359,7 @@
       editor?.setDoc(t.doc);
       applyRules(f);
       dirty = false;
-      lastDraft = '';
+      lastDraft = null;
       await clearTabDraft(key, tab).catch(() => {});
       closeConflict();
       status = message;

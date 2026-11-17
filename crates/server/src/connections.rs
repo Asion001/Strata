@@ -65,25 +65,53 @@ impl Row {
 
 /// Compute and store a connection's storage location (see migration 0006).
 pub async fn store_location(st: &AppState, id: i64) -> ApiResult<(String, String)> {
-    let enc: Vec<u8> = sqlx::query_scalar("SELECT config_enc FROM connections WHERE id = $1")
+    // Optimistic: computed from the config as read, written only if that is
+    // still the config (a concurrent edit stores its own location in the same
+    // statement as its config). Raced? Read again.
+    for _ in 0..5 {
+        let (enc, cfg) = st.connection_config_enc(id).await?;
+        let loc = match cfg.location(&st.cfg.local_base) {
+            Ok(l) => l,
+            Err(e) => {
+                // No valid location: clear any stale one rather than trust it.
+                sqlx::query(
+                    "UPDATE connections SET storage_id = NULL, storage_folder = NULL WHERE id = $1 AND config_enc = $2",
+                )
+                .bind(id)
+                .bind(&enc)
+                .execute(&st.db)
+                .await?;
+                return Err(ApiError::Internal(e));
+            }
+        };
+        let r = sqlx::query(
+            "UPDATE connections SET storage_id = $2, storage_folder = $3
+             WHERE id = $1 AND config_enc = $4
+               AND (storage_id IS DISTINCT FROM $2 OR storage_folder IS DISTINCT FROM $3)",
+        )
         .bind(id)
-        .fetch_one(&st.db)
+        .bind(&loc.0)
+        .bind(&loc.1)
+        .bind(&enc)
+        .execute(&st.db)
         .await?;
-    let cfg: ConnectionConfig = serde_json::from_slice(&st.secrets.decrypt(&enc)?)
-        .map_err(|e| ApiError::Internal(e.into()))?;
-    let loc = cfg.location(&st.cfg.local_base)?;
-    // Only if the config is still the one we read: a concurrent edit (which
-    // stores its own location in the same statement) must not be undone.
-    sqlx::query(
-        "UPDATE connections SET storage_id = $2, storage_folder = $3 WHERE id = $1 AND config_enc = $4",
-    )
-    .bind(id)
-    .bind(&loc.0)
-    .bind(&loc.1)
-    .bind(&enc)
-    .execute(&st.db)
-    .await?;
-    Ok(loc)
+        if r.rows_affected() == 1 {
+            return Ok(loc);
+        }
+        // Nothing written: either already up to date, or the config changed.
+        let still: bool =
+            sqlx::query_scalar("SELECT config_enc = $2 FROM connections WHERE id = $1")
+                .bind(id)
+                .bind(&enc)
+                .fetch_one(&st.db)
+                .await?;
+        if still {
+            return Ok(loc);
+        }
+    }
+    Err(ApiError::Internal(anyhow::anyhow!(
+        "connection {id} kept changing"
+    )))
 }
 
 /// Recompute every connection's location at start-up, so rows written by

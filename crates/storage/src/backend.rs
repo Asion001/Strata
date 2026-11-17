@@ -61,7 +61,6 @@ impl ConnectionConfig {
     /// same files, so their folders can overlap (e.g. two users' WebDAV or S3
     /// connections to one share or bucket). Credentials are not part of it.
     pub fn location(&self, local_base: &Path) -> Result<(String, String)> {
-        let root = |r: &Option<String>| canonical_folder(r.as_deref().unwrap_or(""));
         Ok(match self {
             // Relative to the storage base (every local connection lives below
             // it), so moving the base doesn't make stored locations disagree.
@@ -70,10 +69,7 @@ impl ConnectionConfig {
                 ("local".into(), canonical_folder(path)?)
             }
             Self::S3 {
-                bucket,
-                endpoint,
-                root: r,
-                ..
+                bucket, endpoint, ..
             } => {
                 let host = match endpoint.as_deref() {
                     None | Some("") => "s3.amazonaws.com".to_string(),
@@ -85,15 +81,24 @@ impl ConnectionConfig {
                 } else {
                     host
                 };
-                (format!("s3:{host}|{bucket}"), root(r)?)
+                (format!("s3:{host}|{bucket}"), self.remote_root()?)
             }
-            Self::Ftp {
-                endpoint, root: r, ..
-            } => (
+            Self::Ftp { endpoint, .. } => (
                 format!("ftp:{}", endpoint_host(endpoint, &[21, 990])),
-                root(r)?,
+                self.remote_root()?,
             ),
         })
+    }
+
+    /// The canonical root folder of a remote (S3/FTP) connection: the one
+    /// value both `operator` and `location` use. Empty for local ones.
+    fn remote_root(&self) -> Result<String> {
+        match self {
+            Self::S3 { root, .. } | Self::Ftp { root, .. } => {
+                canonical_folder(root.as_deref().unwrap_or(""))
+            }
+            Self::Local { .. } => Ok(String::new()),
+        }
     }
 
     /// A copy with secrets blanked, safe to send to the UI.
@@ -175,7 +180,7 @@ impl ConnectionConfig {
                 endpoint,
                 access_key_id,
                 secret_access_key,
-                root,
+                root: _,
             } => {
                 let mut b = services::S3::default()
                     .bucket(bucket)
@@ -186,7 +191,7 @@ impl ConnectionConfig {
                     b = b.endpoint(e);
                 }
                 // The canonical root, exactly what `location` records.
-                let r = canonical_folder(root.as_deref().unwrap_or(""))?;
+                let r = self.remote_root()?;
                 if !r.is_empty() {
                     b = b.root(&format!("/{r}"));
                 }
@@ -196,7 +201,7 @@ impl ConnectionConfig {
                 endpoint,
                 user,
                 password,
-                root,
+                root: _,
             } => {
                 let mut b = services::Ftp::default().endpoint(endpoint);
                 if let Some(u) = user.as_deref().filter(|u| !u.is_empty()) {
@@ -206,7 +211,7 @@ impl ConnectionConfig {
                     b = b.password(p);
                 }
                 // The canonical root, exactly what `location` records.
-                let r = canonical_folder(root.as_deref().unwrap_or(""))?;
+                let r = self.remote_root()?;
                 if !r.is_empty() {
                     b = b.root(&format!("/{r}"));
                 }
