@@ -1,0 +1,61 @@
+name: Privacy
+
+# Keeps personal data and secrets out of the repository.
+# - private-data: checks added lines, commit messages, authors and the PR
+#   title/body against patterns from the PRIVATE_PATTERNS secret. Matches are
+#   reported by location only. Skips when the secret is unavailable (forks).
+# - secrets: gitleaks over the new commits.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  private-data:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check for private data
+        env:
+          PRIVATE_PATTERNS: ${{ secrets.PRIVATE_PATTERNS }}
+          RANGE: ${{ github.event_name == 'pull_request' && format('{0}..{1}', github.event.pull_request.base.sha, github.event.pull_request.head.sha) || format('{0}..{1}', github.event.before, github.sha) }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          if [ -z "$PRIVATE_PATTERNS" ]; then
+            echo "::notice::PRIVATE_PATTERNS secret not available, skipping"
+            exit 0
+          fi
+          status=0
+          if git cat-file -e "${RANGE%%..*}^{commit}" 2>/dev/null; then
+            scripts/check-private.sh --range "$RANGE" || status=1
+          else
+            scripts/check-private.sh --range "${RANGE##*..}~1..${RANGE##*..}" || status=1
+          fi
+          printf '%s\n%s\n' "$PR_TITLE" "$PR_BODY" | scripts/check-private.sh --stdin "PR title/description" || status=1
+          exit $status
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: gitleaks
+        env:
+          RANGE: ${{ github.event_name == 'pull_request' && format('{0}..{1}', github.event.pull_request.base.sha, github.event.pull_request.head.sha) || format('{0}..{1}', github.event.before, github.sha) }}
+        run: |
+          if ! git cat-file -e "${RANGE%%..*}^{commit}" 2>/dev/null; then
+            RANGE="${RANGE##*..}~1..${RANGE##*..}"
+          fi
+          docker run --rm -v "$PWD:/repo" -w /repo ghcr.io/gitleaks/gitleaks:v8.18.4 \
+            detect --source /repo --log-opts="$RANGE" --redact --no-banner -v
