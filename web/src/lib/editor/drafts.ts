@@ -174,8 +174,15 @@ export function clearAllDrafts(): Promise<void> {
   });
 }
 
-/** Drop drafts that belong to other users (when someone signs in here). */
+/** Drop drafts (and declined-offer marks) of other users, when someone
+ *  signs in here. */
 export async function keepOnlyUser(userId: number): Promise<void> {
+  const mine = (k: string) => k.startsWith(`${userId}|`);
+  try {
+    const m = JSON.parse(localStorage.getItem(SEEN_KEY) ?? '{}');
+    for (const k of Object.keys(m)) if (!mine(k)) delete m[k];
+    localStorage.setItem(SEEN_KEY, JSON.stringify(m));
+  } catch {}
   const keys = await tx<IDBValidKey[]>('readonly', (s) => s.getAllKeys());
-  for (const k of keys) if (!String(k).startsWith(`${userId}|`)) await clearDraft(String(k));
+  for (const k of keys) if (!mine(String(k))) await clearDraft(String(k));
 }

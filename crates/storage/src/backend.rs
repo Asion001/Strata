@@ -61,7 +61,14 @@ impl ConnectionConfig {
     /// same files, so their folders can overlap (e.g. two users' WebDAV or S3
     /// connections to one share or bucket). Credentials are not part of it.
     pub fn location(&self, local_base: &Path) -> Result<(String, String)> {
-        let norm = |r: &Option<String>| r.as_deref().unwrap_or("").trim_matches('/').to_string();
+        // Canonical folder: `a//b`, `/a/b/` and `a/b` are the same place.
+        let canon = |p: &str| {
+            p.split('/')
+                .filter(|c| !c.is_empty() && *c != ".")
+                .collect::<Vec<_>>()
+                .join("/")
+        };
+        let norm = |r: &Option<String>| canon(r.as_deref().unwrap_or(""));
         Ok(match self {
             // Relative to the storage base (every local connection lives below
             // it), so moving the base doesn't make stored locations disagree.
@@ -415,5 +422,9 @@ mod tests {
         };
         assert_eq!(local("store//users/5"), local("store/users/5"));
         assert_eq!(local("store/users/5/"), local("/store/users/5"));
+        assert_eq!(
+            s3("a", Some("data//store/")).location(base).unwrap(),
+            s3("a", Some("/data/store")).location(base).unwrap()
+        );
     }
 }

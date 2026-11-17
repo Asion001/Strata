@@ -926,21 +926,28 @@ async fn recheck_raw_base(
 /// (including this one): saving a file must lock them all, since the same
 /// physical file can be reached through each.
 async fn overlapping_raw_volumes(st: &AppState, m: &Mount) -> ApiResult<Vec<i64>> {
-    let rows: Vec<(i64, i64, String)> =
-        sqlx::query_as("SELECT id, connection_id, base_path FROM volumes WHERE mode = 'raw'")
-            .fetch_all(&st.db)
-            .await?;
-    let (root, folder) = mounts::storage_root(st, m.connection_id, &m.base_path).await?;
+    // (volume id, connection id, base path, stored storage id, stored folder)
+    type Row = (i64, i64, String, Option<String>, Option<String>);
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT v.id, v.connection_id, v.base_path, c.storage_id, c.storage_folder
+         FROM volumes v JOIN connections c ON c.id = v.connection_id WHERE v.mode = 'raw'",
+    )
+    .fetch_all(&st.db)
+    .await?;
+    let here = mounts::storage_root(st, m.connection_id, &m.base_path).await?;
     let mut out = vec![m.volume_id];
-    for (id, cid, base) in rows {
+    for (id, cid, base, sid, sfolder) in rows {
         if id == m.volume_id {
             continue;
         }
-        // A failure here must fail the save, never silently skip a lock.
-        let Some(other) = mounts::storage_root_if_readable(st, cid, &base).await? else {
-            continue; // unreadable config: can't reach storage, can't write
+        let other = match (sid, sfolder) {
+            (Some(r), Some(f)) => (r, paths::join(&f, &base)),
+            _ => match mounts::storage_root_if_readable(st, cid, &base).await? {
+                Some(x) => x,
+                None => continue, // unreadable config: can't reach storage, can't write
+            },
         };
-        if mounts::overlaps(&(root.clone(), folder.clone()), &other) {
+        if mounts::overlaps(&here, &other) {
             out.push(id);
         }
     }

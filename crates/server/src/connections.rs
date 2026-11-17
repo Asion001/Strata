@@ -78,9 +78,10 @@ pub async fn store_location(st: &AppState, id: i64) -> ApiResult<(String, String
     Ok(loc)
 }
 
-/// Fill in locations missing on connections saved by older versions.
+/// Recompute every connection's location at start-up, so rows written by
+/// older versions (missing, or in an older format) always match today's rule.
 pub async fn backfill_locations(st: &AppState) {
-    let ids: Vec<i64> = sqlx::query_scalar("SELECT id FROM connections WHERE storage_id IS NULL")
+    let ids: Vec<i64> = sqlx::query_scalar("SELECT id FROM connections")
         .fetch_all(&st.db)
         .await
         .unwrap_or_default();

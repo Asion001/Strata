@@ -178,7 +178,7 @@
         // The newest unsaved work any tab left for this file.
         const all = await listDrafts(key).catch(() => [] as Draft[]);
         if (destroyed) return;
-        draftOffer = all.find((d) => d.tab !== tab && !offerSeen(d) && d.text !== t.doc) ?? null;
+        draftOffer = all.find((d) => !offerSeen(d) && d.text !== t.doc) ?? null;
         draftTimer = setInterval(autosave, 2000);
       }
     } catch (e) {
@@ -221,12 +221,15 @@
     editor.setDoc(d.text);
     draftOffer = null;
     lastDraft = '';
-    // Our own copy carries on from here; the old entry is left alone (it may
-    // be another tab's live work) and just isn't offered again here.
-    markOfferSeen(d);
+    // Our own copy carries on from here. The old entry is left alone (it may
+    // be another tab's live work); once our copy is stored, it just isn't
+    // offered again here. If storing fails, both stay recoverable.
     if (!isSignedIn(userId)) return;
-    await saveTabDraft(key, tab, { baseEtag: etag, baseHash, text: d.text, savedAt: Date.now() }).catch(() => {});
-    lastDraft = d.text;
+    try {
+      await saveTabDraft(key, tab, { baseEtag: etag, baseHash, text: d.text, savedAt: Date.now() });
+      lastDraft = d.text;
+      markOfferSeen(d);
+    } catch {}
   }
 
   function discardDraft() {
