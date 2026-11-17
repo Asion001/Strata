@@ -17,7 +17,7 @@
     zoom = 1;
     const it = item;
     if (it && isText(it.name, it.size)) {
-      fetch(it.src).then(decodeText).then((t) => { if (item === it) text = t; });
+      fetch(it.src).then(decodeText).then((t) => { if (item === it) text = t; }).catch(() => {});
     }
     // preload neighbouring images
     for (const j of [index - 1, index + 1]) {
@@ -29,6 +29,7 @@
   // Decode with the charset the server detected; text without one is UTF-8
   // if valid, else a legacy 8-bit encoding (Windows-1251 covers Cyrillic).
   async function decodeText(r: Response): Promise<string> {
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const buf = await r.arrayBuffer();
     const charset = /charset=([\w-]+)/i.exec(r.headers.get('content-type') ?? '')?.[1];
     // The server sniffs only the start of the file; check the whole body.
@@ -36,7 +37,9 @@
     try {
       return new TextDecoder('utf-8', { fatal: true }).decode(buf);
     } catch {
-      return new TextDecoder('windows-1251').decode(buf);
+      // Not UTF-8: guess the legacy code page from the user's language.
+      const cyrillic = /^(uk|ru|be|bg|sr|mk|kk)\b/i.test(navigator.language);
+      return new TextDecoder(cyrillic ? 'windows-1251' : 'windows-1252').decode(buf);
     }
   }
 

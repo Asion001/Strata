@@ -186,7 +186,9 @@ fn mpeg_frame_len(h: &[u8]) -> Option<usize> {
 /// bytes of Windows-1251 text (e.g. "я...") can look like one.
 fn mpeg_frame(h: &[u8]) -> bool {
     match mpeg_frame_len(h) {
-        Some(len) => h.len() >= len + 4 && mpeg_frame_len(&h[len..]).is_some(),
+        // The next header must follow, unless the frame is longer than the
+        // sniffed head (then `classify` lets text win if it looks like text).
+        Some(len) => h.len() < len + 4 || mpeg_frame_len(&h[len..]).is_some(),
         None => false,
     }
 }
@@ -202,7 +204,7 @@ fn adts_frame(h: &[u8]) -> bool {
         (len >= 7).then_some(len)
     };
     match header(h) {
-        Some(len) => h.len() >= len + 7 && header(&h[len..]).is_some(),
+        Some(len) => h.len() < len + 7 || header(&h[len..]).is_some(),
         None => false,
     }
 }
@@ -268,8 +270,18 @@ pub struct Class {
 }
 
 pub fn classify(name: &str, head: &[u8]) -> Class {
-    let sniffed = sniff(head);
     let text = text_kind(head);
+    let mut sniffed = sniff(head);
+    // MPEG audio and ADTS have no real magic number, only a sync word that
+    // ordinary text (e.g. Windows-1251 "я...", UTF-16LE's FF FE) can mimic.
+    // Real audio has control bytes in its head; if this looks like text, it
+    // is text. (ID3-tagged MP3 has a real signature and is unaffected.)
+    if matches!(sniffed, Some("audio/mpeg") | Some("audio/aac"))
+        && !head.starts_with(b"ID3")
+        && text.is_some()
+    {
+        sniffed = None;
+    }
     let svg = ext(name) == "svg"
         && sniffed.is_none()
         && text.is_some()
@@ -465,11 +477,21 @@ mod tests {
         mp3.resize(417, 0);
         mp3.extend_from_slice(&[0xFF, 0xFB, 0x90, 0x00]);
         assert_eq!(sniff(&mp3), Some("audio/mpeg"));
+        // a lone header whose frame would end past the head: binary is audio,
+        // text-looking bytes are text
+        let mut lone = vec![0xFF, 0xFB, 0x90, 0x00, 0x01, 0x02];
+        lone.resize(100, 0x01);
+        assert_eq!(classify("a", &lone).base, "audio/mpeg");
         assert_eq!(
-            sniff(&[0xFF, 0xFB, 0x90, 0x00]),
-            None,
-            "one header is not enough"
+            classify("a.txt", &[0xFF, 0xE2, 0xE8, b'a']).base,
+            "text/plain"
         );
+        // UTF-16LE text whose bytes look like MPEG Layer I stays text
+        let mut u16 = vec![0xFF, 0xFE];
+        for _ in 0..200 {
+            u16.extend_from_slice(&[0xFF, 0xFE, b'H', 0]);
+        }
+        assert_eq!(classify("a.txt", &u16).base, "text/plain; charset=utf-16le");
         // Windows-1251 Cyrillic text stays viewable
         let cp1251 = [
             0xCF, 0xF0, 0xE8, 0xE2, 0xE5, 0xF2, b' ', 0xEC, 0xE8, 0xF0, b'\n',

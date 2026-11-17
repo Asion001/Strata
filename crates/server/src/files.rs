@@ -87,6 +87,22 @@ async fn head_bytes(st: &AppState, m: &Mount, rel: &str, node: &Node) -> ApiResu
 /// The serving decision needs the first bytes of the file. Its result is
 /// cached per (volume, path, version), so Range requests (video seeking) and
 /// repeat views don't read the head again.
+fn class_key(m: &Mount, rel: &str, node: &Node) -> Option<String> {
+    node.etag
+        .as_ref()
+        .map(|e| format!("{}|{rel}|{e}", m.volume_id))
+}
+
+fn cached_class(st: &AppState, m: &Mount, rel: &str, node: &Node) -> Option<safe::Class> {
+    st.decisions.get(&class_key(m, rel, node)?)
+}
+
+fn remember_class(st: &AppState, m: &Mount, rel: &str, node: &Node, class: safe::Class) {
+    if let Some(k) = class_key(m, rel, node) {
+        st.decisions.insert(k, class);
+    }
+}
+
 async fn classify_cached(
     st: &AppState,
     m: &Mount,
@@ -150,11 +166,36 @@ pub async fn serve(
     }
     let range = parse_range(headers, size)?;
     let (start, end) = range.unwrap_or((0, size));
-    let class = classify_cached(st, m, rel, node).await?;
+    // One read serves both the type decision and the body when the body
+    // starts at 0: peek its first bytes, then hand them on. The type and the
+    // bytes therefore always come from the same version of the file.
+    let mut stream = vfs::read_stream(st, m, rel, node, start, end).await?;
+    let class = match cached_class(st, m, rel, node) {
+        Some(c) => c,
+        None if start == 0 => {
+            let mut head: Vec<u8> = Vec::new();
+            let want = (end - start).min(safe::SNIFF_LEN) as usize;
+            let mut peeked = Vec::new();
+            while head.len() < want {
+                match stream.next().await {
+                    Some(Ok(b)) => {
+                        head.extend_from_slice(&b[..b.len().min(want - head.len())]);
+                        peeked.push(b);
+                    }
+                    Some(Err(e)) => return Err(ApiError::Internal(e.into())),
+                    None => break,
+                }
+            }
+            let class = safe::classify(&node.name, &head);
+            remember_class(st, m, rel, node, class);
+            let replay = futures::stream::iter(peeked.into_iter().map(Ok));
+            stream = Box::pin(replay.chain(stream));
+            class
+        }
+        // Mid-file range with no cached type: classify from the head.
+        None => classify_cached(st, m, rel, node).await?,
+    };
     let decision = safe::decide_class(class, purpose);
-    // The body is one read of its own: never splice the sniffed head of one
-    // version onto the rest of another.
-    let stream = vfs::read_stream(st, m, rel, node, start, end).await?;
     let mut resp = Response::new(Body::from_stream(stream));
     let h = resp.headers_mut();
     safe::protect(h);
