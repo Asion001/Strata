@@ -179,9 +179,9 @@ pub fn overlaps(a: (&str, &str), b: (&str, &str)) -> bool {
         && (paths::strip_prefix(a.1, b.1).is_some() || paths::strip_prefix(b.1, a.1).is_some())
 }
 
-/// Volume locations for loops over many volumes: each connection's root is
-/// looked up once. A root comes from the connection's stored columns (as
-/// fetched with a JOIN), else from its config. It is unknown (`None`) when
+/// Volume locations for loops over many volumes. A connection's root comes
+/// from its stored columns (as fetched with a JOIN), else from its config
+/// (looked up once per connection). It is unknown (`None`) when
 /// the config names no valid location, or can't be decrypted and no
 /// location was stored before: such a connection can't reach any storage
 /// now. The one rule shared by mount guards and save locks.

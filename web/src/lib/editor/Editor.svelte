@@ -336,10 +336,9 @@
         lastDraft = null;
         await clearAfterSave(key, tab, doc);
         // Typed during the save? That text's draft was just cleared with
-        // the rest: store it again now. While writes are backing off it
-        // waits like any other (a delete working doesn't show that writes
-        // do, e.g. with a full store).
-        await writeDraft();
+        // the rest: one attempt to store it again now, backoff or not (at
+        // most one per save, so a failing store isn't hammered).
+        await writeDraft(true);
       });
       status = 'Saved';
       setTimeout(() => status === 'Saved' && (status = ''), 2000);

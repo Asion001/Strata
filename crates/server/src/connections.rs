@@ -267,15 +267,12 @@ pub async fn update(
             .bind(id)
             .fetch_one(&st.db)
             .await?;
-    // The stored kind needs no decryption, so this holds even for a config
-    // the server can't read any more (which can still be replaced, with its
-    // secrets entered again).
     if kind != req.config.kind() {
         return Err(bad("the backend type of a connection cannot change"));
     }
-    if let Ok(old) = st.decrypt_config(&old_enc) {
-        req.config.merge_secrets(&old);
-    }
+    // Blank secrets mean "unchanged", so the old config must be readable; if
+    // it isn't, the server key needs fixing, not the connection.
+    req.config.merge_secrets(&st.decrypt_config(&old_enc)?);
     let op = req
         .config
         .operator(&st.cfg.local_base)
@@ -374,7 +371,7 @@ pub async fn delete(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
-    st.forget_operator(id);
+    st.drop_operator(id);
     Ok(Json(json!({})))
 }
 
