@@ -71,7 +71,9 @@
   let draftTimer: ReturnType<typeof setInterval>;
   /** The text last stored as this tab's draft (null: nothing stored yet). */
   let lastDraft: string | null = null;
-  type DraftResult = 'stored' | 'failed' | 'skipped';
+  /** clean: nothing unsaved; waiting: backing off; signedOut: drafts are
+   *  not kept for a signed-out user. */
+  type DraftResult = 'clean' | 'stored' | 'waiting' | 'failed' | 'signedOut';
   /** Draft write backoff. After a failed periodic write, ticks skip until
    *  `retryAfter`; the wait doubles with each such failure in a row (5 s up
    *  to 60 s), so a full store isn't hammered every tick. Writes that follow
@@ -260,22 +262,26 @@
    *  'afterSave': text typed during a save, whose draft the save's clean-up
    *  just removed. */
   async function writeDraft(why: 'tick' | 'final' | 'afterSave' = 'tick'): Promise<DraftResult> {
-    if (!editor || !dirty) return 'skipped';
-    const byUser = why !== 'tick';
-    // Only while this user is still the one signed in here (any tab may
-    // have signed out); checked again after writing, since a sign-out can
-    // land in between.
-    if (!isSignedIn(userId)) return 'skipped';
+    if (!editor || !dirty) return 'clean';
     const text = editor.getDoc();
-    if (text === lastDraft) return 'stored';
+    // A last chance writes even an unchanged text: the stored copy may have
+    // been removed meanwhile (e.g. a sign-out and back in elsewhere).
+    if (text === lastDraft && why !== 'final') return 'stored';
     // Backing off: ticks wait; writes after a user action still try.
-    if (!byUser && inBackoff()) return 'skipped';
-    // This tab's own entry: other tabs' drafts (and a recovery offer still
-    // on screen) are never overwritten.
+    if (why === 'tick' && inBackoff()) return 'waiting';
+    return persist(text, why !== 'tick');
+  }
+
+  /** Store `text` as this tab's draft, only while this user is still the
+   *  one signed in here (any tab may have signed out; checked again after
+   *  writing, since a sign-out can land in between). This tab's own entry:
+   *  other tabs' drafts (and a recovery offer on screen) are never touched. */
+  async function persist(text: string, byUser: boolean): Promise<DraftResult> {
+    if (!isSignedIn(userId)) return 'signedOut';
     if (!(await storeDraft(text, byUser))) return 'failed';
     if (!isSignedIn(userId)) {
       await clearTabDraft(key, tab).catch(() => {});
-      return 'skipped';
+      return 'signedOut';
     }
     lastDraft = text;
     return 'stored';
@@ -297,14 +303,7 @@
     // is still in flight can't land after it.
     await afterDrafts(async () => {
       lastDraft = null;
-      if (!isSignedIn(userId) || !(await storeDraft(d.text, true))) return;
-      // A sign-out may have landed during the write: don't leave it behind.
-      if (!isSignedIn(userId)) {
-        await clearTabDraft(key, tab);
-        return;
-      }
-      lastDraft = d.text;
-      markOfferSeen(d);
+      if ((await persist(d.text, true)) === 'stored') markOfferSeen(d);
     });
   }
 
@@ -463,9 +462,11 @@
     if (dirty && !confirm('Close with unsaved changes? A draft stays in this browser for up to 30 days, until you sign out, or until someone else signs in here.')) return;
     // The last seconds of typing too; stuck storage never keeps the editor
     // from closing.
-    // Warn only when the write really failed (a slow one still lands).
-    if ((await atMost(autosave(true), 2000)) === 'failed') {
-      if (!confirm('The draft could not be stored in this browser. Close anyway and lose the unsaved changes?')) return;
+    // Close quietly only when nothing is unsaved or the draft is known to
+    // be stored; a failed, slow or refused write asks first.
+    const r = await atMost(autosave(true), 2000);
+    if (r !== 'clean' && r !== 'stored') {
+      if (!confirm('The draft could not be stored in this browser (storage full or slow, or signed out). Close anyway and lose the unsaved changes?')) return;
     }
     onclose();
   }
