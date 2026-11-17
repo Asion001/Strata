@@ -1,10 +1,36 @@
 // @vitest-environment jsdom
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { DRAFT_TTL_MS, clearAfterSave, clearAllDrafts, clearDraft, listDrafts, markOfferSeen, offerSeen, saveTabDraft, draftKey, expireDrafts, getDraft, isSignedIn, keepOnlyUser, markSignedIn, markSignedOut, saveDraft } from './drafts';
+import { DRAFT_TTL_MS, hasTabDraft, clearTabDraft, clearAfterSave, clearAllDrafts, clearDraft, listDrafts, markOfferSeen, offerSeen, saveTabDraft, draftKey, expireDrafts, getDraft, isSignedIn, keepOnlyUser, markSignedIn, markSignedOut, saveDraft } from './drafts';
 
 describe('drafts', () => {
   beforeEach(() => markSignedIn(1));
+
+  it('expiry spares the drafts of tabs still open', async () => {
+    const f = draftKey(1, 1, 'live');
+    await saveTabDraft(f, 'L', { baseEtag: null, text: 'open tab', savedAt: 0 });
+    await saveTabDraft(f, 'D', { baseEtag: null, text: 'closed tab', savedAt: 0 });
+    Object.defineProperty(navigator, 'locks', {
+      configurable: true,
+      value: { query: async () => ({ held: [{ name: 'strata-draft-tab:L' }] }) }
+    });
+    try {
+      await expireDrafts(DRAFT_TTL_MS + 1);
+    } finally {
+      Object.defineProperty(navigator, 'locks', { configurable: true, value: undefined });
+    }
+    expect((await listDrafts(f)).map((d) => d.tab)).toEqual(['L']);
+  });
+
+  it('tells whether this tab has a stored draft', async () => {
+    const f = draftKey(1, 1, 'h');
+    expect(await hasTabDraft(f, 'T')).toBe(false);
+    await saveTabDraft(f, 'T', { baseEtag: null, text: 'x', savedAt: 1 });
+    expect(await hasTabDraft(f, 'T')).toBe(true);
+    expect(await hasTabDraft(f, 'U')).toBe(false);
+    await clearTabDraft(f, 'T');
+    expect(await hasTabDraft(f, 'T')).toBe(false);
+  });
 
   it('a signed-out browser never recreates the wiped database', async () => {
     await saveDraft({ key: 'k', baseEtag: null, text: 'x', savedAt: 1 });

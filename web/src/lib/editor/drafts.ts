@@ -36,8 +36,8 @@ export async function listDrafts(fileKey: string): Promise<Draft[]> {
   return all.sort((a, b) => b.savedAt - a.savedAt);
 }
 
-/** Is this tab's draft of a file stored? (Only this tab writes it, so its
- *  text is the last one this tab stored.) */
+/** Is this tab's draft of a file stored? Only this tab writes its entry,
+ *  and only through `saveTabDraft`, so it holds the last text it stored. */
 export async function hasTabDraft(fileKey: string, tab: string): Promise<boolean> {
   return (await tx<number>('readonly', (s) => s.count(entryKey(fileKey, tab)))) > 0;
 }
@@ -111,7 +111,7 @@ function open(): Promise<IDBDatabase> {
       // No one signed in: the drafts were wiped on sign-out (or never
       // existed). A late writer from another tab must not bring the
       // database back, so it isn't created.
-      if (!anyoneSignedIn()) {
+      if (signedInId() === null) {
         req.transaction?.abort();
         return;
       }
@@ -148,7 +148,33 @@ export const DRAFT_TTL_MS = 30 * 24 * 3600 * 1000;
 
 /** Remove drafts older than the TTL (one transaction, one draft in memory
  *  at a time). */
-export const expireDrafts = (now = Date.now()) => deleteWhere((d) => now - d.savedAt > DRAFT_TTL_MS);
+export async function expireDrafts(now = Date.now()): Promise<void> {
+  const live = await liveTabs();
+  await deleteWhere((d) => now - d.savedAt > DRAFT_TTL_MS && !(d.tab && live.has(d.tab)));
+}
+
+// An open editor holds a Web Lock named after its tab for its lifetime, so
+// expiry never removes the draft of a tab that is still open, however old.
+const LOCK_PREFIX = 'strata-draft-tab:';
+
+/** Hold this tab's lock until the returned function is called. */
+export function holdTabLock(tab: string): () => void {
+  let release = () => {};
+  const held = new Promise<void>((r) => (release = r));
+  try {
+    navigator.locks?.request(LOCK_PREFIX + tab, () => held).catch(() => {});
+  } catch {}
+  return release;
+}
+
+async function liveTabs(): Promise<Set<string>> {
+  try {
+    const q = await navigator.locks?.query();
+    return new Set((q?.held ?? []).map((l) => l.name ?? '').filter((n) => n.startsWith(LOCK_PREFIX)).map((n) => n.slice(LOCK_PREFIX.length)));
+  } catch {
+    return new Set();
+  }
+}
 
 // Who is signed in, shared by every tab (localStorage is synchronous and
 // cross-tab). Autosave only writes while it names the draft's user.
@@ -175,10 +201,6 @@ function signedInId(): string | null | undefined {
   } catch {
     return undefined;
   }
-}
-
-function anyoneSignedIn(): boolean {
-  return signedInId() !== null;
 }
 
 export function isSignedIn(userId: number): boolean {
