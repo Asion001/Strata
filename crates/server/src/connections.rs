@@ -262,18 +262,19 @@ pub async fn update(
 ) -> ApiResult<Json<ConnectionView>> {
     check_access(&st, &u, id).await?;
     validate(&u, &req.name, &req.config)?;
-    // An old config that can't be decrypted (e.g. after a key change) can
-    // still be replaced, with its secrets entered again.
-    let old_enc: Vec<u8> = sqlx::query_scalar("SELECT config_enc FROM connections WHERE id = $1")
-        .bind(id)
-        .fetch_one(&st.db)
-        .await?;
-    if let Ok(old) = st.decrypt_config(&old_enc) {
-        if old.kind() != req.config.kind() {
-            return Err(bad("the backend type of a connection cannot change"));
-        }
-        req.config.merge_secrets(&old);
+    // Under the layout lock (the overlap check below) and the row lock, so
+    // concurrent edits each merge secrets into the config the other wrote.
+    let (mut tx, _layout) = crate::mounts::lock_layout(&st).await?;
+    let old_enc: Vec<u8> =
+        sqlx::query_scalar("SELECT config_enc FROM connections WHERE id = $1 FOR UPDATE")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?;
+    let old = st.decrypt_config(&old_enc)?;
+    if old.kind() != req.config.kind() {
+        return Err(bad("the backend type of a connection cannot change"));
     }
+    req.config.merge_secrets(&old);
     let op = req
         .config
         .operator(&st.cfg.local_base)
@@ -285,7 +286,6 @@ pub async fn update(
         .config
         .location(&st.cfg.local_base)
         .map_err(|e| bad(format!("invalid config: {e}")))?;
-    let (mut tx, _layout) = crate::mounts::lock_layout(&st).await?;
     let volumes: Vec<(String, String)> =
         sqlx::query_as("SELECT base_path, mode FROM volumes WHERE connection_id = $1")
             .bind(id)

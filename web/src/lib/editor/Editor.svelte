@@ -335,6 +335,9 @@
       void afterDrafts(async () => {
         lastDraft = null;
         await clearAfterSave(key, tab, doc);
+        // Storage works again: any backoff from an earlier failure is over.
+        retryDelay = 0;
+        retryAfter = 0;
         // Typed during the save? That text's draft was just cleared with
         // the rest: store it again now (unless writes are backing off).
         await writeDraft();

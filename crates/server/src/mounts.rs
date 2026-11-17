@@ -295,13 +295,17 @@ pub async fn check_overlap_at(
     .bind(except)
     .fetch_all(&st.db)
     .await?;
+    let here: Vec<((String, String), &String)> = places
+        .iter()
+        .map(|(r, f, m)| ((r.clone(), f.clone()), m))
+        .collect();
     let mut locs = Locations::default();
     for (cid, obase, omode, sid, sfolder) in others {
         let Some(other) = locs.of(st, cid, &obase, (sid, sfolder)).await? else {
             continue; // location unknown: can't reach storage
         };
-        for (root, folder, mode) in places {
-            if *mode != omode && overlaps(&(root.clone(), folder.clone()), &other) {
+        for (place, mode) in &here {
+            if **mode != omode && overlaps(place, &other) {
                 return Err(conflict(
                     "that folder overlaps a hashed store (or a raw folder holds this store); pick a separate folder",
                 ));
