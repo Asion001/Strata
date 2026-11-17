@@ -101,19 +101,14 @@ fn remember_class(st: &AppState, m: &Mount, rel: &str, node: &Node, class: safe:
     }
 }
 
-/// Classify from a separate read of the file's head, and cache the result.
-async fn classify_uncached(
-    st: &AppState,
-    m: &Mount,
-    rel: &str,
-    node: &Node,
-) -> ApiResult<safe::Class> {
-    let head = head_bytes(st, m, rel, node).await?;
-    let class = safe::classify(&node.name, &head);
+/// Classify a file's head; only a complete head (min(size, SNIFF_LEN)) may
+/// decide, and be cached, for this version.
+fn classify_head(st: &AppState, m: &Mount, rel: &str, node: &Node, head: &[u8]) -> safe::Class {
+    let class = safe::classify(&node.name, head);
     if head.len() as u64 == (node.size as u64).min(safe::SNIFF_LEN) {
         remember_class(st, m, rel, node, class);
     }
-    Ok(class)
+    class
 }
 
 /// Serve file bytes safely (see `safe`): sniffed Content-Type, sandboxing
@@ -168,8 +163,10 @@ pub async fn serve(
     let full_head = size.min(safe::SNIFF_LEN);
     let (class, stream) = match cached_class(st, m, rel, node) {
         Some(c) => (c, vfs::read_stream(st, m, rel, node, start, end).await?),
-        None if start == 0 && end >= full_head => {
-            let mut stream = vfs::read_stream(st, m, rel, node, start, end).await?;
+        None if start == 0 => {
+            // Read at least the full head in this one read, even for a tiny
+            // probe like bytes=0-1, then serve only what was asked for.
+            let mut stream = vfs::read_stream(st, m, rel, node, 0, end.max(full_head)).await?;
             let mut head: Vec<u8> = Vec::new();
             let mut peeked = Vec::new();
             while (head.len() as u64) < full_head {
@@ -183,17 +180,19 @@ pub async fn serve(
                     None => break,
                 }
             }
-            let class = safe::classify(&node.name, &head);
-            if head.len() as u64 == full_head {
-                // Only a complete head may decide for this version.
-                remember_class(st, m, rel, node, class);
-            }
-            let replay = futures::stream::iter(peeked.into_iter().map(Ok));
-            let stream: vfs::ByteStream = Box::pin(replay.chain(stream));
+            let class = classify_head(st, m, rel, node, &head);
+            let stream: vfs::ByteStream = if end < full_head {
+                let part = bytes::Bytes::from(head).slice(..(end as usize).min(full_head as usize));
+                Box::pin(futures::stream::once(async move { Ok(part) }))
+            } else {
+                let replay = futures::stream::iter(peeked.into_iter().map(Ok));
+                Box::pin(replay.chain(stream))
+            };
             (class, stream)
         }
         None => {
-            let class = classify_uncached(st, m, rel, node).await?;
+            let head = head_bytes(st, m, rel, node).await?;
+            let class = classify_head(st, m, rel, node, &head);
             (class, vfs::read_stream(st, m, rel, node, start, end).await?)
         }
     };

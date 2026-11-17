@@ -345,6 +345,7 @@ pub fn decide_class(class: Class, purpose: Purpose) -> Decision {
     }
 }
 
+#[cfg(test)]
 pub fn decide(name: &str, head: &[u8], purpose: Purpose) -> Decision {
     decide_class(classify(name, head), purpose)
 }

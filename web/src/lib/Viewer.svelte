@@ -10,7 +10,7 @@
   let zoom = $state(1);
 
   const isText = (n: string, size: number) =>
-    size < 2_000_000 && !isSvg(n) && /\.(txt|md|markdown|json|ya?ml|toml|ini|cfg|conf|log|csv|tsv|xml|html?|css|scss|js|mjs|ts|tsx|jsx|svelte|vue|rs|go|py|rb|php|java|kt|swift|c|h|cpp|hpp|cs|sh|bash|zsh|fish|sql|env|gitignore|dockerfile)$/i.test(n);
+    size < 2_000_000 && /\.(txt|md|markdown|json|ya?ml|toml|ini|cfg|conf|log|csv|tsv|xml|html?|css|scss|js|mjs|ts|tsx|jsx|svelte|vue|rs|go|py|rb|php|java|kt|swift|c|h|cpp|hpp|cs|sh|bash|zsh|fish|sql|env|gitignore|dockerfile)$/i.test(n);
 
   $effect(() => {
     text = null;
@@ -32,8 +32,9 @@
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const buf = await r.arrayBuffer();
     const charset = /charset=([\w-]+)/i.exec(r.headers.get('content-type') ?? '')?.[1];
-    // The server sniffs only the start of the file; check the whole body.
-    if (charset && !/^utf-?8$/i.test(charset)) return new TextDecoder(charset).decode(buf);
+    // Trust the server's charset (an odd invalid byte further in shows as
+    // U+FFFD); only when it gave none, find out ourselves.
+    if (charset) return new TextDecoder(charset).decode(buf);
     try {
       return new TextDecoder('utf-8', { fatal: true }).decode(buf);
     } catch {
