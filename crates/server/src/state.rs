@@ -37,6 +37,8 @@ pub struct Inner {
     pub decisions: quick_cache::sync::Cache<String, crate::safe::Class>,
     /// volume id -> in-process queue in front of the volume's advisory lock
     pub volume_locks: DashMap<i64, Arc<tokio::sync::Mutex<()>>>,
+    /// In-process queue in front of the layout lock (`mounts::lock_layout`).
+    pub layout_lock: Arc<tokio::sync::Mutex<()>>,
     /// Max concurrent volume-lock holders (each pins one pool connection).
     pub lock_permits: Arc<tokio::sync::Semaphore>,
     /// Server-local folder for chunks of uploads into raw volumes
@@ -84,6 +86,7 @@ impl AppState {
             events,
             decisions: quick_cache::sync::Cache::new(100_000),
             volume_locks: DashMap::new(),
+            layout_lock: Arc::new(tokio::sync::Mutex::new(())),
             lock_permits: Arc::new(tokio::sync::Semaphore::new(8)),
             staging,
         })))

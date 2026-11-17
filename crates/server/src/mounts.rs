@@ -121,12 +121,11 @@ pub async fn create(
     }
     // Check and create under the layout lock, so a concurrent volume or
     // connection edit can't slip an overlap in between.
-    let mut tx = st.db.begin().await?;
-    lock_layout(&mut tx).await?;
-    check_storage_overlap(&st, req.connection_id, &base, &req.mode).await?;
     let (parent, name) = paths::split(&path).unwrap();
     // The mount point's parent must be a folder (create it if missing).
     vfs::mkdir_p(&st, u.id, parent).await?;
+    let (mut tx, _layout) = lock_layout(&st).await?;
+    check_storage_overlap(&st, req.connection_id, &base, &req.mode).await?;
     let volume_id: i64 = sqlx::query_scalar(
         "INSERT INTO volumes (connection_id, base_path, mode) VALUES ($1, $2, $3)
          ON CONFLICT (connection_id, base_path, mode) DO UPDATE SET mode = EXCLUDED.mode RETURNING id",
@@ -194,9 +193,10 @@ pub async fn location_of(
     }
 }
 
-/// Like `storage_root`, but `None` when the connection's config can't be
-/// read at all (such a connection can't reach any storage). Database errors
-/// are still errors.
+/// Like `storage_root`, but `None` when the connection's config names no
+/// valid location (such a connection can't reach any storage). A config
+/// that can't be decrypted is an error: where it points is unknown, so
+/// overlap checks fail closed until the server key is fixed.
 pub async fn storage_root_if_readable(
     st: &AppState,
     connection_id: i64,
@@ -211,9 +211,7 @@ pub async fn storage_root_if_readable(
     let (id, folder) = match stored {
         (Some(id), Some(folder), _) => (id, folder),
         (_, _, enc) => {
-            let Ok(cfg) = st.decrypt_config(&enc) else {
-                return Ok(None);
-            };
+            let cfg = st.decrypt_config(&enc)?;
             let Ok(loc) = cfg.location(&st.cfg.local_base) else {
                 return Ok(None);
             };
@@ -241,14 +239,23 @@ pub async fn storage_root(
 }
 
 /// Serialises changes to where volumes live (new volumes, re-pointed
-/// connections) together with their overlap checks. Hold it in the
-/// transaction that writes the change; checks may read outside it, since
-/// every earlier change has committed by the time the lock is granted.
-pub async fn lock_layout(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> ApiResult<()> {
+/// connections) together with their overlap checks. Write the change in the
+/// returned transaction and keep the guard until it commits; checks may read
+/// outside it, since every earlier change has committed by the time the lock
+/// is granted. Waiters queue in-process first, so at most one pooled
+/// connection waits inside Postgres (like `vfs::lock_volumes`).
+pub async fn lock_layout(
+    st: &AppState,
+) -> ApiResult<(
+    sqlx::Transaction<'static, sqlx::Postgres>,
+    tokio::sync::OwnedMutexGuard<()>,
+)> {
+    let guard = st.layout_lock.clone().lock_owned().await;
+    let mut tx = st.db.begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock(1398035010, 0)")
-        .execute(&mut **tx)
+        .execute(&mut *tx)
         .await?;
-    Ok(())
+    Ok((tx, guard))
 }
 
 /// A raw view over a hashed store (or a hashed store inside a raw folder) on
@@ -261,39 +268,43 @@ pub async fn check_storage_overlap(
     mode: &str,
 ) -> ApiResult<()> {
     let (root, folder) = storage_root(st, connection_id, base).await?;
-    check_overlap_at(st, &root, &folder, mode, None).await
+    check_overlap_at(st, &[(root, folder, mode.to_string())], None).await
 }
 
-/// Is (`root`, `folder`) clear of every volume of the opposite mode? Volumes
-/// on `except` (the connection being edited) are left out. A connection
-/// whose location is unknown (its config can't even be read) can't touch
-/// any storage, so it can't overlap anything and is skipped.
+/// Are these (`root`, `folder`, `mode`) places clear of every volume of the
+/// opposite mode? Volumes on `except` (the connection being edited) are left
+/// out. A connection with no valid location can't touch any storage, so it
+/// can't overlap anything and is skipped.
 pub async fn check_overlap_at(
     st: &AppState,
-    root: &str,
-    folder: &str,
-    mode: &str,
+    places: &[(String, String, String)],
     except: Option<i64>,
 ) -> ApiResult<()> {
-    let other_mode = if mode == "raw" { "hashed" } else { "raw" };
-    let others: Vec<(i64, String, Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT v.connection_id, v.base_path, c.storage_id, c.storage_folder
-         FROM volumes v JOIN connections c ON c.id = v.connection_id WHERE v.mode = $1",
+    if places.is_empty() {
+        return Ok(());
+    }
+    // Every volume, fetched once; each is placed once.
+    // (connection id, base path, mode, stored storage id, stored folder)
+    type Row = (i64, String, String, Option<String>, Option<String>);
+    let all: Vec<Row> = sqlx::query_as(
+        "SELECT v.connection_id, v.base_path, v.mode, c.storage_id, c.storage_folder
+         FROM volumes v JOIN connections c ON c.id = v.connection_id",
     )
-    .bind(other_mode)
     .fetch_all(&st.db)
     .await?;
-    for (cid, obase, sid, sfolder) in others {
-        if Some(cid) == except {
+    for (cid, obase, omode, sid, sfolder) in all {
+        if Some(cid) == except || places.iter().all(|(_, _, m)| *m == omode) {
             continue;
         }
         let Some(other) = location_of(st, cid, &obase, (sid, sfolder)).await? else {
-            continue; // unreadable config: can't reach storage
+            continue; // no valid location: can't reach storage
         };
-        if overlaps(&(root.to_string(), folder.to_string()), &other) {
-            return Err(conflict(
-                "that folder overlaps a hashed store (or a raw folder holds this store); pick a separate folder",
-            ));
+        for (root, folder, mode) in places {
+            if *mode != omode && overlaps(&(root.clone(), folder.clone()), &other) {
+                return Err(conflict(
+                    "that folder overlaps a hashed store (or a raw folder holds this store); pick a separate folder",
+                ));
+            }
         }
     }
     Ok(())

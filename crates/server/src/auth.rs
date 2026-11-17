@@ -247,7 +247,9 @@ pub async fn create_user(
     check_username(username)?;
     check_password(password)?;
     let hash = hash_password(password)?;
-    let mut tx = st.db.begin().await?;
+    // Under the layout lock from the start: the default connections (made
+    // by the first sign-up) and each private root's volume.
+    let (mut tx, _layout) = crate::mounts::lock_layout(st).await?;
     let user: User = sqlx::query_as(
         "INSERT INTO users (username, password_hash, is_admin) VALUES ($1, $2, $3) RETURNING id, username, is_admin",
     )
@@ -287,7 +289,6 @@ pub async fn create_user(
         }
     };
     let root_base = format!("users/{}", user.id);
-    crate::mounts::lock_layout(&mut tx).await?;
     if existing_default {
         // e.g. an admin raw-mounted `users/<id>` before this user existed
         crate::mounts::check_storage_overlap(st, conn_id, &root_base, "hashed").await?;

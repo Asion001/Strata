@@ -188,7 +188,7 @@
         const all = await listDrafts(key).catch(() => [] as Draft[]);
         if (destroyed) return;
         draftOffer = all.find((d) => !offerSeen(d) && d.text !== t.doc) ?? null;
-        draftTimer = setInterval(autosave, 2000);
+        draftTimer = setInterval(() => void autosave(), 2000);
       }
     } catch (e) {
       error = (e as Error).message;
@@ -205,8 +205,11 @@
     mergeView?.destroy();
   });
 
-  function autosave(): Promise<void> {
-    draftQueue = draftQueue.then(writeDraft, writeDraft);
+  /** Queue a draft write. `final` (closing, leaving the page) ignores the
+   *  backoff: it is the last chance to keep this text. */
+  function autosave(final = false): Promise<void> {
+    const run = () => writeDraft(final);
+    draftQueue = draftQueue.then(run, run);
     return draftQueue;
   }
 
@@ -233,7 +236,7 @@
     return draftQueue;
   }
 
-  async function writeDraft() {
+  async function writeDraft(final = false) {
     if (!editor || !dirty) return;
     // Only while this user is still the one signed in here (any tab may
     // have signed out); checked again after writing, since a sign-out can
@@ -241,7 +244,7 @@
     if (!isSignedIn(userId)) return;
     const text = editor.getDoc();
     if (text === lastDraft) return;
-    if (Date.now() < retryAfter) return;
+    if (!final && Date.now() < retryAfter) return;
     // This tab's own entry: other tabs' drafts (and a recovery offer still
     // on screen) are never overwritten.
     if (!(await storeDraft(text))) return;
@@ -332,6 +335,9 @@
       void afterDrafts(async () => {
         lastDraft = null;
         await clearAfterSave(key, tab, doc);
+        // Typed during the save? That text's draft was just cleared with
+        // the rest: store it again now rather than after any backoff.
+        await writeDraft(true);
       });
       status = 'Saved';
       setTimeout(() => status === 'Saved' && (status = ''), 2000);
@@ -358,7 +364,7 @@
           // editor; the folder shows the copy.
           closeConflict();
           dirty = false;
-          void afterDrafts(() => clearTabDraft(key, tab));
+          await afterDrafts(() => clearTabDraft(key, tab));
           alert(msg);
           onclose();
         }
@@ -426,7 +432,7 @@
 
   async function close() {
     if (dirty && !confirm('Close with unsaved changes? A draft stays in this browser for up to 30 days, until you sign out, or until someone else signs in here.')) return;
-    await autosave(); // the last seconds of typing too
+    await autosave(true); // the last seconds of typing too
     onclose();
   }
 
@@ -435,7 +441,7 @@
       nav.cancel();
       return;
     }
-    void autosave();
+    void autosave(true);
   });
 
   // Ctrl/Cmd+S anywhere while the editor is open (not only in the text area).
@@ -454,7 +460,7 @@
   }
 </script>
 
-<svelte:window onbeforeunload={beforeUnload} onpagehide={() => void autosave()} onkeydown={onKey} />
+<svelte:window onbeforeunload={beforeUnload} onpagehide={() => void autosave(true)} onkeydown={onKey} />
 
 <div class="editor" role="dialog" aria-modal="true" aria-label="Edit {name}" tabindex="-1">
   <header>
