@@ -27,9 +27,11 @@ describe('line endings and trailing newline', () => {
     expect(fromEditor(doc + 'three\n', eol)).toBe('one\r\ntwo\r\nthree\r\n');
   });
 
-  it('mixed files use the majority ending', () => {
-    expect(detectEol('a\r\nb\r\nc\n')).toBe('\r\n');
-    expect(detectEol('a\nb\nc\r\n')).toBe('\n');
+  it('mixed files are kept byte for byte', () => {
+    expect(detectEol('a\r\nb\r\nc\n')).toBe('keep');
+    expect(roundtrip('a\r\nb\nc\r\n')).toBe('a\r\nb\nc\r\n');
+    const { doc, eol } = toEditor('a\r\nb\n');
+    expect(fromEditor(doc + 'c\n', eol)).toBe('a\r\nb\nc\n');
   });
 
   it('a lone CR stays a CR in LF files', () => {

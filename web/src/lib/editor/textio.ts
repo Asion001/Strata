@@ -1,9 +1,14 @@
 // Text handling for the editor: UTF-8 only, line endings and the trailing
 // newline preserved exactly.
 
-export type Eol = '\n' | '\r\n';
+/** A file's line ending. 'keep' is for files with mixed endings or lone
+ *  CRs: their text goes to the editor unchanged (CR shown as a character),
+ *  so every byte is written back exactly as it was. */
+export type Eol = '\n' | '\r\n' | 'keep';
 
 export const MAX_EDIT_BYTES = 5 * 1024 * 1024;
+/** Above this, the file isn't loaded into the browser at all. */
+export const MAX_VIEW_BYTES = 20 * 1024 * 1024;
 const NUL_SCAN = 8 * 1024;
 
 /** True if the first 8 KB contain a NUL byte (a binary file). */
@@ -20,7 +25,7 @@ export function decodeUtf8(bytes: Uint8Array): string | null {
   }
 }
 
-/** The file's dominant line ending (LF if it has none). */
+/** The file's line ending: LF, CRLF, or 'keep' when they are mixed. */
 export function detectEol(text: string): Eol {
   let crlf = 0;
   let lf = 0;
@@ -28,10 +33,14 @@ export function detectEol(text: string): Eol {
     if (i > 0 && text[i - 1] === '\r') crlf++;
     else lf++;
   }
-  return crlf > lf ? '\r\n' : '\n';
+  const loneCr = /\r(?!\n)/.test(text);
+  if (loneCr || (crlf > 0 && lf > 0)) return 'keep';
+  return crlf > 0 ? '\r\n' : '\n';
 }
 
-/** File text -> editor document (always LF inside the editor). */
+/** File text -> editor document. The editor only splits lines on LF, so a
+ *  CRLF file is shown with LF and written back with CRLF; anything mixed is
+ *  shown and written back verbatim. */
 export function toEditor(text: string): { doc: string; eol: Eol } {
   const eol = detectEol(text);
   return { doc: eol === '\r\n' ? text.replace(/\r\n/g, '\n') : text, eol };

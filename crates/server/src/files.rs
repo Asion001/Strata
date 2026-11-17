@@ -129,9 +129,10 @@ pub async fn serve(
     // `s2`: version of the serving rules (bump when they change), so responses cached under older
     // rules are not revalidated into place.
     // Content responses carry the file version's ETag, the same value a
-    // write's If-Match must present (`vfs::etag_for`).
+    // write's If-Match must present (`vfs::etag_for`, which also carries the
+    // serving-rules version).
     let etag = Some(match purpose {
-        safe::Purpose::ImagePreview => format!("\"vi-{}\"", vfs::version(node)),
+        safe::Purpose::ImagePreview => format!("\"r3i-{}\"", vfs::version(node)),
         safe::Purpose::Content { .. } => vfs::etag_for(node),
     });
     if let (Some(et), Some(inm)) = (&etag, headers.get(header::IF_NONE_MATCH))
@@ -399,8 +400,8 @@ pub async fn put_content(
         _ => return Err(bad("use either If-Match: <etag> or If-None-Match: *")),
     };
     let input: vfs::ByteStream = Box::pin(futures::stream::once(async move { Ok(body) }));
-    vfs::write_stream_if(&st, &m, &rel, input, &expect).await?;
-    let node = vfs::stat(&st, &m, &rel).await?;
+    // The version comes from inside the write's lock: never a later one.
+    let (_, node) = vfs::write_stream_if(&st, &m, &rel, input, &expect).await?;
     let etag = vfs::etag_for(&node);
     let mut resp = Json(json!({
         "path": path, "size": node.size, "mtime": node.mtime, "etag": etag,

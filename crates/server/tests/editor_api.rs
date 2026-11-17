@@ -206,3 +206,56 @@ async fn saves_are_journaled_and_size_limited() {
         StatusCode::BAD_REQUEST
     );
 }
+
+#[tokio::test]
+async fn refused_saves_never_recreate_deleted_folders() {
+    let Some(t) = app().await else { return };
+    let cid = t
+        .ok(
+            "POST",
+            "/api/connections",
+            json!({"name": "d", "config": {"kind": "local", "path": "d"}}),
+        )
+        .await["id"]
+        .as_i64()
+        .unwrap();
+    t.ok(
+        "POST",
+        "/api/mounts",
+        json!({"path": "Raw", "connection_id": cid, "mode": "raw"}),
+    )
+    .await;
+    for root in ["docs", "Raw"] {
+        let f = format!("{root}/sub/a.md");
+        put(&t, &f, "x", &[("if-none-match", "*")]).await;
+        let e = get_etag(&t, &f).await;
+        t.ok(
+            "POST",
+            "/api/files/delete",
+            json!({"paths": [format!("{root}/sub")]}),
+        )
+        .await;
+        assert_eq!(
+            put(&t, &f, "y", &[("if-match", &e)]).await.0,
+            StatusCode::PRECONDITION_FAILED
+        );
+        assert!(
+            !t.names(root).await.contains(&"sub".to_string()),
+            "{root}/sub came back"
+        );
+    }
+    assert!(!t.dir.path().join("local/d/sub").exists());
+}
+
+#[tokio::test]
+async fn the_returned_etag_is_the_written_version() {
+    let Some(t) = app().await else { return };
+    let (_, v, h) = put(&t, "w.txt", "one", &[("if-none-match", "*")]).await;
+    let e = h["etag"].to_str().unwrap().to_string();
+    assert_eq!(v["etag"], e);
+    // saving again with exactly that ETag works (nothing else was written)
+    assert_eq!(
+        put(&t, "w.txt", "two", &[("if-match", &e)]).await.0,
+        StatusCode::OK
+    );
+}

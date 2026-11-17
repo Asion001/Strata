@@ -763,26 +763,25 @@ pub async fn touch_blobs(
 }
 
 /// A file version's identity, the same for every read and write path:
-/// hashed volumes use the content hash; raw volumes a hash of size, mtime
-/// and the backend's own etag (so an outside change is always noticed).
+/// hashed volumes use the content hash; raw volumes a hash of the size and
+/// the backend's etag (the backend's own, or size plus mtime in nanoseconds
+/// where it has none), so an outside change is always noticed. It never
+/// depends on the request time, so it is stable on backends without mtimes.
 pub fn version(node: &Node) -> String {
     match (&node.chunks, &node.etag) {
         (Some(_), Some(e)) => e.clone(),
         _ => {
-            let s = format!(
-                "{}|{}|{}",
-                node.size,
-                node.mtime.timestamp_nanos_opt().unwrap_or(0),
-                node.etag.as_deref().unwrap_or("")
-            );
+            let s = format!("{}|{}", node.size, node.etag.as_deref().unwrap_or(""));
             blake3::hash(s.as_bytes()).to_hex()[..32].to_string()
         }
     }
 }
 
-/// HTTP ETag for a file version (content responses and writes).
+/// HTTP ETag for a file version (content responses and writes). The `r3`
+/// prefix is the serving-rules version: bump it when the way file bytes are
+/// served changes, so cached responses don't revalidate into place.
 pub fn etag_for(node: &Node) -> String {
-    format!("\"v-{}\"", version(node))
+    format!("\"r3-{}\"", version(node))
 }
 
 /// What a write expects to find at the target.
@@ -811,6 +810,18 @@ pub fn check_expect(expect: &Expect, current: Option<&Node>) -> ApiResult<()> {
     }
 }
 
+/// Current state of a file for a precondition check (None if missing).
+async fn current_file(st: &AppState, m: &Mount, rel: &str) -> ApiResult<Option<Node>> {
+    if m.is_hashed() {
+        return get_node(st, m.volume_id, rel).await;
+    }
+    match stat(st, m, rel).await {
+        Ok(n) => Ok(Some(n)),
+        Err(ApiError::NotFound) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
 /// Point a hashed file at a list of stored chunks. Returns true if it is new.
 pub async fn put_hashed_file(
     st: &AppState,
@@ -820,11 +831,16 @@ pub async fn put_hashed_file(
     sizes: &[i64],
     mtime: Option<DateTime<Utc>>,
 ) -> ApiResult<bool> {
-    put_hashed_file_if(st, m, rel, chunks, sizes, mtime, &Expect::Any).await
+    Ok(
+        put_hashed_file_if(st, m, rel, chunks, sizes, mtime, &Expect::Any)
+            .await?
+            .0,
+    )
 }
 
 /// `put_hashed_file` with a precondition, checked under the volume lock in
-/// the same critical section as the write.
+/// the same critical section as the write. Returns whether the file is new
+/// and the version that was written (taken under the lock, so it is ours).
 pub async fn put_hashed_file_if(
     st: &AppState,
     m: &Mount,
@@ -833,15 +849,23 @@ pub async fn put_hashed_file_if(
     sizes: &[i64],
     mtime: Option<DateTime<Utc>>,
     expect: &Expect,
-) -> ApiResult<bool> {
+) -> ApiResult<(bool, Node)> {
     let (parent, name) = paths::split(rel).ok_or_else(|| bad("cannot write to a mount point"))?;
-    if !parent.is_empty() {
+    // Saving over an existing file needs no parent folders: if the file is
+    // still there, so is its folder. Only plain writes and creations make
+    // missing parents, and never for a write that is going to be refused.
+    if *expect != Expect::Any {
+        check_expect(expect, get_node(st, m.volume_id, rel).await?.as_ref())?;
+    }
+    if !parent.is_empty() && !matches!(expect, Expect::Etag(_)) {
         mkdir_in(st, m, parent).await?;
     }
     let lock = lock_volume(st, m.volume_id).await?;
     check_expect(expect, get_node(st, m.volume_id, rel).await?.as_ref())?;
     let content = manifest_hash(chunks);
     let size: i64 = sizes.iter().sum();
+    let mtime = mtime.unwrap_or_else(Utc::now);
+    let etag = content.hex()[..32].to_string();
     let inserted: Option<bool> = sqlx::query_scalar(
         "INSERT INTO nodes (volume_id, parent, name, is_dir, size, mtime, etag, content_hash, chunks, chunk_sizes)
          VALUES ($1, $2, $3, FALSE, $4, $5, $6, $7, $8, $9)
@@ -855,8 +879,8 @@ pub async fn put_hashed_file_if(
     .bind(parent)
     .bind(name)
     .bind(size)
-    .bind(mtime.unwrap_or_else(Utc::now))
-    .bind(&content.hex()[..32])
+    .bind(mtime)
+    .bind(&etag)
     .bind(content.0.to_vec())
     .bind(chunks.iter().map(|c| c.0.to_vec()).collect::<Vec<_>>())
     .bind(sizes)
@@ -874,7 +898,16 @@ pub async fn put_hashed_file_if(
     )
     .await?;
     lock.release().await?;
-    Ok(inserted)
+    let node = Node {
+        name: name.to_string(),
+        is_dir: false,
+        size,
+        mtime,
+        etag: Some(etag),
+        chunks: Some(chunks.iter().map(|c| c.0.to_vec()).collect()),
+        chunk_sizes: Some(sizes.to_vec()),
+    };
+    Ok((inserted, node))
 }
 
 /// Write a byte stream as a file at `rel` of mount `m`. Returns the BLAKE3 of
@@ -885,20 +918,27 @@ pub async fn write_stream(
     rel: &str,
     input: ByteStream,
 ) -> ApiResult<Hash> {
-    write_stream_if(st, m, rel, input, &Expect::Any).await
+    Ok(write_stream_if(st, m, rel, input, &Expect::Any).await?.0)
 }
 
 /// `write_stream` with a precondition. Hashed: checked when the node is
 /// written. Raw: checked against the backend under the volume lock right
 /// before the atomic close that makes the new content visible; on failure
-/// the write is aborted and nothing changes.
+/// the write is aborted and nothing changes. Returns the stream's BLAKE3 and
+/// the version written, taken under the lock (so it is never someone
+/// else's later version).
 pub async fn write_stream_if(
     st: &AppState,
     m: &Mount,
     rel: &str,
     mut input: ByteStream,
     expect: &Expect,
-) -> ApiResult<Hash> {
+) -> ApiResult<(Hash, Node)> {
+    // Refuse early (before writing anything, or creating parent folders)
+    // when the precondition already fails; re-checked under the lock below.
+    if *expect != Expect::Any {
+        check_expect(expect, current_file(st, m, rel).await?.as_ref())?;
+    }
     let mut whole = blake3::Hasher::new();
     if m.is_hashed() {
         let store = hashed_store(st, m).await?;
@@ -930,7 +970,8 @@ pub async fn write_stream_if(
         for c in chunker.finish() {
             put(st, m, &store, c, &mut hashes, &mut sizes).await?;
         }
-        put_hashed_file_if(st, m, rel, &hashes, &sizes, None, expect).await?;
+        let (_, node) = put_hashed_file_if(st, m, rel, &hashes, &sizes, None, expect).await?;
+        Ok((Hash(*whole.finalize().as_bytes()), node))
     } else {
         let op = op(st, m).await?;
         let path = backend_path(m, rel, false);
@@ -956,9 +997,8 @@ pub async fn write_stream_if(
             }
         };
         if *expect != Expect::Any {
-            let current = match stat(st, m, rel).await {
-                Ok(n) => Some(n),
-                Err(ApiError::NotFound) => None,
+            let current = match current_file(st, m, rel).await {
+                Ok(c) => c,
                 Err(e) => {
                     let _ = w.abort().await;
                     return Err(e);
@@ -971,20 +1011,20 @@ pub async fn write_stream_if(
         }
         w.close().await?;
         let node = stat(st, m, rel).await?;
-        let existed = !cache_node(st, m, rel, &node).await?;
+        let created = cache_node(st, m, rel, &node).await?;
         journal::record_volume(
             st,
             m.volume_id,
-            vec![if existed {
-                Change::modify(rel)
-            } else {
+            vec![if created {
                 Change::create(rel, false)
+            } else {
+                Change::modify(rel)
             }],
         )
         .await?;
         lock.release().await?;
+        Ok((Hash(*whole.finalize().as_bytes()), node))
     }
-    Ok(Hash(*whole.finalize().as_bytes()))
 }
 
 // ---------------------------------------------------------------- delete

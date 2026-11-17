@@ -8,8 +8,8 @@
   import { beforeNavigate } from '$app/navigation';
   import { contentUrl } from '$lib/api';
   import { join, parent } from '$lib/format';
-  import { MAX_EDIT_BYTES, conflictName, decodeUtf8, fromEditor, looksBinary, toEditor, type Eol } from './textio';
-  import { clearDraft, draftKey, getDraft, saveDraft, type Draft } from './drafts';
+  import { MAX_EDIT_BYTES, MAX_VIEW_BYTES, conflictName, decodeUtf8, fromEditor, looksBinary, toEditor, type Eol } from './textio';
+  import { clearDraft, draftKey, expireDrafts, getDraft, saveDraft, type Draft } from './drafts';
 
   let {
     path,
@@ -47,7 +47,14 @@
   let draftTimer: ReturnType<typeof setInterval>;
   let lastDraft = '';
 
+  let destroyed = false;
+
   async function fetchText(): Promise<{ text: string; etag: string | null; tooBig: boolean; utf8: boolean }> {
+    // Check the size first: never pull a huge file into the tab.
+    const st = await fetch(`/api/files/stat?path=${encodeURIComponent(path)}`, { cache: 'no-store' });
+    if (st.status === 404) throw new Error('The file no longer exists.');
+    if (st.ok && (await st.json()).size > MAX_VIEW_BYTES)
+      throw new Error('This file is too large to open in the editor. Download it instead.');
     const r = await fetch(contentUrl(path), { cache: 'no-store' });
     if (!r.ok) throw new Error(r.status === 404 ? 'The file no longer exists.' : `Could not open the file (HTTP ${r.status}).`);
     const bytes = new Uint8Array(await r.arrayBuffer());
@@ -70,22 +77,30 @@
     }, 150);
   }
 
+  /** Editing rules for what was loaded: big or non-UTF-8 files are read-only. */
+  function applyRules(f: { tooBig: boolean; utf8: boolean }) {
+    readOnly = f.tooBig || !f.utf8;
+    notice = f.tooBig
+      ? 'This file is larger than 5 MB, so it opens read-only.'
+      : !f.utf8
+        ? 'This file is not UTF-8 text, so it opens read-only.'
+        : '';
+    editor?.setReadOnly(readOnly);
+  }
+
   onMount(async () => {
     showPreview = isMarkdown;
+    expireDrafts().catch(() => {});
     try {
       const f = await fetchText();
+      if (destroyed) return;
       etag = f.etag;
       const t = toEditor(f.text);
       eol = t.eol;
       savedDoc = t.doc;
-      if (f.tooBig) {
-        readOnly = true;
-        notice = 'This file is larger than 5 MB, so it opens read-only.';
-      } else if (!f.utf8) {
-        readOnly = true;
-        notice = 'This file is not UTF-8 text, so it opens read-only.';
-      }
+      applyRules(f);
       const { createEditor } = await import('./cm');
+      if (destroyed) return;
       editor = await createEditor(host, {
         doc: t.doc,
         name,
@@ -98,6 +113,7 @@
       renderPreview(t.doc);
       if (!readOnly) {
         const d = await getDraft(key).catch(() => undefined);
+        if (destroyed) return;
         if (d && d.text !== t.doc) draftOffer = d;
         draftTimer = setInterval(autosave, 2000);
       }
@@ -109,6 +125,7 @@
   });
 
   onDestroy(() => {
+    destroyed = true;
     clearInterval(draftTimer);
     clearTimeout(previewTimer);
     editor?.destroy();
@@ -191,6 +208,13 @@
     status = 'Could not save a copy: the name is taken.';
   }
 
+  /** The file was deleted meanwhile: save mine under its name again. */
+  async function recreate() {
+    etag = null; // save() then uses If-None-Match: *
+    closeConflict();
+    await save();
+  }
+
   async function reloadTheirs(message = '') {
     try {
       const f = await fetchText();
@@ -199,6 +223,7 @@
       eol = t.eol;
       savedDoc = t.doc;
       editor?.setDoc(t.doc);
+      applyRules(f);
       dirty = false;
       lastDraft = '';
       await clearDraft(key).catch(() => {});
@@ -232,7 +257,7 @@
   }
 
   function close() {
-    if (dirty && !confirm('Discard unsaved changes? (A draft stays saved in this browser.)')) return;
+    if (dirty && !confirm('Close with unsaved changes? A draft stays in this browser until you sign out or 30 days pass.')) return;
     onclose();
   }
 
@@ -295,16 +320,25 @@
 {#if conflict}
   <div class="conflict-bg">
     <div class="conflict card stack" class:wide={conflict.showDiff} role="alertdialog" aria-label="Save conflict">
-      <b>Someone else changed “{name}” while you were editing.</b>
+      {#if conflict.theirsEtag}
+        <b>Someone else changed “{name}” while you were editing.</b>
+      {:else}
+        <b>“{name}” was deleted or moved while you were editing.</b>
+      {/if}
       <p class="muted">Nothing has been overwritten. Choose what to do with your changes:</p>
       {#if conflict.showDiff}
         <div class="labels"><span>Yours</span><span>Theirs (saved)</span></div>
         <div class="diff" bind:this={diffHost}></div>
       {/if}
       <div class="row">
-        <button class="primary" onclick={keepMine}>Keep mine as a copy</button>
-        <button onclick={() => reloadTheirs()}>Reload theirs</button>
-        {#if !conflict.showDiff}<button onclick={showDiff}>View differences</button>{/if}
+        {#if conflict.theirsEtag}
+          <button class="primary" onclick={keepMine}>Keep mine as a copy</button>
+          <button onclick={() => reloadTheirs()}>Reload theirs</button>
+          {#if !conflict.showDiff}<button onclick={showDiff}>View differences</button>{/if}
+        {:else}
+          <button class="primary" onclick={recreate}>Save it again</button>
+          <button onclick={keepMine}>Save as a copy</button>
+        {/if}
         <span class="grow"></span>
         <button onclick={closeConflict}>Back to editing</button>
       </div>

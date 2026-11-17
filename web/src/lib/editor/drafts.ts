@@ -43,3 +43,20 @@ export const saveDraft = (d: Draft) => tx('readwrite', (s) => s.put(d)).then(() 
 export const getDraft = (key: string) =>
   tx<Draft | undefined>('readonly', (s) => s.get(key) as IDBRequest<Draft | undefined>);
 export const clearDraft = (key: string) => tx('readwrite', (s) => s.delete(key)).then(() => undefined);
+
+/** Drafts are kept for 30 days at most. */
+export const DRAFT_TTL_MS = 30 * 24 * 3600 * 1000;
+
+/** Remove drafts older than the TTL. */
+export async function expireDrafts(now = Date.now()): Promise<void> {
+  const all = await tx<Draft[]>('readonly', (s) => s.getAll() as IDBRequest<Draft[]>);
+  for (const d of all) if (now - d.savedAt > DRAFT_TTL_MS) await clearDraft(d.key);
+}
+
+/** Forget every draft in this browser (on sign-out: drafts hold file contents). */
+export function clearAllDrafts(): Promise<void> {
+  return new Promise((resolve) => {
+    const req = indexedDB.deleteDatabase(DB);
+    req.onsuccess = req.onerror = req.onblocked = () => resolve();
+  });
+}

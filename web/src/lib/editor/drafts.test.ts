@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto';
 import { describe, expect, it } from 'vitest';
-import { clearDraft, draftKey, getDraft, saveDraft } from './drafts';
+import { DRAFT_TTL_MS, clearAllDrafts, clearDraft, draftKey, expireDrafts, getDraft, saveDraft } from './drafts';
 
 describe('drafts', () => {
   it('saves, reads and clears by user, mount and path', async () => {
@@ -12,5 +12,15 @@ describe('drafts', () => {
     expect(await getDraft(draftKey(2, 7, 'docs/a.md'))).toBeUndefined();
     await clearDraft(k);
     expect(await getDraft(k)).toBeUndefined();
+  });
+
+  it('expires old drafts and clears everything on sign-out', async () => {
+    await saveDraft({ key: 'old', baseEtag: null, text: 'x', savedAt: 0 });
+    await saveDraft({ key: 'new', baseEtag: null, text: 'y', savedAt: DRAFT_TTL_MS + 10 });
+    await expireDrafts(DRAFT_TTL_MS + 20);
+    expect(await getDraft('old')).toBeUndefined();
+    expect((await getDraft('new'))?.text).toBe('y');
+    await clearAllDrafts();
+    expect(await getDraft('new')).toBeUndefined();
   });
 });

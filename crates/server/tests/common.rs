@@ -23,7 +23,25 @@ pub async fn app() -> Option<TestApp> {
         return None;
     };
     let admin = sqlx::PgPool::connect(&base).await.expect("connect test db");
-    let name = format!("strata_t_{}", rand::random::<u32>());
+    // Databases are named per test process; ones left by earlier runs are
+    // dropped once per process so they don't pile up.
+    static CLEANUP: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+    let pid = std::process::id();
+    CLEANUP
+        .get_or_init(|| async {
+            let old: Vec<String> = sqlx::query_scalar(
+                "SELECT datname FROM pg_database WHERE datname LIKE 'strata\\_t\\_%' AND datname NOT LIKE $1",
+            )
+            .bind(format!("strata\\_t\\_{pid}\\_%"))
+            .fetch_all(&admin)
+            .await
+            .unwrap_or_default();
+            for db in old {
+                let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS \"{db}\" WITH (FORCE)")).execute(&admin).await;
+            }
+        })
+        .await;
+    let name = format!("strata_t_{pid}_{}", rand::random::<u32>());
     sqlx::query(&format!("CREATE DATABASE {name}"))
         .execute(&admin)
         .await

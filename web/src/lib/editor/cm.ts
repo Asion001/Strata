@@ -66,6 +66,10 @@ export async function languageFor(name: string): Promise<Extension> {
   }
 }
 
+// The editor splits lines on LF only, so a lone CR (or the CR of a CRLF in a
+// mixed-ending file) stays in the text instead of being normalised away.
+const lfOnly = EditorState.lineSeparator.of('\n');
+
 export interface EditorOptions {
   doc: string;
   name: string;
@@ -75,6 +79,7 @@ export interface EditorOptions {
 
 export async function createEditor(parent: HTMLElement, o: EditorOptions) {
   const lang = new Compartment();
+  const ro = new Compartment();
   const view = new EditorView({
     parent,
     state: EditorState.create({
@@ -89,7 +94,8 @@ export async function createEditor(parent: HTMLElement, o: EditorOptions) {
         indentOnInput(),
         syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
         EditorView.lineWrapping,
-        EditorState.readOnly.of(o.readOnly),
+        lfOnly,
+        ro.of(EditorState.readOnly.of(o.readOnly)),
         keymap.of([
           indentWithTab,
           ...defaultKeymap,
@@ -109,6 +115,7 @@ export async function createEditor(parent: HTMLElement, o: EditorOptions) {
     getDoc: () => view.state.doc.toString(),
     setDoc: (doc: string) =>
       view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: doc } }),
+    setReadOnly: (readOnly: boolean) => view.dispatch({ effects: ro.reconfigure(EditorState.readOnly.of(readOnly)) }),
     destroy: () => view.destroy()
   };
 }
@@ -117,7 +124,7 @@ export async function createEditor(parent: HTMLElement, o: EditorOptions) {
 export async function createMergeView(parent: HTMLElement, mine: string, theirs: string, name: string) {
   const { MergeView } = await import('@codemirror/merge');
   const lang = await languageFor(name);
-  const common = [lineNumbers(), EditorView.lineWrapping, EditorState.readOnly.of(true), syntaxHighlighting(defaultHighlightStyle, { fallback: true }), lang];
+  const common = [lineNumbers(), lfOnly, EditorView.lineWrapping, EditorState.readOnly.of(true), syntaxHighlighting(defaultHighlightStyle, { fallback: true }), lang];
   return new MergeView({
     parent,
     a: { doc: mine, extensions: common },
