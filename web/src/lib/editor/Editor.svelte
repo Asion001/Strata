@@ -10,6 +10,7 @@
   import { join, parent } from '$lib/format';
   import { MAX_EDIT_BYTES, MAX_VIEW_BYTES, conflictName, decodeUtf8, fromEditor, looksBinary, toEditor, type Eol } from './textio';
   import { clearDraft, draftKey, expireDrafts, getDraft, saveDraft, type Draft } from './drafts';
+  import { createBLAKE3 } from 'hash-wasm';
 
   let {
     path,
@@ -37,6 +38,14 @@
   let saving = $state(false);
   let status = $state('');
   let etag = $state<string | null>(null);
+  /** BLAKE3 of the bytes the current edit is based on (sent with saves). */
+  let baseHash: string | null = null;
+
+  async function blake3Hex(bytes: Uint8Array): Promise<string> {
+    const h = await createBLAKE3();
+    h.update(bytes);
+    return h.digest('hex');
+  }
   let eol: Eol = '\n';
   let savedDoc = '';
   let draftOffer = $state<Draft | null>(null);
@@ -72,7 +81,7 @@
     return out;
   }
 
-  async function fetchText(): Promise<{ text: string; etag: string | null; tooBig: boolean; utf8: boolean }> {
+  async function fetchText(): Promise<{ text: string; etag: string | null; hash: string; tooBig: boolean; utf8: boolean }> {
     const r = await fetch(contentUrl(path), { cache: 'no-store' });
     if (!r.ok) throw new Error(r.status === 404 ? 'The file no longer exists.' : `Could not open the file (HTTP ${r.status}).`);
     // Never pull a huge file into the tab: stop at the size limit, whatever
@@ -87,6 +96,7 @@
     return {
       text: strict ?? new TextDecoder('utf-8').decode(bytes),
       etag: r.headers.get('etag'),
+      hash: await blake3Hex(bytes),
       tooBig: bytes.length > MAX_EDIT_BYTES,
       utf8: strict !== null
     };
@@ -119,6 +129,7 @@
       const f = await fetchText();
       if (destroyed) return;
       etag = f.etag;
+      baseHash = f.hash;
       const t = toEditor(f.text);
       eol = t.eol;
       savedDoc = t.doc;
@@ -127,7 +138,7 @@
       if (destroyed) return;
       const created = await createEditor(host, {
         doc: t.doc,
-        normalizePaste: t.eol !== 'keep',
+        normalizePaste: () => eol !== 'keep',
         name,
         readOnly,
         onChange: (doc) => {
@@ -154,8 +165,16 @@
     }
   });
 
+  // Another tab signed out (or someone else signed in): stop writing drafts.
+  let auth: BroadcastChannel | null = null;
+  try {
+    auth = new BroadcastChannel('strata-auth');
+    auth.onmessage = () => clearInterval(draftTimer);
+  } catch {}
+
   onDestroy(() => {
     destroyed = true;
+    auth?.close();
     clearInterval(draftTimer);
     clearTimeout(previewTimer);
     editor?.destroy();
@@ -167,13 +186,14 @@
     const text = editor.getDoc();
     if (text === lastDraft) return;
     lastDraft = text;
-    await saveDraft({ key, baseEtag: etag, text, savedAt: Date.now() }).catch(() => {});
+    await saveDraft({ key, baseEtag: etag, baseHash, text, savedAt: Date.now() }).catch(() => {});
   }
 
   function restoreDraft() {
     if (!draftOffer || !editor) return;
     // Keep the draft's base: if the file changed since, saving asks how to resolve.
     etag = draftOffer.baseEtag;
+    baseHash = draftOffer.baseHash ?? null;
     editor.setDoc(draftOffer.text);
     draftOffer = null;
   }
@@ -183,7 +203,7 @@
     await clearDraft(key).catch(() => {});
   }
 
-  async function put(target: string, body: string, precondition: Record<string, string>) {
+  async function put(target: string, body: Uint8Array<ArrayBuffer>, precondition: Record<string, string>) {
     return fetch(`/api/files/content?path=${encodeURIComponent(target)}`, {
       method: 'PUT',
       headers: { 'x-strata': '1', 'content-type': 'text/plain; charset=utf-8', ...precondition },
@@ -196,8 +216,11 @@
     saving = true;
     status = 'Saving…';
     const doc = editor.getDoc();
+    const bytes = new TextEncoder().encode(fromEditor(doc, eol));
+    const pre: Record<string, string> = etag ? { 'if-match': etag } : { 'if-none-match': '*' };
+    if (etag && baseHash) pre['x-strata-base-hash'] = baseHash;
     try {
-      const r = await put(path, fromEditor(doc, eol), etag ? { 'if-match': etag } : { 'if-none-match': '*' });
+      const r = await put(path, bytes, pre);
       const body = await r.json().catch(() => ({}));
       if (r.status === 412) {
         conflict = { theirsEtag: body.etag ?? null, showDiff: false };
@@ -206,6 +229,7 @@
       }
       if (!r.ok) throw new Error(body.error ?? `HTTP ${r.status}`);
       etag = r.headers.get('etag') ?? body.etag;
+      baseHash = await blake3Hex(bytes);
       savedDoc = doc;
       dirty = editor.getDoc() !== savedDoc;
       lastDraft = '';
@@ -221,7 +245,7 @@
 
   async function keepMine() {
     if (!editor) return;
-    const body = fromEditor(editor.getDoc(), eol);
+    const body = new TextEncoder().encode(fromEditor(editor.getDoc(), eol));
     // A copy next to the original; add seconds if that name is taken too.
     for (const seconds of [false, true]) {
       const target = join(parent(path), conflictName(name, new Date(), seconds));
@@ -231,12 +255,13 @@
         if (conflict?.theirsEtag) {
           await reloadTheirs(msg);
         } else {
-          // The original is gone: nothing to reload. Keep editing the text.
+          // The original is gone: the copy holds the text now. Close the
+          // editor; the folder shows the copy.
           closeConflict();
-          savedDoc = editor.getDoc();
           dirty = false;
           await clearDraft(key).catch(() => {});
-          status = msg;
+          alert(msg);
+          onclose();
         }
         return;
       }
@@ -251,6 +276,7 @@
   /** The file was deleted meanwhile: save mine under its name again. */
   async function recreate() {
     etag = null; // save() then uses If-None-Match: *
+    baseHash = null;
     closeConflict();
     await save();
   }
@@ -260,6 +286,7 @@
       const f = await fetchText();
       const t = toEditor(f.text);
       etag = f.etag;
+      baseHash = f.hash;
       eol = t.eol;
       savedDoc = t.doc;
       editor?.setDoc(t.doc);

@@ -17,7 +17,8 @@
       session.user = r.user;
       session.checked = true;
       // Unsaved drafts of anyone else who used this browser go away.
-      const { keepOnlyUser } = await import('$lib/editor/drafts');
+      const { announceAuthChange, keepOnlyUser } = await import('$lib/editor/drafts');
+      announceAuthChange();
       await keepOnlyUser(r.user.id).catch(() => {});
       const next = page.url.searchParams.get('next');
       location.href = next && next.startsWith('/') && !next.startsWith('//') ? next : '/';

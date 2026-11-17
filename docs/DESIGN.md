@@ -117,18 +117,25 @@ Saves never overwrite silently:
   GET. A changed file gets 412 with its current ETag. A missing precondition
   on a write gets 428, and creating a file takes `If-None-Match: *`.
 - GET and PUT share one version function: hashed volumes use the content
-  hash; raw volumes hash size, mtime and the backend etag, so an outside
-  change is caught.
-- The check runs under the volume lock in the same critical section as the
-  write (raw: right before the atomic close, aborting on mismatch).
+  hash; raw volumes hash the size and the backend etag (or the nanosecond
+  mtime where the backend has no etag).
+- Raw metadata can be coarse (whole-second mtimes), so the editor also sends
+  `X-Strata-Base-Hash`, the BLAKE3 of the bytes its edit is based on, and the
+  server compares it with the current content.
+- A cheap metadata pre-check runs before anything is written. The full check
+  runs under the volume lock in the same critical section as the write
+  (raw: right before the atomic close, aborting on mismatch).
 - Writes take the normal store paths, so the journal and websocket push fire.
 
 On a 412, the editor offers three choices: keep mine (a copy named
 `name (conflict YYYY-MM-DD HH-MM).ext`), reload theirs, or view a side-by-side
 diff. Unsaved drafts autosave to IndexedDB every 2 s, keyed by user, mount and
-path with their base ETag, and are offered back on reopen. Line endings and
-the trailing newline are preserved. Files over 5 MB or not valid UTF-8 open
-read-only, and files with NUL bytes in their first 8 KB are refused.
+path with their base ETag and hash, and are offered back on reopen. They
+expire after 30 days, are cleared on sign-out, and other users' drafts are
+dropped when someone signs in. Line endings and
+the trailing newline are preserved; mixed-ending files are kept verbatim.
+Files over 5 MB or not valid UTF-8 open read-only, files over 20 MB are not
+loaded, and files with NUL bytes in their first 8 KB are refused.
 
 ## Security notes
 * Argon2id passwords; sessions are random tokens stored as BLAKE3 hashes.

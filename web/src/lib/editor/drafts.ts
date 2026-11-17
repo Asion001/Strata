@@ -4,6 +4,8 @@ export interface Draft {
   key: string;
   /** ETag of the version the draft was based on. */
   baseEtag: string | null;
+  /** BLAKE3 (hex) of the bytes the draft was based on. */
+  baseHash?: string | null;
   text: string;
   savedAt: number;
 }
@@ -51,6 +53,13 @@ export const DRAFT_TTL_MS = 30 * 24 * 3600 * 1000;
 export async function expireDrafts(now = Date.now()): Promise<void> {
   const all = await tx<Draft[]>('readonly', (s) => s.getAll() as IDBRequest<Draft[]>);
   for (const d of all) if (now - d.savedAt > DRAFT_TTL_MS) await clearDraft(d.key);
+}
+
+/** Tell other tabs that the signed-in user changed (they stop autosaving). */
+export function announceAuthChange() {
+  try {
+    new BroadcastChannel('strata-auth').postMessage('changed');
+  } catch {}
 }
 
 /** Forget every draft in this browser (on sign-out: drafts hold file

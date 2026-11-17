@@ -293,21 +293,44 @@ async fn coarse_mtime_storage_still_detects_same_size_changes() {
     };
     write(b"aaaa");
     let e = get_etag(&t, "Raw/c.txt").await;
-    assert!(
-        e.starts_with("\"r3c-"),
-        "content-based ETag for weak storage: {e}"
-    );
     write(b"bbbb"); // same size, same mtime, different content
-    assert_ne!(get_etag(&t, "Raw/c.txt").await, e);
+    // the metadata can't tell the versions apart...
+    assert_eq!(get_etag(&t, "Raw/c.txt").await, e);
+    // ...but the editor sends the hash of the bytes it is based on
+    let base_a = blake3::hash(b"aaaa").to_hex().to_string();
+    let (s, _, _) = put(
+        &t,
+        "Raw/c.txt",
+        "mine",
+        &[("if-match", &e), ("x-strata-base-hash", &base_a)],
+    )
+    .await;
+    assert_eq!(s, StatusCode::PRECONDITION_FAILED);
     assert_eq!(
-        put(&t, "Raw/c.txt", "mine", &[("if-match", &e)]).await.0,
-        StatusCode::PRECONDITION_FAILED
+        std::fs::read(&disk).unwrap(),
+        b"bbbb",
+        "the outside change survives"
     );
-    assert_eq!(std::fs::read(&disk).unwrap(), b"bbbb");
-    // and a save with the current ETag works and returns the next one
-    let cur = get_etag(&t, "Raw/c.txt").await;
-    let (s, _, h) = put(&t, "Raw/c.txt", "cccc", &[("if-match", &cur)]).await;
+    // based on the current bytes, the save goes through
+    let base_b = blake3::hash(b"bbbb").to_hex().to_string();
+    let (s, _, h) = put(
+        &t,
+        "Raw/c.txt",
+        "cccc",
+        &[("if-match", &e), ("x-strata-base-hash", &base_b)],
+    )
+    .await;
     assert_eq!(s, StatusCode::OK);
-    let next = h["etag"].to_str().unwrap().to_string();
-    assert_eq!(get_etag(&t, "Raw/c.txt").await, next);
+    assert_eq!(get_etag(&t, "Raw/c.txt").await, h["etag"].to_str().unwrap());
+    assert_eq!(
+        put(
+            &t,
+            "Raw/c.txt",
+            "x",
+            &[("if-match", &e), ("x-strata-base-hash", "nothex")]
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
 }

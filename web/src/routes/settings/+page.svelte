@@ -14,7 +14,8 @@
   async function logout() {
     await api('POST', '/api/auth/logout');
     // Unsaved editor drafts hold file contents: don't leave them behind.
-    const { clearAllDrafts } = await import('$lib/editor/drafts');
+    const { announceAuthChange, clearAllDrafts } = await import('$lib/editor/drafts');
+    announceAuthChange();
     await clearAllDrafts();
     location.href = '/login';
   }

@@ -72,8 +72,9 @@ const lfOnly = EditorState.lineSeparator.of('\n');
 
 export interface EditorOptions {
   doc: string;
-  /** Normalise pasted line breaks to LF (all but 'keep'-mode files). */
-  normalizePaste: boolean;
+  /** Normalise pasted line breaks to LF? Asked on every paste, so it
+   *  follows the file if a reload changes its line-ending mode. */
+  normalizePaste: () => boolean;
   name: string;
   readOnly: boolean;
   onChange: (doc: string) => void;
@@ -99,7 +100,7 @@ export async function createEditor(parent: HTMLElement, o: EditorOptions) {
         lfOnly,
         // Pasted text (CRLF from Windows clipboards) follows the file's
         // convention instead of smuggling stray CRs in.
-        EditorView.clipboardInputFilter.of((text) => (o.normalizePaste ? text.replace(/\r\n?/g, '\n') : text)),
+        EditorView.clipboardInputFilter.of((text) => (o.normalizePaste() ? text.replace(/\r\n?/g, '\n') : text)),
         ro.of(EditorState.readOnly.of(o.readOnly)),
         keymap.of([
           indentWithTab,
