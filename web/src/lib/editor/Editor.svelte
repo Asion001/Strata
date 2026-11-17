@@ -9,7 +9,17 @@
   import { contentUrl } from '$lib/api';
   import { join, parent } from '$lib/format';
   import { MAX_EDIT_BYTES, MAX_VIEW_BYTES, conflictName, decodeUtf8, fromEditor, looksBinary, toEditor, type Eol } from './textio';
-  import { clearDraft, clearOwnDraft, draftKey, expireDrafts, getDraft, isSignedIn, saveDraft, type Draft } from './drafts';
+  import {
+    clearAfterSave,
+    clearDraft,
+    clearTabDraft,
+    draftKey,
+    expireDrafts,
+    isSignedIn,
+    listDrafts,
+    saveTabDraft,
+    type Draft
+  } from './drafts';
   import { createBLAKE3 } from 'hash-wasm';
 
   let {
@@ -58,7 +68,6 @@
   let previewTimer: ReturnType<typeof setTimeout>;
   let draftTimer: ReturnType<typeof setInterval>;
   let lastDraft = '';
-  let offerParked = false;
 
   let destroyed = false;
   /** This editor instance: drafts record which tab wrote them. */
@@ -164,11 +173,10 @@
       editor = created;
       renderPreview(t.doc);
       if (!readOnly) {
-        // The newest unsaved work for this file, or an older one set aside
-        // while a previous session ignored its recovery offer.
-        const d = (await getDraft(key).catch(() => undefined)) ?? (await getDraft(`${key}|recovered`).catch(() => undefined));
+        // The newest unsaved work any tab left for this file.
+        const all = await listDrafts(key).catch(() => [] as Draft[]);
         if (destroyed) return;
-        if (d && d.text !== t.doc) draftOffer = d;
+        draftOffer = all.find((d) => d.text !== t.doc) ?? null;
         draftTimer = setInterval(autosave, 2000);
       }
     } catch (e) {
@@ -188,12 +196,6 @@
 
   async function autosave() {
     if (!editor || !dirty) return;
-    // A recovered draft is still on offer: before this session's text takes
-    // its place, keep it under a side key (and in memory for Restore).
-    if (draftOffer && !offerParked) {
-      offerParked = true;
-      await saveDraft({ ...draftOffer, key: `${key}|recovered` }).catch(() => {});
-    }
     // Only while this user is still the one signed in here (any tab may
     // have signed out); checked again after writing, since a sign-out can
     // land in between.
@@ -201,27 +203,31 @@
     const text = editor.getDoc();
     if (text === lastDraft) return;
     lastDraft = text;
-    await saveDraft({ key, baseEtag: etag, baseHash, text, savedAt: Date.now(), tab }).catch(() => {});
-    if (!isSignedIn(userId)) await clearDraft(key).catch(() => {});
+    // This tab's own entry: other tabs' drafts (and a recovery offer still
+    // on screen) are never overwritten.
+    await saveTabDraft(key, tab, { baseEtag: etag, baseHash, text, savedAt: Date.now() }).catch(() => {});
+    if (!isSignedIn(userId)) await clearTabDraft(key, tab).catch(() => {});
   }
 
-  function restoreDraft() {
-    if (!draftOffer || !editor) return;
+  async function restoreDraft() {
+    const d = draftOffer;
+    if (!d || !editor) return;
     if (dirty && !confirm('Replace what you typed since opening with the recovered draft?')) return;
     // Keep the draft's base: if the file changed since, saving asks how to resolve.
-    etag = draftOffer.baseEtag;
-    baseHash = draftOffer.baseHash ?? null;
-    editor.setDoc(draftOffer.text);
-    // The restored draft is this tab's now (so its save clears it).
-    void saveDraft({ ...draftOffer, key, tab, savedAt: Date.now() }).catch(() => {});
+    etag = d.baseEtag;
+    baseHash = d.baseHash ?? null;
+    editor.setDoc(d.text);
     draftOffer = null;
     lastDraft = '';
+    // The draft is this tab's now: drop the old entry, autosave writes ours.
+    if (d.tab !== tab) await clearDraft(d.key).catch(() => {});
+    await autosave();
   }
 
   async function discardDraft() {
+    const d = draftOffer;
     draftOffer = null;
-    await clearDraft(`${key}|recovered`).catch(() => {});
-    if (!offerParked) await clearDraft(key).catch(() => {});
+    if (d) await clearDraft(d.key).catch(() => {});
   }
 
   async function put(target: string, body: Uint8Array<ArrayBuffer>, precondition: Record<string, string>) {
@@ -265,7 +271,7 @@
       savedDoc = doc;
       dirty = editor.getDoc() !== savedDoc;
       lastDraft = '';
-      await clearOwnDraft(key, tab, doc).catch(() => {});
+      await clearAfterSave(key, tab, doc).catch(() => {});
       status = 'Saved';
       setTimeout(() => status === 'Saved' && (status = ''), 2000);
     } catch (e) {
@@ -291,7 +297,7 @@
           // editor; the folder shows the copy.
           closeConflict();
           dirty = false;
-          await clearOwnDraft(key, tab).catch(() => {});
+          await clearTabDraft(key, tab).catch(() => {});
           alert(msg);
           onclose();
         }
@@ -325,7 +331,7 @@
       applyRules(f);
       dirty = false;
       lastDraft = '';
-      await clearOwnDraft(key, tab).catch(() => {});
+      await clearTabDraft(key, tab).catch(() => {});
       closeConflict();
       status = message;
     } catch (e) {

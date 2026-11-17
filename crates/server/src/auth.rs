@@ -325,15 +325,18 @@ async fn insert_local_connection(
     let op = cfg.operator(&st.cfg.local_base)?;
     let caps = Capabilities::detect(&cfg, &op, &st.cfg.local_base);
     let enc = st.secrets.encrypt(&serde_json::to_vec(&cfg).unwrap())?;
+    let (storage_id, storage_folder) = cfg.location(&st.cfg.local_base)?;
     Ok(sqlx::query_scalar(
-        "INSERT INTO connections (owner_id, name, kind, config_enc, capabilities, is_default)
-         VALUES ($1, $2, 'local', $3, $4, $5) RETURNING id",
+        "INSERT INTO connections (owner_id, name, kind, config_enc, capabilities, is_default, storage_id, storage_folder)
+         VALUES ($1, $2, 'local', $3, $4, $5, $6, $7) RETURNING id",
     )
     .bind(owner)
     .bind(name)
     .bind(enc)
     .bind(sqlx::types::Json(caps))
     .bind(is_default)
+    .bind(storage_id)
+    .bind(storage_folder)
     .fetch_one(&mut **tx)
     .await?)
 }

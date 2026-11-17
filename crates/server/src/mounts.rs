@@ -171,8 +171,15 @@ pub async fn storage_root(
     connection_id: i64,
     base: &str,
 ) -> ApiResult<(String, String)> {
-    let cfg = st.connection_config(connection_id).await?;
-    let (id, folder) = cfg.location(&st.cfg.local_base)?;
+    let stored: (Option<String>, Option<String>) =
+        sqlx::query_as("SELECT storage_id, storage_folder FROM connections WHERE id = $1")
+            .bind(connection_id)
+            .fetch_one(&st.db)
+            .await?;
+    let (id, folder) = match stored {
+        (Some(id), Some(folder)) => (id, folder),
+        _ => crate::connections::store_location(st, connection_id).await?,
+    };
     Ok((id, paths::join(&folder, base)))
 }
 
@@ -192,9 +199,8 @@ pub async fn check_storage_overlap(
             .fetch_all(&st.db)
             .await?;
     for (cid, obase) in others {
-        let Ok((oroot, ofolder)) = storage_root(st, cid, &obase).await else {
-            continue;
-        };
+        // Fail closed: never let a raw view onto a hashed store we couldn't check.
+        let (oroot, ofolder) = storage_root(st, cid, &obase).await?;
         if oroot == root
             && (paths::strip_prefix(&folder, &ofolder).is_some()
                 || paths::strip_prefix(&ofolder, &folder).is_some())

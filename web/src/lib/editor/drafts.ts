@@ -15,8 +15,51 @@ export interface Draft {
 const DB = 'strata-editor';
 const STORE = 'drafts';
 
+/** The file a draft belongs to: user, mount and path. */
 export function draftKey(userId: number, mountId: number | null, path: string): string {
   return `${userId}|${mountId ?? ''}|${path}`;
+}
+
+// Each editor tab keeps its own entry per file: `<file key>\u0001<tab>`.
+// (\u0001 can't occur in a path: control characters are refused in names.)
+const SEP = '\u0001';
+const entryKey = (fileKey: string, tab: string) => `${fileKey}${SEP}${tab}`;
+const fileRange = (fileKey: string) => IDBKeyRange.bound(`${fileKey}${SEP}`, `${fileKey}\u0002`, false, true);
+
+/** Save this tab's draft of a file. */
+export const saveTabDraft = (fileKey: string, tab: string, d: Omit<Draft, 'key' | 'tab'>) =>
+  saveDraft({ ...d, key: entryKey(fileKey, tab), tab });
+
+/** Every tab's draft of a file, newest first. */
+export async function listDrafts(fileKey: string): Promise<Draft[]> {
+  const all = await tx<Draft[]>('readonly', (s) => s.getAll(fileRange(fileKey)) as IDBRequest<Draft[]>);
+  return all.sort((a, b) => b.savedAt - a.savedAt);
+}
+
+/** Forget this tab's draft of a file. */
+export const clearTabDraft = (fileKey: string, tab: string) => clearDraft(entryKey(fileKey, tab));
+
+/** After a save: drop this tab's draft and any other tab's draft that holds
+ *  exactly the saved text (it is obsolete); different unsaved work stays. */
+export async function clearAfterSave(fileKey: string, tab: string, saved: string): Promise<void> {
+  const db = await open();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const t = db.transaction(STORE, 'readwrite');
+      const req = t.objectStore(STORE).openCursor(fileRange(fileKey));
+      req.onsuccess = () => {
+        const c = req.result;
+        if (!c) return;
+        const d = c.value as Draft;
+        if (d.tab === tab || d.text === saved) c.delete();
+        c.continue();
+      };
+      t.oncomplete = () => resolve();
+      t.onerror = () => reject(t.error);
+    });
+  } finally {
+    db.close();
+  }
 }
 
 function open(): Promise<IDBDatabase> {
@@ -50,27 +93,6 @@ export const getDraft = (key: string) =>
   tx<Draft | undefined>('readonly', (s) => s.get(key) as IDBRequest<Draft | undefined>);
 export const clearDraft = (key: string) => tx('readwrite', (s) => s.delete(key)).then(() => undefined);
 
-/** After a save: delete the draft if this tab wrote it, or if it holds
- *  exactly what was just saved (one transaction). Another tab's different
- *  unsaved work on the same file stays. */
-export async function clearOwnDraft(key: string, tab: string, saved?: string): Promise<void> {
-  const db = await open();
-  try {
-    await new Promise<void>((resolve, reject) => {
-      const t = db.transaction(STORE, 'readwrite');
-      const s = t.objectStore(STORE);
-      const req = s.get(key);
-      req.onsuccess = () => {
-        const d = req.result as Draft | undefined;
-        if (d && (d.tab === tab || (saved !== undefined && d.text === saved))) s.delete(key);
-      };
-      t.oncomplete = () => resolve();
-      t.onerror = () => reject(t.error);
-    });
-  } finally {
-    db.close();
-  }
-}
 
 /** Drafts are kept for 30 days at most. */
 export const DRAFT_TTL_MS = 30 * 24 * 3600 * 1000;

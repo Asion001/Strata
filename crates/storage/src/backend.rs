@@ -75,23 +75,21 @@ impl ConnectionConfig {
                 endpoint,
                 root,
                 ..
-            } => (
-                format!(
-                    "s3:{}|{}",
-                    endpoint
-                        .as_deref()
-                        .unwrap_or("aws")
-                        .trim_end_matches('/')
-                        .to_ascii_lowercase(),
-                    bucket
-                ),
-                norm(root),
-            ),
+            } => {
+                let host = match endpoint.as_deref() {
+                    None | Some("") => "s3.amazonaws.com".to_string(),
+                    Some(e) => endpoint_host(e, &[80, 443]),
+                };
+                // Regional AWS endpoints name the same bucket.
+                let host = if host.ends_with(".amazonaws.com") {
+                    "s3.amazonaws.com".into()
+                } else {
+                    host
+                };
+                (format!("s3:{host}|{bucket}"), norm(root))
+            }
             Self::Ftp { endpoint, root, .. } => (
-                format!(
-                    "ftp:{}",
-                    endpoint.trim_end_matches('/').to_ascii_lowercase()
-                ),
+                format!("ftp:{}", endpoint_host(endpoint, &[21, 990])),
                 norm(root),
             ),
         })
@@ -213,6 +211,17 @@ impl ConnectionConfig {
         Ok(op
             .layer(TimeoutLayer::new().with_timeout(Duration::from_secs(60)))
             .layer(RetryLayer::new().with_max_times(3)))
+    }
+}
+
+/// `host[:port]` of an endpoint URL, lowercased, without scheme, path or a
+/// default port, so equivalent spellings of one server compare equal.
+fn endpoint_host(url: &str, default_ports: &[u16]) -> String {
+    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    let host = rest.split('/').next().unwrap_or("").to_ascii_lowercase();
+    match host.rsplit_once(':') {
+        Some((h, p)) if p.parse::<u16>().is_ok_and(|p| default_ports.contains(&p)) => h.to_string(),
+        _ => host,
     }
 }
 
@@ -360,15 +369,37 @@ mod tests {
             s3("a", None).location(base).unwrap().1,
             s3("a", Some("y")).location(base).unwrap().1
         );
-        let ftp = ConnectionConfig::Ftp {
-            endpoint: "ftp://nas".into(),
+        let ftp = |e: &str| ConnectionConfig::Ftp {
+            endpoint: e.into(),
             user: Some("u".into()),
             password: None,
             root: None,
         };
         assert_eq!(
-            ftp.location(base).unwrap(),
-            ("ftp:ftp://nas".to_string(), String::new())
+            ftp("ftp://NAS:21").location(base).unwrap(),
+            ("ftp:nas".to_string(), String::new())
+        );
+        assert_eq!(
+            ftp("ftp://nas").location(base).unwrap(),
+            ftp("ftps://nas:990/").location(base).unwrap()
+        );
+        let aws = |e: Option<&str>| ConnectionConfig::S3 {
+            bucket: "b".into(),
+            region: None,
+            endpoint: e.map(str::to_string),
+            access_key_id: "k".into(),
+            secret_access_key: "s".into(),
+            root: None,
+        };
+        assert_eq!(
+            aws(None).location(base).unwrap(),
+            aws(Some("https://s3.eu-west-1.amazonaws.com"))
+                .location(base)
+                .unwrap()
+        );
+        assert_eq!(
+            aws(Some("http://minio:9000")).location(base).unwrap(),
+            aws(Some("https://MINIO:9000/")).location(base).unwrap()
         );
     }
 }

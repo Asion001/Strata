@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import 'fake-indexeddb/auto';
 import { describe, expect, it } from 'vitest';
-import { DRAFT_TTL_MS, clearAllDrafts, clearDraft, clearOwnDraft, draftKey, expireDrafts, getDraft, isSignedIn, keepOnlyUser, markSignedIn, markSignedOut, saveDraft } from './drafts';
+import { DRAFT_TTL_MS, clearAfterSave, clearAllDrafts, clearDraft, listDrafts, saveTabDraft, draftKey, expireDrafts, getDraft, isSignedIn, keepOnlyUser, markSignedIn, markSignedOut, saveDraft } from './drafts';
 
 describe('drafts', () => {
   it('saves, reads and clears by user, mount and path', async () => {
@@ -43,12 +43,15 @@ describe('drafts', () => {
     expect(isSignedIn(3)).toBe(false);
   });
 
-  it('a tab only clears drafts it wrote itself', async () => {
-    const k = draftKey(5, 1, 'x');
-    await saveDraft({ key: k, baseEtag: null, text: 'from B', savedAt: Date.now(), tab: 'B' });
-    await clearOwnDraft(k, 'A');
-    expect((await getDraft(k))?.text).toBe('from B');
-    await clearOwnDraft(k, 'B');
-    expect(await getDraft(k)).toBeUndefined();
+  it('keeps one draft per tab and clears only obsolete ones after a save', async () => {
+    const f = draftKey(5, 1, 'x');
+    await saveTabDraft(f, 'A', { baseEtag: null, text: 'from A', savedAt: 1 });
+    await saveTabDraft(f, 'B', { baseEtag: null, text: 'from B', savedAt: 2 });
+    await saveTabDraft(f, 'C', { baseEtag: null, text: 'saved text', savedAt: 3 });
+    await saveTabDraft(draftKey(5, 1, 'xy'), 'A', { baseEtag: null, text: 'other file', savedAt: 4 });
+    expect((await listDrafts(f)).map((d) => d.text)).toEqual(['saved text', 'from B', 'from A']);
+    await clearAfterSave(f, 'A', 'saved text');
+    expect((await listDrafts(f)).map((d) => d.text)).toEqual(['from B']);
+    expect((await listDrafts(draftKey(5, 1, 'xy'))).length).toBe(1);
   });
 });

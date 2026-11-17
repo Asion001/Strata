@@ -63,6 +63,34 @@ impl Row {
     }
 }
 
+/// Compute and store a connection's storage location (see migration 0006).
+pub async fn store_location(st: &AppState, id: i64) -> ApiResult<(String, String)> {
+    let loc = st
+        .connection_config(id)
+        .await?
+        .location(&st.cfg.local_base)?;
+    sqlx::query("UPDATE connections SET storage_id = $2, storage_folder = $3 WHERE id = $1")
+        .bind(id)
+        .bind(&loc.0)
+        .bind(&loc.1)
+        .execute(&st.db)
+        .await?;
+    Ok(loc)
+}
+
+/// Fill in locations missing on connections saved by older versions.
+pub async fn backfill_locations(st: &AppState) {
+    let ids: Vec<i64> = sqlx::query_scalar("SELECT id FROM connections WHERE storage_id IS NULL")
+        .fetch_all(&st.db)
+        .await
+        .unwrap_or_default();
+    for id in ids {
+        if let Err(e) = store_location(st, id).await {
+            tracing::warn!("connection {id}: cannot determine its storage location: {e}");
+        }
+    }
+}
+
 /// Can `user` mount or edit this connection?
 pub async fn check_access(st: &AppState, user: &User, connection_id: i64) -> ApiResult<()> {
     let owner: Option<i64> = sqlx::query_scalar("SELECT owner_id FROM connections WHERE id = $1")
@@ -156,6 +184,7 @@ pub async fn create(
     .bind(sqlx::types::Json(caps))
     .fetch_one(&st.db)
     .await?;
+    store_location(&st, id).await?;
     let res = probe_operator(&op).await;
     store_probe(&st, id, &res).await?;
     get_view(&st, id).await.map(Json)
@@ -209,6 +238,7 @@ pub async fn update(
     .execute(&st.db)
     .await?;
     st.forget_operator(id);
+    store_location(&st, id).await?;
     let res = probe_operator(&op).await;
     store_probe(&st, id, &res).await?;
     get_view(&st, id).await.map(Json)
