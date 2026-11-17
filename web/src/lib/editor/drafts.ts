@@ -8,9 +8,6 @@ export interface Draft {
   baseHash?: string | null;
   text: string;
   savedAt: number;
-  /** Last time its tab was seen open (expiry counts from this); defaults
-   *  to `savedAt`. Kept apart so the edit time stays the edit time. */
-  aliveAt?: number;
   /** The editor instance (tab) that wrote it: a tab only clears its own. */
   tab?: string;
 }
@@ -39,28 +36,32 @@ export async function listDrafts(fileKey: string): Promise<Draft[]> {
   return all.sort((a, b) => b.savedAt - a.savedAt);
 }
 
-/** Mark this tab's draft of a file alive (see `aliveAt`). False if it
- *  isn't stored (any more). */
-export async function touchTabDraft(fileKey: string, tab: string, now = Date.now()): Promise<boolean> {
-  const db = await open();
+/** Is this tab's draft of a file stored? Only this tab writes its entry,
+ *  and only through `saveTabDraft`, so it holds the last text it stored. */
+export async function hasTabDraft(fileKey: string, tab: string): Promise<boolean> {
+  return (await tx<number>('readonly', (s) => s.count(entryKey(fileKey, tab)))) > 0;
+}
+
+// When each tab's draft was last known to belong to an open tab, outside
+// IndexedDB (a touch must stay cheap; the record may hold megabytes).
+// Expiry counts from the later of this and the draft's edit time.
+const ALIVE_KEY = 'strata-draft-alive';
+
+function aliveMap(): Record<string, number> {
   try {
-    return await new Promise<boolean>((resolve, reject) => {
-      const t = db.transaction(STORE, 'readwrite');
-      const req = t.objectStore(STORE).openCursor(entryKey(fileKey, tab));
-      let found = false;
-      req.onsuccess = () => {
-        const c = req.result;
-        if (!c) return;
-        found = true;
-        c.update({ ...(c.value as Draft), aliveAt: now });
-      };
-      t.oncomplete = () => resolve(found);
-      t.onerror = () => reject(t.error);
-      t.onabort = () => reject(t.error ?? new Error('draft transaction aborted'));
-    });
-  } finally {
-    db.close();
+    return JSON.parse(localStorage.getItem(ALIVE_KEY) ?? '{}');
+  } catch {
+    return {};
   }
+}
+
+/** This tab is still open: its draft of a file doesn't expire meanwhile. */
+export function touchTabDraft(fileKey: string, tab: string, now = Date.now()) {
+  try {
+    const m = aliveMap();
+    m[entryKey(fileKey, tab)] = now;
+    localStorage.setItem(ALIVE_KEY, JSON.stringify(m));
+  } catch {}
 }
 
 /** Forget this tab's draft of a file. */
@@ -113,8 +114,6 @@ export function markOfferSeen(d: Draft) {
     const m = seenMap();
     const now = Date.now();
     m[d.key] = { savedAt: d.savedAt, at: now };
-    // Keep the map small: marks older than the draft TTL are pointless.
-    for (const [k, v] of Object.entries(m)) if (now - v.at > DRAFT_TTL_MS) delete m[k];
     localStorage.setItem(SEEN_KEY, JSON.stringify(m));
   } catch {}
 }
@@ -169,12 +168,27 @@ export const DRAFT_TTL_MS = 30 * 24 * 3600 * 1000;
 
 /** Remove drafts older than the TTL (one transaction, one draft in memory
  *  at a time). */
-export const expireDrafts = (now = Date.now()) =>
-  deleteWhere((d) => now - (d.aliveAt ?? d.savedAt) > DRAFT_TTL_MS);
+export async function expireDrafts(now = Date.now()): Promise<void> {
+  const alive = aliveMap();
+  await deleteWhere((d) => now - Math.max(d.savedAt, alive[d.key] ?? 0) > DRAFT_TTL_MS);
+  // Marks of drafts that are gone are pointless: keep both maps small (and
+  // a declined offer stays declined for as long as its draft exists).
+  const keys = new Set((await tx<IDBValidKey[]>('readonly', (s) => s.getAllKeys())).map(String));
+  pruneMap(ALIVE_KEY, keys);
+  pruneMap(SEEN_KEY, keys);
+}
 
-/** How often an open tab marks its unchanged draft alive: well inside the
- *  TTL, so an open tab's draft never expires. */
-export const DRAFT_TOUCH_MS = DRAFT_TTL_MS / 30;
+function pruneMap(name: string, keep: Set<string>) {
+  try {
+    const m = JSON.parse(localStorage.getItem(name) ?? '{}');
+    for (const k of Object.keys(m)) if (!keep.has(k)) delete m[k];
+    localStorage.setItem(name, JSON.stringify(m));
+  } catch {}
+}
+
+/** How often an open tab marks its draft alive: well inside the TTL, so an
+ *  open tab's draft never expires. */
+export const DRAFT_TOUCH_MS = 60 * 60 * 1000;
 
 // Who is signed in, shared by every tab (localStorage is synchronous and
 // cross-tab). Autosave only writes while it names the draft's user.
@@ -190,6 +204,7 @@ export function markSignedOut() {
   try {
     localStorage.removeItem(AUTH_KEY);
     localStorage.removeItem(SEEN_KEY);
+    localStorage.removeItem(ALIVE_KEY);
   } catch {}
 }
 
@@ -226,11 +241,13 @@ export function clearAllDrafts(): Promise<void> {
  *  signs in here. */
 export async function keepOnlyUser(userId: number): Promise<void> {
   const mine = (k: string) => k.startsWith(`${userId}|`);
-  try {
-    const m = seenMap();
-    for (const k of Object.keys(m)) if (!mine(k)) delete m[k];
-    localStorage.setItem(SEEN_KEY, JSON.stringify(m));
-  } catch {}
+  for (const name of [SEEN_KEY, ALIVE_KEY]) {
+    try {
+      const m = JSON.parse(localStorage.getItem(name) ?? '{}');
+      for (const k of Object.keys(m)) if (!mine(k)) delete m[k];
+      localStorage.setItem(name, JSON.stringify(m));
+    } catch {}
+  }
   const keys = await tx<IDBValidKey[]>('readonly', (s) => s.getAllKeys());
   for (const k of keys) if (!mine(String(k))) await clearDraft(String(k));
 }

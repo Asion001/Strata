@@ -20,6 +20,7 @@
     DRAFT_TOUCH_MS,
     isSignedIn,
     touchTabDraft,
+    hasTabDraft,
     AUTH_KEY,
     listDrafts,
     saveTabDraft,
@@ -270,16 +271,16 @@
     if (!editor || !dirty) return 'clean';
     if (!isSignedIn(userId)) return 'signedOut';
     const text = editor.getDoc();
-    if (text === lastDraft) {
-      // Unchanged: mark it alive now and then (and always on a last
-      // chance), which also tells whether it is still there (another tab's
-      // save may have cleared it); if not, it is written again below.
-      if (why !== 'final' && Date.now() - lastTouch < DRAFT_TOUCH_MS) return 'stored';
-      if (await touchTabDraft(key, tab).catch(() => false)) {
-        lastTouch = Date.now();
-        return 'stored';
-      }
+    // Now and then (and on a last chance), mark the stored copy alive (so
+    // it can't expire while this tab is open, even while new writes fail)
+    // and check it is still there (another tab's save may have cleared it).
+    let present = true;
+    if (lastDraft !== null && (why === 'final' || Date.now() - lastTouch >= DRAFT_TOUCH_MS)) {
+      touchTabDraft(key, tab);
+      lastTouch = Date.now();
+      present = await hasTabDraft(key, tab).catch(() => false);
     }
+    if (text === lastDraft && present) return 'stored';
     // Backing off: ticks wait; writes after a user action still try.
     if (why === 'tick' && inBackoff()) return 'waiting';
     return persist(text, why !== 'tick');

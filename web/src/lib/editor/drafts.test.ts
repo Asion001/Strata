@@ -1,22 +1,36 @@
 // @vitest-environment jsdom
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { DRAFT_TTL_MS, touchTabDraft, clearTabDraft, clearAfterSave, clearAllDrafts, clearDraft, listDrafts, markOfferSeen, offerSeen, saveTabDraft, draftKey, expireDrafts, getDraft, isSignedIn, keepOnlyUser, markSignedIn, markSignedOut, saveDraft } from './drafts';
+import { DRAFT_TTL_MS, touchTabDraft, hasTabDraft, clearTabDraft, clearAfterSave, clearAllDrafts, clearDraft, listDrafts, markOfferSeen, offerSeen, saveTabDraft, draftKey, expireDrafts, getDraft, isSignedIn, keepOnlyUser, markSignedIn, markSignedOut, saveDraft } from './drafts';
 
 describe('drafts', () => {
   beforeEach(() => markSignedIn(1));
 
   it('a touched draft keeps its edit time but outlives the TTL', async () => {
     const f = draftKey(1, 1, 'alive');
-    expect(await touchTabDraft(f, 'T', 5)).toBe(false);
+    expect(await hasTabDraft(f, 'T')).toBe(false);
     await saveTabDraft(f, 'T', { baseEtag: null, text: 'open tab', savedAt: 0 });
     await saveTabDraft(f, 'U', { baseEtag: null, text: 'closed tab', savedAt: 0 });
-    expect(await touchTabDraft(f, 'T', DRAFT_TTL_MS)).toBe(true);
+    expect(await hasTabDraft(f, 'T')).toBe(true);
+    touchTabDraft(f, 'T', DRAFT_TTL_MS);
     await expireDrafts(DRAFT_TTL_MS + 1);
     const left = await listDrafts(f);
     expect(left.map((d) => [d.tab, d.savedAt])).toEqual([['T', 0]]);
     await clearTabDraft(f, 'T');
-    expect(await touchTabDraft(f, 'T')).toBe(false);
+    expect(await hasTabDraft(f, 'T')).toBe(false);
+  });
+
+  it('a declined offer stays declined while its draft exists', async () => {
+    const f = draftKey(1, 1, 'declined');
+    await saveTabDraft(f, 'T', { baseEtag: null, text: 'x', savedAt: 1 });
+    const [d] = await listDrafts(f);
+    markOfferSeen(d);
+    touchTabDraft(f, 'T', 10 * DRAFT_TTL_MS);
+    await expireDrafts(10 * DRAFT_TTL_MS);
+    expect(offerSeen(d)).toBe(true);
+    await clearTabDraft(f, 'T');
+    await expireDrafts(10 * DRAFT_TTL_MS);
+    expect(offerSeen(d)).toBe(false); // mark pruned with its draft
   });
 
   it('a signed-out browser never recreates the wiped database', async () => {
