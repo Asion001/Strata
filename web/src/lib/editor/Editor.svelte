@@ -75,14 +75,15 @@
    *  wait doubles with each failed regular write in a row (5 s up to 60 s)
    *  and a regular write that works resets it, so a briefly failing store
    *  costs little typing while a full one isn't hammered every tick. During
-   *  the wait, a few extra writes still try (restoring a draft, and once per
-   *  window each: closing or leaving the page, after a save); they never
-   *  change the backoff, whether they fail or work (a small write fitting a
-   *  nearly full store says little about the whole document). */
+   *  the wait, extra writes (closing or leaving the page, after a save,
+   *  restoring a draft) still try, unless that same text already failed in
+   *  this window; they never change the backoff, whether they fail or work
+   *  (a small write fitting a nearly full store says little about the whole
+   *  document). */
   let retryAfter = 0;
   let retryDelay = 0;
-  /** Per reason, the backoff window (its `retryAfter`) an extra write used. */
-  const extraWindow = { final: 0, afterSave: 0 };
+  /** The text whose write failed last, and in which window (`retryAfter`). */
+  let failed = { text: null as string | null, window: 0 };
   /** Draft writes run one at a time, in order. */
   let draftQueue: Promise<void> = Promise.resolve();
 
@@ -211,8 +212,8 @@
     mergeView?.destroy();
   });
 
-  /** Queue a draft write. `final` (closing, leaving the page) ignores the
-   *  backoff: it is the last chance to keep this text. */
+  /** Queue a draft write. `final` (closing, leaving the page) still tries
+   *  during a backoff: it is the last chance to keep this text. */
   function autosave(final = false): Promise<void> {
     const run = () => writeDraft(final ? 'final' : 'tick');
     draftQueue = draftQueue.then(run, run);
@@ -221,6 +222,17 @@
 
   function inBackoff() {
     return Date.now() < retryAfter;
+  }
+
+  function isKnownFailure(text: string) {
+    return failed.window === retryAfter && failed.text === text;
+  }
+
+  /** Wait for `p`, but at most `ms`: stuck storage never holds up the UI. */
+  async function atMost(p: Promise<unknown>, ms: number) {
+    let t: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([p, new Promise((r) => (t = setTimeout(r, ms)))]);
+    clearTimeout(t);
   }
 
   /** Write this tab's draft. A regular write (`extra` false) moves the
@@ -234,6 +246,7 @@
         retryDelay = Math.min(Math.max(retryDelay * 2, 5_000), 60_000);
         retryAfter = Date.now() + retryDelay;
       }
+      failed = { text, window: retryAfter };
       return false;
     }
     if (!extra) {
@@ -264,12 +277,9 @@
     const text = editor.getDoc();
     if (text === lastDraft) return;
     const extra = inBackoff();
-    if (extra) {
-      // Backing off: ticks wait; closing and after-save writes try once
-      // per window.
-      if (why === 'tick' || extraWindow[why] === retryAfter) return;
-      extraWindow[why] = retryAfter;
-    }
+    // Backing off: ticks wait; other writes try, unless this very text
+    // already failed in this window.
+    if (extra && (why === 'tick' || isKnownFailure(text))) return;
     // This tab's own entry: other tabs' drafts (and a recovery offer still
     // on screen) are never overwritten.
     if (!(await storeDraft(text, extra))) return;
@@ -296,7 +306,7 @@
     // is still in flight can't land after it.
     await afterDrafts(async () => {
       lastDraft = null;
-      if (!isSignedIn(userId) || !(await storeDraft(d.text, inBackoff()))) return;
+      if (!isSignedIn(userId) || (inBackoff() && isKnownFailure(d.text)) || !(await storeDraft(d.text, inBackoff()))) return;
       // A sign-out may have landed during the write: don't leave it behind.
       if (!isSignedIn(userId)) {
         await clearTabDraft(key, tab);
@@ -361,8 +371,8 @@
         lastDraft = null;
         await clearAfterSave(key, tab, doc);
         // Typed during the save? That text's draft was just cleared with
-        // the rest: store it again now (while backing off, at most once per
-        // backoff window, so a failing store isn't hammered).
+        // the rest: store it again now (while backing off, not if this very
+        // text already failed, so a failing store isn't hammered).
         await writeDraft('afterSave');
       });
       status = 'Saved';
@@ -392,7 +402,7 @@
           dirty = false;
           // Wait briefly for the clean-up, but never let stuck storage keep
           // the editor from closing.
-          await Promise.race([afterDrafts(() => clearTabDraft(key, tab)), new Promise((r) => setTimeout(r, 2000))]);
+          await atMost(afterDrafts(() => clearTabDraft(key, tab)), 2000);
           alert(msg);
           onclose();
         }
@@ -462,7 +472,7 @@
     if (dirty && !confirm('Close with unsaved changes? A draft stays in this browser for up to 30 days, until you sign out, or until someone else signs in here.')) return;
     // The last seconds of typing too; stuck storage never keeps the editor
     // from closing.
-    await Promise.race([autosave(true), new Promise((r) => setTimeout(r, 2000))]);
+    await atMost(autosave(true), 2000);
     onclose();
   }
 
