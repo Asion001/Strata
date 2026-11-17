@@ -77,8 +77,8 @@
    *  full one isn't hammered with the whole document every tick. */
   let retryAfter = 0;
   let retryDelay = 0;
-  /** A save clean-up already tried a write in this backoff window. */
-  let afterSaveTried = false;
+  /** The backoff window (its `retryAfter`) a save clean-up already wrote in. */
+  let afterSaveWindow = 0;
   /** Draft writes run one at a time, in order. */
   let draftQueue: Promise<void> = Promise.resolve();
 
@@ -252,10 +252,8 @@
     if (Date.now() < retryAfter) {
       // Backing off: only a last chance, or one save clean-up per backoff
       // window, still tries.
-      if (why === 'tick' || (why === 'afterSave' && afterSaveTried)) return;
-      if (why === 'afterSave') afterSaveTried = true;
-    } else {
-      afterSaveTried = false; // a new window: the regular retry is due
+      if (why === 'tick' || (why === 'afterSave' && afterSaveWindow === retryAfter)) return;
+      if (why === 'afterSave') afterSaveWindow = retryAfter;
     }
     // This tab's own entry: other tabs' drafts (and a recovery offer still
     // on screen) are never overwritten.
