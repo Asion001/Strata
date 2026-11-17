@@ -371,6 +371,20 @@ mod tests {
         let mut new = old.redacted();
         new.merge_secrets(&old);
         assert_eq!(new, old);
+        let ftp = |password: Option<&str>| ConnectionConfig::Ftp {
+            endpoint: "ftp://h".into(),
+            user: None,
+            password: password.map(Into::into),
+            root: None,
+        };
+        let mut new = ftp(Some("p")).redacted();
+        assert_eq!(new, ftp(Some("")));
+        new.merge_secrets(&ftp(Some("p")));
+        assert_eq!(new, ftp(Some("p")));
+        // No password stays none.
+        let mut new = ftp(None).redacted();
+        new.merge_secrets(&ftp(Some("p")));
+        assert_eq!(new, ftp(None));
     }
 
     #[test]

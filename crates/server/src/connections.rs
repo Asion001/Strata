@@ -272,8 +272,8 @@ pub async fn update(
     }
     // Blank secrets mean "unchanged", so the old config must be readable.
     let old = st.decrypt_config(&old_enc).map_err(|e| {
-        tracing::warn!("connection {id}: stored config can't be read: {e}");
-        bad("the stored settings of this connection can't be read (is the server key right?)")
+        tracing::warn!("connection {id}: stored config can't be read: {e:#}");
+        bad("the stored settings of this connection can't be read (wrong server key, or an unknown format)")
     })?;
     req.config.merge_secrets(&old);
     let op = req

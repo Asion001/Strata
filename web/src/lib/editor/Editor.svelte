@@ -215,11 +215,13 @@
     return draftQueue;
   }
 
-  /** Write this tab's draft, tracking the backoff. */
-  async function storeDraft(text: string): Promise<boolean> {
+  /** Write this tab's draft, tracking the backoff. An extra attempt made
+   *  during a backoff (`extra`) doesn't lengthen it when it fails. */
+  async function storeDraft(text: string, extra = false): Promise<boolean> {
     try {
       await saveTabDraft(key, tab, { baseEtag: etag, baseHash, text, savedAt: Date.now() });
     } catch {
+      if (extra) return false;
       retryDelay = Math.min(Math.max(retryDelay * 2, 5_000), 60_000);
       retryAfter = Date.now() + retryDelay;
       return false;
@@ -249,15 +251,16 @@
     if (!isSignedIn(userId)) return;
     const text = editor.getDoc();
     if (text === lastDraft) return;
-    if (Date.now() < retryAfter) {
+    const extra = Date.now() < retryAfter;
+    if (extra) {
       // Backing off: only a last chance, or one save clean-up per backoff
-      // window, still tries.
+      // window, still tries; neither lengthens the backoff if it fails.
       if (why === 'tick' || (why === 'afterSave' && afterSaveWindow === retryAfter)) return;
       if (why === 'afterSave') afterSaveWindow = retryAfter;
     }
     // This tab's own entry: other tabs' drafts (and a recovery offer still
     // on screen) are never overwritten.
-    if (!(await storeDraft(text))) return;
+    if (!(await storeDraft(text, extra))) return;
     if (!isSignedIn(userId)) {
       await clearTabDraft(key, tab).catch(() => {});
       return;
