@@ -18,6 +18,7 @@
     draftKey,
     expireDrafts,
     isSignedIn,
+    AUTH_KEY,
     listDrafts,
     saveTabDraft,
     type Draft
@@ -263,10 +264,9 @@
    *  just removed. */
   async function writeDraft(why: 'tick' | 'final' | 'afterSave' = 'tick'): Promise<DraftResult> {
     if (!editor || !dirty) return 'clean';
+    if (!isSignedIn(userId)) return 'signedOut';
     const text = editor.getDoc();
-    // A last chance writes even an unchanged text: the stored copy may have
-    // been removed meanwhile (e.g. a sign-out and back in elsewhere).
-    if (text === lastDraft && why !== 'final') return 'stored';
+    if (text === lastDraft) return 'stored';
     // Backing off: ticks wait; writes after a user action still try.
     if (why === 'tick' && inBackoff()) return 'waiting';
     return persist(text, why !== 'tick');
@@ -279,10 +279,9 @@
   async function persist(text: string, byUser: boolean): Promise<DraftResult> {
     if (!isSignedIn(userId)) return 'signedOut';
     if (!(await storeDraft(text, byUser))) return 'failed';
-    if (!isSignedIn(userId)) {
-      await clearTabDraft(key, tab).catch(() => {});
-      return 'signedOut';
-    }
+    // Signed out meanwhile: the sign-out's wipe of all drafts waits for
+    // this write to finish, so the entry goes with it.
+    if (!isSignedIn(userId)) return 'signedOut';
     lastDraft = text;
     return 'stored';
   }
@@ -459,15 +458,26 @@
   }
 
   async function close() {
+    if (dirty && !isSignedIn(userId)) {
+      // Drafts aren't kept for a signed-out user.
+      if (confirm('Close and lose the unsaved changes?')) onclose();
+      return;
+    }
     if (dirty && !confirm('Close with unsaved changes? A draft stays in this browser for up to 30 days, until you sign out, or until someone else signs in here.')) return;
     // The last seconds of typing too; stuck storage never keeps the editor
     // from closing.
     // Close quietly only when nothing is unsaved or the draft is known to
     // be stored; a failed, slow or refused write asks first.
     const r = await atMost(autosave(true), 2000);
-    if (r !== 'clean' && r !== 'stored') {
-      if (!confirm('The draft could not be stored in this browser (storage full or slow, or signed out). Close anyway and lose the unsaved changes?')) return;
-    }
+    const why =
+      r === 'timeout'
+        ? 'The draft is still being written to this browser and may not be kept.'
+        : r === 'signedOut'
+          ? 'You were signed out, so no draft is kept.'
+          : r === 'failed' || r === undefined
+            ? 'The draft could not be stored in this browser.'
+            : null;
+    if (why && !confirm(`${why} Close anyway and lose the unsaved changes?`)) return;
     onclose();
   }
 
@@ -495,7 +505,13 @@
   }
 </script>
 
-<svelte:window onbeforeunload={beforeUnload} onpagehide={() => void autosave(true)} onkeydown={onKey} />
+<svelte:window
+  onstorage={(e) => {
+    // Signed out or in elsewhere: drafts may have been wiped, so store ours
+    // again rather than trust the last write.
+    if (e.key === AUTH_KEY || e.key === null) lastDraft = null;
+  }}
+  onbeforeunload={beforeUnload} onpagehide={() => void autosave(true)} onkeydown={onKey} />
 
 <div class="editor" role="dialog" aria-modal="true" aria-label="Edit {name}" tabindex="-1">
   <header>

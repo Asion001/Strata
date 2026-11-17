@@ -137,7 +137,7 @@ export const expireDrafts = (now = Date.now()) => deleteWhere((d) => now - d.sav
 
 // Who is signed in, shared by every tab (localStorage is synchronous and
 // cross-tab). Autosave only writes while it names the draft's user.
-const AUTH_KEY = 'strata-signed-in';
+export const AUTH_KEY = 'strata-signed-in';
 
 export function markSignedIn(userId: number) {
   try {
