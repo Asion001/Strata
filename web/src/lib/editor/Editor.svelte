@@ -71,10 +71,12 @@
   let draftTimer: ReturnType<typeof setInterval>;
   /** The text last stored as this tab's draft (null: nothing stored yet). */
   let lastDraft: string | null = null;
-  /** After a failed draft write no draft is written until `retryAfter`; the
-   *  wait doubles with each failure in a row (5 s up to 60 s) and a write that
-   *  works resets it, so a briefly failing store costs little typing while a
-   *  full one isn't hammered with the whole document every tick. */
+  /** After a failed draft write, autosave ticks skip until `retryAfter`; the
+   *  wait doubles with each failed regular write in a row (5 s up to 60 s)
+   *  and any write that works resets it, so a briefly failing store costs
+   *  little typing while a full one isn't hammered every tick. Writes made
+   *  during the wait (closing the editor, after a save, restoring a draft)
+   *  still try, and don't lengthen it if they fail. */
   let retryAfter = 0;
   let retryDelay = 0;
   /** The backoff window (its `retryAfter`) a save clean-up already wrote in. */
@@ -215,9 +217,9 @@
     return draftQueue;
   }
 
-  /** Write this tab's draft, tracking the backoff. An extra attempt made
-   *  during a backoff (`extra`) doesn't lengthen it when it fails. */
-  async function storeDraft(text: string, extra = false): Promise<boolean> {
+  /** Write this tab's draft, tracking the backoff. */
+  async function storeDraft(text: string): Promise<boolean> {
+    const extra = Date.now() < retryAfter; // made during the wait
     try {
       await saveTabDraft(key, tab, { baseEtag: etag, baseHash, text, savedAt: Date.now() });
     } catch {
@@ -251,8 +253,7 @@
     if (!isSignedIn(userId)) return;
     const text = editor.getDoc();
     if (text === lastDraft) return;
-    const extra = Date.now() < retryAfter;
-    if (extra) {
+    if (Date.now() < retryAfter) {
       // Backing off: only a last chance, or one save clean-up per backoff
       // window, still tries; neither lengthens the backoff if it fails.
       if (why === 'tick' || (why === 'afterSave' && afterSaveWindow === retryAfter)) return;
@@ -260,7 +261,7 @@
     }
     // This tab's own entry: other tabs' drafts (and a recovery offer still
     // on screen) are never overwritten.
-    if (!(await storeDraft(text, extra))) return;
+    if (!(await storeDraft(text))) return;
     if (!isSignedIn(userId)) {
       await clearTabDraft(key, tab).catch(() => {});
       return;
