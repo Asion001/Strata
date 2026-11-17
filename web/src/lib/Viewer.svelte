@@ -1,7 +1,6 @@
 <script lang="ts">
   // Full-screen preview: image gallery (arrows, swipe, zoom), native video/audio, text.
-  import { isAudio, isImage, isVideo, bytes } from './format';
-  import { isSvg } from './api';
+  import { isAudio, isImage, isSvg, isVideo, bytes } from './format';
 
   interface Item { name: string; size: number; src: string; download: string }
   let { items, index = $bindable(), onclose }: { items: Item[]; index: number; onclose: () => void } = $props();
@@ -11,14 +10,14 @@
   let zoom = $state(1);
 
   const isText = (n: string, size: number) =>
-    size < 2_000_000 && /\.(txt|md|markdown|json|ya?ml|toml|ini|cfg|conf|log|csv|tsv|xml|html?|css|scss|js|mjs|ts|tsx|jsx|svelte|vue|rs|go|py|rb|php|java|kt|swift|c|h|cpp|hpp|cs|sh|bash|zsh|fish|sql|env|gitignore|dockerfile|svg)$/i.test(n);
+    size < 2_000_000 && !isSvg(n) && /\.(txt|md|markdown|json|ya?ml|toml|ini|cfg|conf|log|csv|tsv|xml|html?|css|scss|js|mjs|ts|tsx|jsx|svelte|vue|rs|go|py|rb|php|java|kt|swift|c|h|cpp|hpp|cs|sh|bash|zsh|fish|sql|env|gitignore|dockerfile|svg)$/i.test(n);
 
   $effect(() => {
     text = null;
     zoom = 1;
     const it = item;
     if (it && isText(it.name, it.size)) {
-      fetch(it.src).then((r) => r.text()).then((t) => { if (item === it) text = t; });
+      fetch(it.src).then(decodeText).then((t) => { if (item === it) text = t; });
     }
     // preload neighbouring images
     for (const j of [index - 1, index + 1]) {
@@ -26,6 +25,19 @@
       if (n && isImage(n.name)) new Image().src = n.src;
     }
   });
+
+  // Decode with the charset the server detected; text without one is UTF-8
+  // if valid, else a legacy 8-bit encoding (Windows-1251 covers Cyrillic).
+  async function decodeText(r: Response): Promise<string> {
+    const buf = await r.arrayBuffer();
+    const charset = /charset=([\w-]+)/i.exec(r.headers.get('content-type') ?? '')?.[1];
+    if (charset) return new TextDecoder(charset).decode(buf);
+    try {
+      return new TextDecoder('utf-8', { fatal: true }).decode(buf);
+    } catch {
+      return new TextDecoder('windows-1251').decode(buf);
+    }
+  }
 
   function step(d: number) {
     const n = index + d;

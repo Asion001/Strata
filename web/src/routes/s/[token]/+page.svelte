@@ -1,7 +1,7 @@
 <script lang="ts">
   import { page } from '$app/state';
-  import { api, isSvg, type Entry } from '$lib/api';
-  import { bytes, when, join, icon, isImage } from '$lib/format';
+  import { api, pickPreview, type Entry } from '$lib/api';
+  import { bytes, when, join, icon, isImage, isSvg } from '$lib/format';
   import Viewer from '$lib/Viewer.svelte';
 
   const token = $derived(page.params.token);
@@ -73,7 +73,7 @@
 </div>
 
 {#if viewerIndex >= 0}
-  <Viewer items={files.map((f: Entry) => ({ name: f.name, size: f.size, src: isSvg(f.name) ? imgUrl(join(sub, f.name)) : fileUrl(join(sub, f.name)), download: fileUrl(join(sub, f.name), true) }))}
+  <Viewer items={files.map((f: Entry) => ({ name: f.name, size: f.size, src: pickPreview(f.name, fileUrl(join(sub, f.name)), imgUrl(join(sub, f.name))), download: fileUrl(join(sub, f.name), true) }))}
     bind:index={viewerIndex} onclose={() => (viewerIndex = -1)} />
 {/if}
 

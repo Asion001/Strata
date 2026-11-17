@@ -84,33 +84,43 @@ async fn head_bytes(st: &AppState, m: &Mount, rel: &str, node: &Node) -> ApiResu
     Ok(out)
 }
 
-/// The serving decision needs the first bytes of the file. Cache it per
-/// (volume, path, etag, purpose) so Range requests (video seeking) don't pay
-/// an extra backend read each time.
-async fn decide_cached(
+/// The serving decision needs the first bytes of the file. Its result is
+/// cached per (volume, path, version), so Range requests (video seeking) and
+/// repeat views don't read the head again. Returns the head too when it had
+/// to be read, so a full GET can reuse it instead of fetching it twice.
+async fn classify_cached(
     st: &AppState,
     m: &Mount,
     rel: &str,
     node: &Node,
-    purpose: safe::Purpose,
-) -> ApiResult<safe::Decision> {
+) -> ApiResult<(safe::Class, Option<Vec<u8>>)> {
     let key = node
         .etag
         .as_ref()
-        .map(|e| format!("{}|{rel}|{e}|{purpose:?}", m.volume_id));
+        .map(|e| format!("{}|{rel}|{e}", m.volume_id));
     if let Some(k) = &key
-        && let Some(d) = st.decisions.get(k)
+        && let Some(c) = st.decisions.get(k)
     {
-        return Ok(d.clone());
+        return Ok((*c, None));
     }
-    let d = safe::decide(&node.name, &head_bytes(st, m, rel, node).await?, purpose);
+    let head = head_bytes(st, m, rel, node).await?;
+    let class = safe::classify(&node.name, &head);
     if let Some(k) = key {
-        if st.decisions.len() > 50_000 {
-            st.decisions.clear();
+        if st.decisions.len() >= 100_000 {
+            // Cheap bound: drop about a tenth of the entries.
+            let victims: Vec<String> = st
+                .decisions
+                .iter()
+                .step_by(10)
+                .map(|e| e.key().clone())
+                .collect();
+            for v in victims {
+                st.decisions.remove(&v);
+            }
         }
-        st.decisions.insert(k, d.clone());
+        st.decisions.insert(k, class);
     }
-    Ok(d)
+    Ok((class, Some(head)))
 }
 
 /// Serve file bytes safely (see `safe`): sniffed Content-Type, sandboxing
@@ -130,10 +140,14 @@ pub async fn serve(
     // The validator covers the decision too, so a cached response matches.
     // `s1`: version of the serving rules, so responses cached under older
     // rules are not revalidated into place.
-    let etag = node.etag.as_ref().map(|e| match purpose {
-        safe::Purpose::ImagePreview => format!("\"s1i-{e}\""),
-        safe::Purpose::Content { .. } => format!("\"s1-{e}\""),
-    });
+    let etag = node
+        .etag
+        .as_deref()
+        .map(safe::header_safe_tag)
+        .map(|e| match purpose {
+            safe::Purpose::ImagePreview => format!("\"s1i-{e}\""),
+            safe::Purpose::Content { .. } => format!("\"s1-{e}\""),
+        });
     if let (Some(et), Some(inm)) = (&etag, headers.get(header::IF_NONE_MATCH))
         && inm.as_bytes() == et.as_bytes()
     {
@@ -149,8 +163,22 @@ pub async fn serve(
     }
     let range = parse_range(headers, size)?;
     let (start, end) = range.unwrap_or((0, size));
-    let decision = decide_cached(st, m, rel, node, purpose).await?;
-    let stream = vfs::read_stream(st, m, rel, node, start, end).await?;
+    let (class, head) = classify_cached(st, m, rel, node).await?;
+    let decision = safe::decide_class(class, purpose);
+    let stream: vfs::ByteStream = match head {
+        // We just read the file's start: don't fetch it again.
+        Some(head) if start == 0 && !head.is_empty() => {
+            let n = (head.len() as u64).min(end);
+            let first = bytes::Bytes::from(head).slice(..n as usize);
+            if n >= end {
+                Box::pin(futures::stream::once(async move { Ok(first) }))
+            } else {
+                let rest = vfs::read_stream(st, m, rel, node, n, end).await?;
+                Box::pin(futures::stream::once(async move { Ok(first) }).chain(rest))
+            }
+        }
+        _ => vfs::read_stream(st, m, rel, node, start, end).await?,
+    };
     let mut resp = Response::new(Body::from_stream(stream));
     let h = resp.headers_mut();
     safe::protect(h);

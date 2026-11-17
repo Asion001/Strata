@@ -61,20 +61,7 @@ pub fn sniff(head: &[u8]) -> Option<&'static str> {
     } else if starts(b"II*\0") || starts(b"MM\0*") {
         "image/tiff"
     } else if at(4, b"ftyp") {
-        match head.get(8..12) {
-            Some(b"avif") | Some(b"avis") => "image/avif",
-            Some(b"heic") | Some(b"heix") | Some(b"hevc") | Some(b"heim") | Some(b"heis") => {
-                "image/heic"
-            }
-            Some(b"mif1") | Some(b"msf1") => "image/heif",
-            Some(b"M4A ") | Some(b"M4B ") => "audio/mp4",
-            Some(b"qt  ") => "video/quicktime",
-            Some(b"isom") | Some(b"iso2") | Some(b"iso4") | Some(b"iso5") | Some(b"iso6")
-            | Some(b"mp41") | Some(b"mp42") | Some(b"avc1") | Some(b"dash") | Some(b"M4V ")
-            | Some(b"mmp4") | Some(b"3gp4") | Some(b"3gp5") | Some(b"3g2a") => "video/mp4",
-            // Unknown brands (e.g. camera raw files): not a known media type.
-            _ => return None,
-        }
+        return ftyp(head);
     } else if starts(&[0x1A, 0x45, 0xDF, 0xA3]) {
         "video/webm"
     } else if starts(b"OggS") {
@@ -82,17 +69,11 @@ pub fn sniff(head: &[u8]) -> Option<&'static str> {
     } else if starts(b"fLaC") {
         "audio/flac"
     } else if (starts(b"ID3") && head.len() >= 5 && matches!(head[3], 2..=4) && head[4] != 0xFF)
-        || (head.len() >= 3
-            && head[0] == 0xFF
-            && head[1] & 0xE0 == 0xE0
-            && head[1] != 0xFE // FF FE is the UTF-16LE byte-order mark
-            && head[1] & 0x06 != 0 // layer not reserved
-            && head[1] & 0x18 != 0x08 // MPEG version not reserved
-            && head[2] & 0xF0 != 0xF0 // bitrate index not "bad"
-            && head[2] & 0x0C != 0x0C)
-    // sample rate not reserved
+        || mpeg_frame(head)
     {
         "audio/mpeg"
+    } else if adts_frame(head) {
+        "audio/aac"
     } else if starts(b"%PDF-") {
         "application/pdf"
     } else if starts(b"PK\x03\x04") || starts(b"PK\x05\x06") {
@@ -102,6 +83,66 @@ pub fn sniff(head: &[u8]) -> Option<&'static str> {
     } else {
         return None;
     })
+}
+
+/// ISO base media files: images (AVIF/HEIF), audio (M4A), video (MP4,
+/// 3GP, QuickTime). The major brand decides, falling back to the compatible
+/// brands; anything else (e.g. camera raw files) is not a known media type.
+fn ftyp(head: &[u8]) -> Option<&'static str> {
+    let size = u32::from_be_bytes(head.get(0..4)?.try_into().ok()?) as usize;
+    let mut brands: Vec<&[u8]> = vec![head.get(8..12)?];
+    let end = size.min(head.len());
+    let mut off = 16;
+    while off + 4 <= end {
+        brands.push(&head[off..off + 4]);
+        off += 4;
+    }
+    let image = |b: &[u8]| match b {
+        b"avif" | b"avis" => Some("image/avif"),
+        b"heic" | b"heix" | b"hevc" | b"heim" | b"heis" | b"hevx" => Some("image/heic"),
+        b"mif1" | b"msf1" => Some("image/heif"),
+        _ => None,
+    };
+    let other = |b: &[u8]| match b {
+        b"M4A " | b"M4B " | b"M4P " => Some("audio/mp4"),
+        b"qt  " => Some("video/quicktime"),
+        b"crx " | b"CRX " => Some("raw"),
+        _ if b.starts_with(b"iso")
+            || b.starts_with(b"mp4")
+            || b.starts_with(b"3gp")
+            || b.starts_with(b"3g2") =>
+        {
+            Some("video/mp4")
+        }
+        b"avc1" | b"dash" | b"M4V " | b"M4VH" | b"M4VP" | b"mmp4" | b"mp71" | b"XAVC" | b"MSNV"
+        | b"f4v " | b"NDAS" => Some("video/mp4"),
+        _ => None,
+    };
+    // Major brand first, then compatible brands.
+    let pick = image(brands[0]).or_else(|| other(brands[0])).or_else(|| {
+        brands[1..]
+            .iter()
+            .find_map(|b| image(b))
+            .or_else(|| brands[1..].iter().find_map(|b| other(b)))
+    })?;
+    (pick != "raw").then_some(pick)
+}
+
+/// MPEG audio frame header (MP3 and friends).
+fn mpeg_frame(h: &[u8]) -> bool {
+    h.len() >= 3
+        && h[0] == 0xFF
+        && h[1] & 0xE0 == 0xE0
+        && h[1] != 0xFE // FF FE is the UTF-16LE byte-order mark
+        && h[1] & 0x06 != 0 // layer not reserved (00 is ADTS AAC, below)
+        && h[1] & 0x18 != 0x08 // MPEG version not reserved
+        && h[2] & 0xF0 != 0xF0 // bitrate index not "bad"
+        && h[2] & 0x0C != 0x0C // sample rate not reserved
+}
+
+/// ADTS frame header (raw .aac).
+fn adts_frame(h: &[u8]) -> bool {
+    h.len() >= 3 && h[0] == 0xFF && h[1] & 0xF6 == 0xF0 && (h[2] >> 2) & 0x0F < 13
 }
 
 /// Text flavour of the start of a file, if it looks like text.
@@ -126,7 +167,8 @@ fn text_kind(head: &[u8]) -> Option<&'static str> {
         .iter()
         .filter(|&&b| b < 0x20 && !matches!(b, b'\t' | b'\n' | b'\r' | 0x0C | 0x1B))
         .count();
-    (controls * 100 <= head.len()).then_some("text/plain")
+    // A stray byte or two (e.g. a DOS EOF marker) in a short file is fine.
+    (controls <= 2 + head.len() / 100).then_some("text/plain")
 }
 
 fn looks_like_text(head: &[u8]) -> bool {
@@ -157,22 +199,39 @@ fn ext(name: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Decide the Content-Type and disposition from the magic bytes; the
-/// extension only matters for SVG on the image-preview route.
-pub fn decide(name: &str, head: &[u8], purpose: Purpose) -> Decision {
-    if purpose == Purpose::ImagePreview && ext(name) == "svg" && looks_like_text(head) {
-        let text = String::from_utf8_lossy(head).to_ascii_lowercase();
-        if text.contains("<svg") {
-            return Decision {
-                content_type: "image/svg+xml",
-                inline: true,
-            };
-        }
-    }
-    let content_type = match sniff(head) {
+/// What the first bytes of a file say about it (independent of purpose, so
+/// it can be cached per file version).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Class {
+    /// Media type for normal serving.
+    pub base: &'static str,
+    /// An SVG document (named .svg and containing `<svg`).
+    pub svg: bool,
+}
+
+pub fn classify(name: &str, head: &[u8]) -> Class {
+    let svg = ext(name) == "svg"
+        && looks_like_text(head)
+        && String::from_utf8_lossy(head)
+            .to_ascii_lowercase()
+            .contains("<svg");
+    let base = match sniff(head) {
         Some(t) => t,
         None => text_kind(head).unwrap_or("application/octet-stream"),
     };
+    Class { base, svg }
+}
+
+/// Decide the Content-Type and disposition: magic bytes decide; the
+/// extension only matters for SVG on the image-preview route.
+pub fn decide_class(class: Class, purpose: Purpose) -> Decision {
+    if purpose == Purpose::ImagePreview && class.svg {
+        return Decision {
+            content_type: "image/svg+xml",
+            inline: true,
+        };
+    }
+    let content_type = class.base;
     let inline = match purpose {
         Purpose::Content { download: true } => false,
         Purpose::Content { download: false } | Purpose::ImagePreview => {
@@ -186,6 +245,20 @@ pub fn decide(name: &str, head: &[u8], purpose: Purpose) -> Decision {
     Decision {
         content_type,
         inline,
+    }
+}
+
+pub fn decide(name: &str, head: &[u8], purpose: Purpose) -> Decision {
+    decide_class(classify(name, head), purpose)
+}
+
+/// An ETag value safe to put in a header (backends may return anything).
+pub fn header_safe_tag(tag: &str) -> String {
+    if !tag.is_empty() && tag.len() <= 128 && tag.bytes().all(|b| b.is_ascii_graphic() && b != b'"')
+    {
+        tag.to_string()
+    } else {
+        blake3::hash(tag.as_bytes()).to_hex()[..32].to_string()
     }
 }
 
@@ -354,6 +427,34 @@ mod tests {
     fn bidi_overrides_are_stripped() {
         let v = content_disposition(false, "invoice\u{202E}fdp.exe");
         assert!(v.to_str().unwrap().contains("filename=\"invoicefdp.exe\""));
+    }
+
+    #[test]
+    fn more_media_and_text() {
+        // 3GP phone video with major brand 3gp6, and XAVC camera video
+        assert_eq!(
+            sniff(b"\0\0\0\x18ftyp3gp6\0\0\0\0isom3gp6"),
+            Some("video/mp4")
+        );
+        assert_eq!(
+            sniff(b"\0\0\0\x18ftypXAVC\0\0\0\0XAVCmp42"),
+            Some("video/mp4")
+        );
+        // unknown major brand, but compatible with isom
+        assert_eq!(
+            sniff(b"\0\0\0\x18ftypabcd\0\0\0\0isommp41"),
+            Some("video/mp4")
+        );
+        // Canon CR3 is not media
+        assert_eq!(sniff(b"\0\0\0\x18ftypcrx \0\0\0\0crx isom"), None);
+        // ADTS AAC
+        assert_eq!(sniff(&[0xFF, 0xF1, 0x50, 0x80, 0x02]), Some("audio/aac"));
+        // short CP1251 text ending with a DOS EOF marker
+        let mut t = vec![0xCF, 0xF0, 0xE8, 0xE2, 0xE5, 0xF2, b'\n'];
+        t.push(0x1A);
+        assert_eq!(decide("r.txt", &t, C).content_type, "text/plain");
+        assert_eq!(header_safe_tag("abc-1"), "abc-1");
+        assert_eq!(header_safe_tag("a\"b\u{e9}").len(), 32);
     }
 
     #[test]
