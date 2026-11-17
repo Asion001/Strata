@@ -1,16 +1,13 @@
 /*
- * Tailwind v4 and shadcn-svelte foundation.
+ * Tailwind v4 and shadcn-svelte setup. This only makes the tools available;
+ * nothing on the existing pages changes yet.
  *
- * Tailwind's preflight (its CSS reset) is left out for now: the existing
- * pages assume browser defaults, so loading it would change how they look.
- * shadcn-svelte components get a small reset of their own instead (see
- * @layer base). The full preflight replaces both once the old pages are
- * rebuilt in the new shell.
- *
- * Layer order, weakest first: theme, base (element defaults), components
- * (the shared helper classes), utilities. Utilities beat the old global
- * styles, so shadcn-svelte components styled with utilities look as designed.
- * Svelte's scoped <style> blocks are unlayered and still beat all of them.
+ * Only the theme and utilities layers load. Tailwind's preflight (its CSS
+ * reset) is left out, and the existing styles below stay unlayered, so they
+ * keep winning over any utility. Both change in the next UI step, which
+ * rebuilds the app shell: preflight comes in, and the old element styles
+ * are scoped to the pages that still need them, so shadcn-svelte components
+ * render as designed.
  *
  * `dark:` uses Tailwind's default, prefers-color-scheme, which is the same
  * switch the variables below use.
@@ -89,6 +86,7 @@
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
+  --font-sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
@@ -125,75 +123,42 @@
     --ok: #4ade80;
   }
 }
-/*
- * Element defaults. shadcn-svelte marks its elements with data-slot.
- *
- * 1. Inside those components, a reset with the parts of Tailwind's preflight
- *    that shadcn relies on, so its utility classes start from zero.
- * 2. The old element styles skip data-slot elements and their contents
- *    through :where(). :where() adds no specificity, so old pages
- *    match as before. New element rules here need the same guard until the
- *    old pages are rebuilt and the full preflight replaces all of this.
- */
-@layer base {
-  :where([data-slot], [data-slot] *),
-  :where([data-slot], [data-slot] *)::before,
-  :where([data-slot], [data-slot] *)::after {
-    box-sizing: border-box; margin: 0; padding: 0;
-    border: 0 solid var(--border); outline-color: color-mix(in oklab, var(--ring) 50%, transparent);
-  }
-  :where([data-slot], [data-slot] *):is(h1, h2, h3, h4, h5, h6) { font-size: inherit; font-weight: inherit; }
-  :where([data-slot], [data-slot] *):is(ol, ul, menu) { list-style: none; }
-  :where([data-slot], [data-slot] *):is(a) { color: inherit; text-decoration: inherit; }
-  :where([data-slot], [data-slot] *):is(button, input, select, optgroup, textarea) {
-    font: inherit; letter-spacing: inherit; color: inherit; background-color: transparent; border-radius: 0; opacity: 1;
-  }
-  :where([data-slot], [data-slot] *):is(button, [role='button']) { cursor: pointer; }
-  :where([data-slot], [data-slot] *):is(img, svg, video, canvas) { display: block; vertical-align: middle; }
-  :where([data-slot], [data-slot] *):is(img, video) { max-width: 100%; height: auto; }
-  :where([data-slot], [data-slot] *):is(table) { border-collapse: collapse; text-indent: 0; border-color: inherit; }
-  :where([data-slot], [data-slot] *)::placeholder { color: var(--muted); opacity: 1; }
-  * { box-sizing: border-box; }
-  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); }
-  body { -webkit-tap-highlight-color: transparent; }
-  a:where(:not([data-slot], [data-slot] *)) { color: var(--accent); text-decoration: none; }
-  button:where(:not([data-slot], [data-slot] *)), input:where(:not([data-slot], [data-slot] *)), select:where(:not([data-slot], [data-slot] *)) {
-    font: inherit; color: inherit;
-  }
-  button:where(:not([data-slot], [data-slot] *)) {
-    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
-    padding: 7px 12px; cursor: pointer; white-space: nowrap;
-  }
-  button:where(:not([data-slot], [data-slot] *)):hover { background: var(--hover); }
-  button.primary:where(:not([data-slot], [data-slot] *)) { background: var(--accent); color: var(--accent-text); border-color: transparent; }
-  button.danger:where(:not([data-slot], [data-slot] *)) { color: var(--danger); }
-  button:where(:not([data-slot], [data-slot] *)):disabled { opacity: .5; cursor: default; }
-  input:where(:not([data-slot], [data-slot] *)), select:where(:not([data-slot], [data-slot] *)) {
-    background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; width: 100%;
-  }
-  input:where(:not([data-slot], [data-slot] *)):focus, select:where(:not([data-slot], [data-slot] *)):focus { outline: 2px solid var(--accent); outline-offset: -1px; }
-  label:where(:not([data-slot], [data-slot] *)) { display: grid; gap: 4px; font-size: .9em; color: var(--muted); }
-  h1:where(:not([data-slot], [data-slot] *)) { font-size: 1.4em; margin: 4px 0 16px; }
-  h2:where(:not([data-slot], [data-slot] *)) { font-size: 1.1em; margin: 20px 0 10px; }
-  table:where(:not([data-slot], [data-slot] *)) { width: 100%; border-collapse: collapse; }
-  td:where(:not([data-slot], [data-slot] *)), th:where(:not([data-slot], [data-slot] *)) { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--border); }
-  dialog:where(:not([data-slot], [data-slot] *)) {
-    border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel); color: var(--text);
-    padding: 20px; width: min(480px, calc(100vw - 32px));
-  }
-  dialog:where(:not([data-slot], [data-slot] *))::backdrop { background: rgb(0 0 0 / .45); }
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); }
+body { -webkit-tap-highlight-color: transparent; }
+a { color: var(--accent); text-decoration: none; }
+button, input, select {
+  font: inherit; color: inherit;
 }
-
-/* Shared helper classes used across the existing pages. */
-@layer components {
-  .card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
-  .muted { color: var(--muted); }
-  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-  .grow { flex: 1; }
-  .error { color: var(--danger); }
-  .badge { font-size: .75em; padding: 1px 7px; border-radius: 99px; border: 1px solid var(--border); color: var(--muted); }
-  .badge.ok { color: var(--ok); border-color: currentColor; }
-  .badge.err { color: var(--danger); border-color: currentColor; }
-  .page { max-width: 960px; margin: 0 auto; padding: 16px; }
-  .stack { display: grid; gap: 12px; }
+button {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+  padding: 7px 12px; cursor: pointer; white-space: nowrap;
 }
+button:hover { background: var(--hover); }
+button.primary { background: var(--accent); color: var(--accent-text); border-color: transparent; }
+button.danger { color: var(--danger); }
+button:disabled { opacity: .5; cursor: default; }
+input, select {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; width: 100%;
+}
+input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+label { display: grid; gap: 4px; font-size: .9em; color: var(--muted); }
+.card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+.muted { color: var(--muted); }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.grow { flex: 1; }
+.error { color: var(--danger); }
+.badge { font-size: .75em; padding: 1px 7px; border-radius: 99px; border: 1px solid var(--border); color: var(--muted); }
+.badge.ok { color: var(--ok); border-color: currentColor; }
+.badge.err { color: var(--danger); border-color: currentColor; }
+.page { max-width: 960px; margin: 0 auto; padding: 16px; }
+h1 { font-size: 1.4em; margin: 4px 0 16px; }
+h2 { font-size: 1.1em; margin: 20px 0 10px; }
+table { width: 100%; border-collapse: collapse; }
+td, th { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--border); }
+dialog {
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel); color: var(--text);
+  padding: 20px; width: min(480px, calc(100vw - 32px));
+}
+dialog::backdrop { background: rgb(0 0 0 / .45); }
+.stack { display: grid; gap: 12px; }
