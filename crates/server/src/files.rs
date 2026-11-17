@@ -84,9 +84,7 @@ async fn head_bytes(st: &AppState, m: &Mount, rel: &str, node: &Node) -> ApiResu
     Ok(out)
 }
 
-/// The serving decision needs the first bytes of the file. Its result is
-/// cached per (volume, path, version), so Range requests (video seeking) and
-/// repeat views don't read the head again.
+/// Cache key for a file version's classification.
 fn class_key(m: &Mount, rel: &str, node: &Node) -> Option<String> {
     node.etag
         .as_ref()
@@ -103,26 +101,19 @@ fn remember_class(st: &AppState, m: &Mount, rel: &str, node: &Node, class: safe:
     }
 }
 
+/// Classify from a separate read of the file's head (cached per version, so
+/// Range requests such as video seeking and repeat views skip it).
 async fn classify_cached(
     st: &AppState,
     m: &Mount,
     rel: &str,
     node: &Node,
 ) -> ApiResult<safe::Class> {
-    let key = node
-        .etag
-        .as_ref()
-        .map(|e| format!("{}|{rel}|{e}", m.volume_id));
-    if let Some(k) = &key
-        && let Some(c) = st.decisions.get(k)
-    {
+    if let Some(c) = cached_class(st, m, rel, node) {
         return Ok(c);
     }
-    let head = head_bytes(st, m, rel, node).await?;
-    let class = safe::classify(&node.name, &head);
-    if let Some(k) = key {
-        st.decisions.insert(k, class);
-    }
+    let class = safe::classify(&node.name, &head_bytes(st, m, rel, node).await?);
+    remember_class(st, m, rel, node, class);
     Ok(class)
 }
 
@@ -169,17 +160,23 @@ pub async fn serve(
     // One read serves both the type decision and the body when the body
     // starts at 0: peek its first bytes, then hand them on. The type and the
     // bytes therefore always come from the same version of the file.
-    let mut stream = vfs::read_stream(st, m, rel, node, start, end).await?;
-    let class = match cached_class(st, m, rel, node) {
-        Some(c) => c,
-        None if start == 0 => {
+    // The type is decided from the file's first SNIFF_LEN bytes (never
+    // fewer, so a tiny Range probe can't decide it for everyone). When the
+    // body itself covers them, they come from the same read as the body:
+    // peek, then replay. Otherwise (mid-file or short ranges) the head is
+    // read on its own before the body is opened.
+    let full_head = size.min(safe::SNIFF_LEN);
+    let (class, stream) = match cached_class(st, m, rel, node) {
+        Some(c) => (c, vfs::read_stream(st, m, rel, node, start, end).await?),
+        None if start == 0 && end >= full_head => {
+            let mut stream = vfs::read_stream(st, m, rel, node, start, end).await?;
             let mut head: Vec<u8> = Vec::new();
-            let want = (end - start).min(safe::SNIFF_LEN) as usize;
             let mut peeked = Vec::new();
-            while head.len() < want {
+            while (head.len() as u64) < full_head {
                 match stream.next().await {
                     Some(Ok(b)) => {
-                        head.extend_from_slice(&b[..b.len().min(want - head.len())]);
+                        let take = b.len().min(full_head as usize - head.len());
+                        head.extend_from_slice(&b[..take]);
                         peeked.push(b);
                     }
                     Some(Err(e)) => return Err(ApiError::Internal(e.into())),
@@ -189,11 +186,13 @@ pub async fn serve(
             let class = safe::classify(&node.name, &head);
             remember_class(st, m, rel, node, class);
             let replay = futures::stream::iter(peeked.into_iter().map(Ok));
-            stream = Box::pin(replay.chain(stream));
-            class
+            let stream: vfs::ByteStream = Box::pin(replay.chain(stream));
+            (class, stream)
         }
-        // Mid-file range with no cached type: classify from the head.
-        None => classify_cached(st, m, rel, node).await?,
+        None => {
+            let class = classify_cached(st, m, rel, node).await?;
+            (class, vfs::read_stream(st, m, rel, node, start, end).await?)
+        }
     };
     let decision = safe::decide_class(class, purpose);
     let mut resp = Response::new(Body::from_stream(stream));

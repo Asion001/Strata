@@ -37,9 +37,16 @@
     try {
       return new TextDecoder('utf-8', { fatal: true }).decode(buf);
     } catch {
-      // Not UTF-8: guess the legacy code page from the user's language.
-      const cyrillic = /^(uk|ru|be|bg|sr|mk|kk)\b/i.test(navigator.language);
-      return new TextDecoder(cyrillic ? 'windows-1251' : 'windows-1252').decode(buf);
+      // Not UTF-8: guess the legacy code page from the bytes. Cyrillic text
+      // is mostly high bytes; Western text is mostly ASCII letters with a
+      // few accented ones.
+      const bytes = new Uint8Array(buf);
+      let high = 0, ascii = 0;
+      for (const b of bytes) {
+        if (b >= 0xc0) high++;
+        else if ((b | 0x20) >= 0x61 && (b | 0x20) <= 0x7a) ascii++;
+      }
+      return new TextDecoder(high > ascii ? 'windows-1251' : 'windows-1252').decode(buf);
     }
   }
 

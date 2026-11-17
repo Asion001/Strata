@@ -188,7 +188,14 @@ fn mpeg_frame(h: &[u8]) -> bool {
     match mpeg_frame_len(h) {
         // The next header must follow, unless the frame is longer than the
         // sniffed head (then `classify` lets text win if it looks like text).
-        Some(len) => h.len() < len + 4 || mpeg_frame_len(&h[len..]).is_some(),
+        Some(len) => {
+            if h.len() >= len + 4 {
+                mpeg_frame_len(&h[len..]).is_some()
+            } else {
+                // Frame longer than the head: only for a full head (big file).
+                h.len() as u64 >= SNIFF_LEN
+            }
+        }
         None => false,
     }
 }
@@ -204,18 +211,47 @@ fn adts_frame(h: &[u8]) -> bool {
         (len >= 7).then_some(len)
     };
     match header(h) {
-        Some(len) => h.len() < len + 7 || header(&h[len..]).is_some(),
+        Some(len) => {
+            if h.len() >= len + 7 {
+                header(&h[len..]).is_some()
+            } else {
+                h.len() as u64 >= SNIFF_LEN
+            }
+        }
         None => false,
     }
 }
 
 /// Text flavour of the start of a file, if it looks like text.
 fn text_kind(head: &[u8]) -> Option<&'static str> {
+    // A UTF-16 byte-order mark only counts if what follows really reads as
+    // UTF-16 text (MPEG Layer I with CRC also starts FF FE).
+    let utf16 = |le: bool| {
+        let units: Vec<u16> = head[2..]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| {
+                if le {
+                    u16::from_le_bytes([c[0], c[1]])
+                } else {
+                    u16::from_be_bytes([c[0], c[1]])
+                }
+            })
+            .collect();
+        let bad = char::decode_utf16(units.iter().copied())
+            .filter(|c| match c {
+                Err(_) => true,
+                Ok(c) => c.is_control() && !matches!(c, '\t' | '\n' | '\r' | '\u{c}' | '\u{1b}'),
+            })
+            .count();
+        bad <= 2 + units.len() / 100
+    };
     if head.starts_with(&[0xFF, 0xFE]) {
-        return Some("text/plain; charset=utf-16le");
+        return utf16(true).then_some("text/plain; charset=utf-16le");
     }
     if head.starts_with(&[0xFE, 0xFF]) {
-        return Some("text/plain; charset=utf-16be");
+        return utf16(false).then_some("text/plain; charset=utf-16be");
     }
     if head.contains(&0) {
         return None;
@@ -481,7 +517,30 @@ mod tests {
         // text-looking bytes are text
         let mut lone = vec![0xFF, 0xFB, 0x90, 0x00, 0x01, 0x02];
         lone.resize(100, 0x01);
-        assert_eq!(classify("a", &lone).base, "audio/mpeg");
+        assert_eq!(
+            classify("a", &lone).base,
+            "application/octet-stream",
+            "short file: needs 2 frames"
+        );
+        // frame longer than a full head (free of second header): accepted
+        let mut big = vec![0xFF, 0xFB, 0xE0, 0x00]; // 320 kbps at 44.1 kHz = 1044 bytes
+        big.resize(SNIFF_LEN as usize, 0x01);
+        assert_eq!(
+            classify("a", &big).base,
+            "application/octet-stream",
+            "frame fits: second header required"
+        );
+        let mut adts = vec![0xFF, 0xF1, 0x50, 0x83, 0xFF, 0xFF, 0xFC]; // frame > head
+        adts.resize(SNIFF_LEN as usize, 0x01);
+        assert_eq!(classify("a", &adts).base, "audio/aac");
+        // MPEG Layer I with CRC starts FF FE but is not UTF-16 text
+        let mut l1 = vec![0xFF, 0xFE, 0x90, 0x00];
+        let mut x: u32 = 7;
+        while l1.len() < SNIFF_LEN as usize {
+            x = x.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            l1.push((x >> 16) as u8); // compressed audio looks random
+        }
+        assert_ne!(classify("a", &l1).base, "text/plain; charset=utf-16le");
         assert_eq!(
             classify("a.txt", &[0xFF, 0xE2, 0xE8, b'a']).base,
             "text/plain"

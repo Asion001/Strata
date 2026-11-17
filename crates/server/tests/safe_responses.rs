@@ -234,3 +234,36 @@ async fn revalidation_keeps_headers_and_cache_policy() {
     assert_eq!((s, b.len()), (StatusCode::PARTIAL_CONTENT, 8));
     assert_eq!(ctype(&h), "image/png");
 }
+
+#[tokio::test]
+async fn tiny_range_probe_cannot_decide_the_type() {
+    let Some(t) = app().await else { return };
+    t.upload("v.png", &png()).await;
+    // a public share lets anyone probe with a 2-byte range first
+    let s = t.ok("POST", "/api/shares", json!({"path": "v.png"})).await;
+    let token = s["token"].as_str().unwrap();
+    let anon = TestApp {
+        router: t.router.clone(),
+        st: t.st.clone(),
+        cookie: None,
+        dir: tempfile::tempdir().unwrap(),
+    };
+    let (s, b, h) = anon
+        .raw(
+            "GET",
+            &format!("/api/public/{token}/content"),
+            Body::empty(),
+            &[("range", "bytes=0-1")],
+        )
+        .await;
+    assert_eq!((s, b.len()), (StatusCode::PARTIAL_CONTENT, 2));
+    assert_eq!(
+        ctype(&h),
+        "image/png",
+        "probe itself is typed from the full head"
+    );
+    let (_, _, h) = t
+        .raw("GET", "/api/files/content?path=v.png", Body::empty(), &[])
+        .await;
+    assert_eq!(ctype(&h), "image/png");
+}
