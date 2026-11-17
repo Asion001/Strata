@@ -10,6 +10,9 @@ export interface Draft {
   savedAt: number;
   /** The editor instance (tab) that wrote it: a tab only clears its own. */
   tab?: string;
+  /** Someone declined to restore it: not offered again (the writing tab's
+   *  next autosave clears the mark; the data stays until it expires). */
+  dismissed?: boolean;
 }
 
 const DB = 'strata-editor';
@@ -39,27 +42,37 @@ export async function listDrafts(fileKey: string): Promise<Draft[]> {
 /** Forget this tab's draft of a file. */
 export const clearTabDraft = (fileKey: string, tab: string) => clearDraft(entryKey(fileKey, tab));
 
-/** After a save: drop this tab's draft and any other tab's draft that holds
- *  exactly the saved text (it is obsolete); different unsaved work stays. */
-export async function clearAfterSave(fileKey: string, tab: string, saved: string): Promise<void> {
+/** Delete every draft in `range` (all if omitted) for which `pred` holds,
+ *  in one transaction. Settles on complete, error and abort alike. */
+async function deleteWhere(pred: (d: Draft) => boolean, range?: IDBKeyRange): Promise<void> {
   const db = await open();
   try {
     await new Promise<void>((resolve, reject) => {
       const t = db.transaction(STORE, 'readwrite');
-      const req = t.objectStore(STORE).openCursor(fileRange(fileKey));
+      const req = t.objectStore(STORE).openCursor(range);
       req.onsuccess = () => {
         const c = req.result;
         if (!c) return;
-        const d = c.value as Draft;
-        if (d.tab === tab || d.text === saved) c.delete();
+        if (pred(c.value as Draft)) c.delete();
         c.continue();
       };
       t.oncomplete = () => resolve();
       t.onerror = () => reject(t.error);
+      t.onabort = () => reject(t.error ?? new Error('draft transaction aborted'));
     });
   } finally {
     db.close();
   }
+}
+
+/** After a save: drop this tab's draft and any other tab's draft that holds
+ *  exactly the saved text (it is obsolete); different unsaved work stays. */
+export const clearAfterSave = (fileKey: string, tab: string, saved: string) =>
+  deleteWhere((d) => d.tab === tab || d.text === saved, fileRange(fileKey));
+
+/** Mark a draft as declined (never deletes another tab's work). */
+export async function dismissDraft(d: Draft): Promise<void> {
+  await saveDraft({ ...d, dismissed: true });
 }
 
 function open(): Promise<IDBDatabase> {
@@ -99,25 +112,7 @@ export const DRAFT_TTL_MS = 30 * 24 * 3600 * 1000;
 
 /** Remove drafts older than the TTL (one transaction, one draft in memory
  *  at a time). */
-export async function expireDrafts(now = Date.now()): Promise<void> {
-  const db = await open();
-  try {
-    await new Promise<void>((resolve, reject) => {
-      const t = db.transaction(STORE, 'readwrite');
-      const req = t.objectStore(STORE).openCursor();
-      req.onsuccess = () => {
-        const c = req.result;
-        if (!c) return;
-        if (now - (c.value as Draft).savedAt > DRAFT_TTL_MS) c.delete();
-        c.continue();
-      };
-      t.oncomplete = () => resolve();
-      t.onerror = () => reject(t.error);
-    });
-  } finally {
-    db.close();
-  }
-}
+export const expireDrafts = (now = Date.now()) => deleteWhere((d) => now - d.savedAt > DRAFT_TTL_MS);
 
 // Who is signed in, shared by every tab (localStorage is synchronous and
 // cross-tab). Autosave only writes while it names the draft's user.

@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use opendal::Operator;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use strata_storage::{Capabilities, ConnectionConfig};
+use strata_storage::{Capabilities, ConnectionConfig, paths};
 
 use crate::auth::{AuthUser, User};
 use crate::error::{ApiError, ApiResult, bad, conflict};
@@ -225,20 +225,38 @@ pub async fn update(
         .operator(&st.cfg.local_base)
         .map_err(|e| bad(format!("invalid config: {e}")))?;
     let caps = Capabilities::detect(&req.config, &op, &st.cfg.local_base);
+    // Re-pointing a connection must not make its volumes overlap volumes of
+    // the opposite mode (a raw view over a hashed store).
+    let (sid, sfolder) = req
+        .config
+        .location(&st.cfg.local_base)
+        .map_err(|e| bad(format!("invalid config: {e}")))?;
+    let volumes: Vec<(String, String)> =
+        sqlx::query_as("SELECT base_path, mode FROM volumes WHERE connection_id = $1")
+            .bind(id)
+            .fetch_all(&st.db)
+            .await?;
+    for (base, mode) in &volumes {
+        crate::mounts::check_overlap_at(&st, &sid, &paths::join(&sfolder, base), mode, Some(id))
+            .await?;
+    }
     let enc = st
         .secrets
         .encrypt(&serde_json::to_vec(&req.config).unwrap())?;
+    // Config and location change together, in one statement.
     sqlx::query(
-        "UPDATE connections SET name = $2, config_enc = $3, capabilities = $4 WHERE id = $1",
+        "UPDATE connections SET name = $2, config_enc = $3, capabilities = $4,
+                storage_id = $5, storage_folder = $6 WHERE id = $1",
     )
     .bind(id)
     .bind(req.name.trim())
     .bind(enc)
     .bind(sqlx::types::Json(caps))
+    .bind(&sid)
+    .bind(&sfolder)
     .execute(&st.db)
     .await?;
     st.forget_operator(id);
-    store_location(&st, id).await?;
     let res = probe_operator(&op).await;
     store_probe(&st, id, &res).await?;
     get_view(&st, id).await.map(Json)

@@ -12,6 +12,7 @@
   import {
     clearAfterSave,
     clearDraft,
+    dismissDraft,
     clearTabDraft,
     draftKey,
     expireDrafts,
@@ -176,7 +177,7 @@
         // The newest unsaved work any tab left for this file.
         const all = await listDrafts(key).catch(() => [] as Draft[]);
         if (destroyed) return;
-        draftOffer = all.find((d) => d.text !== t.doc) ?? null;
+        draftOffer = all.find((d) => !d.dismissed && d.text !== t.doc) ?? null;
         draftTimer = setInterval(autosave, 2000);
       }
     } catch (e) {
@@ -205,6 +206,8 @@
     lastDraft = text;
     // This tab's own entry: other tabs' drafts (and a recovery offer still
     // on screen) are never overwritten.
+    // (Writing the entry anew also drops any "dismissed" mark: live work
+    // is offered again if this tab later crashes.)
     await saveTabDraft(key, tab, { baseEtag: etag, baseHash, text, savedAt: Date.now() }).catch(() => {});
     if (!isSignedIn(userId)) await clearTabDraft(key, tab).catch(() => {});
   }
@@ -219,15 +222,23 @@
     editor.setDoc(d.text);
     draftOffer = null;
     lastDraft = '';
-    // The draft is this tab's now: drop the old entry, autosave writes ours.
-    if (d.tab !== tab) await clearDraft(d.key).catch(() => {});
-    await autosave();
+    // The draft is this tab's now: write our copy first, and only once it is
+    // stored drop the old entry, so the text is never only in memory.
+    if (!isSignedIn(userId)) return;
+    try {
+      await saveTabDraft(key, tab, { baseEtag: etag, baseHash, text: d.text, savedAt: Date.now() });
+      lastDraft = d.text;
+      await clearDraft(d.key);
+    } catch {
+      // keep the old entry: nothing is lost
+    }
   }
 
   async function discardDraft() {
     const d = draftOffer;
     draftOffer = null;
-    if (d) await clearDraft(d.key).catch(() => {});
+    // Only marked: it may be the live work of another open tab.
+    if (d) await dismissDraft(d).catch(() => {});
   }
 
   async function put(target: string, body: Uint8Array<ArrayBuffer>, precondition: Record<string, string>) {

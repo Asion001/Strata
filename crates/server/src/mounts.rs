@@ -192,18 +192,42 @@ pub async fn check_storage_overlap(
     mode: &str,
 ) -> ApiResult<()> {
     let (root, folder) = storage_root(st, connection_id, base).await?;
+    check_overlap_at(st, &root, &folder, mode, None).await
+}
+
+/// Is (`root`, `folder`) clear of every volume of the opposite mode? Volumes
+/// on `except` (the connection being edited) are left out. A connection
+/// whose location is unknown (its config can't even be read) can't touch
+/// any storage, so it can't overlap anything and is skipped.
+pub async fn check_overlap_at(
+    st: &AppState,
+    root: &str,
+    folder: &str,
+    mode: &str,
+    except: Option<i64>,
+) -> ApiResult<()> {
     let other_mode = if mode == "raw" { "hashed" } else { "raw" };
-    let others: Vec<(i64, String)> =
-        sqlx::query_as("SELECT connection_id, base_path FROM volumes WHERE mode = $1")
-            .bind(other_mode)
-            .fetch_all(&st.db)
-            .await?;
-    for (cid, obase) in others {
-        // Fail closed: never let a raw view onto a hashed store we couldn't check.
-        let (oroot, ofolder) = storage_root(st, cid, &obase).await?;
+    let others: Vec<(i64, String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT v.connection_id, v.base_path, c.storage_id, c.storage_folder
+         FROM volumes v JOIN connections c ON c.id = v.connection_id WHERE v.mode = $1",
+    )
+    .bind(other_mode)
+    .fetch_all(&st.db)
+    .await?;
+    for (cid, obase, sid, sfolder) in others {
+        if Some(cid) == except {
+            continue;
+        }
+        let (oroot, ofolder) = match (sid, sfolder) {
+            (Some(r), Some(f)) => (r, paths::join(&f, &obase)),
+            _ => match storage_root(st, cid, &obase).await {
+                Ok(x) => x,
+                Err(_) => continue,
+            },
+        };
         if oroot == root
-            && (paths::strip_prefix(&folder, &ofolder).is_some()
-                || paths::strip_prefix(&ofolder, &folder).is_some())
+            && (paths::strip_prefix(folder, &ofolder).is_some()
+                || paths::strip_prefix(&ofolder, folder).is_some())
         {
             return Err(conflict(
                 "that folder overlaps a hashed store (or a raw folder holds this store); pick a separate folder",

@@ -63,12 +63,11 @@ impl ConnectionConfig {
     pub fn location(&self, local_base: &Path) -> Result<(String, String)> {
         let norm = |r: &Option<String>| r.as_deref().unwrap_or("").trim_matches('/').to_string();
         Ok(match self {
-            Self::Local { .. } => {
-                let dir = self.local_dir(local_base)?.unwrap();
-                (
-                    "local".into(),
-                    dir.to_string_lossy().trim_matches('/').to_string(),
-                )
+            // Relative to the storage base (every local connection lives below
+            // it), so moving the base doesn't make stored locations disagree.
+            Self::Local { path } => {
+                self.local_dir(local_base)?; // validates the path
+                ("local".into(), path.trim_matches('/').to_string())
             }
             Self::S3 {
                 bucket,

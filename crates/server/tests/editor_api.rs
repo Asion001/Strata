@@ -508,3 +508,49 @@ async fn saves_through_overlapping_raw_mounts_are_serialised() {
     }
     assert_eq!(ok, 1, "exactly one save may win across overlapping mounts");
 }
+
+#[tokio::test]
+async fn editing_a_connection_cannot_put_a_raw_view_over_a_hashed_store() {
+    let Some(t) = app().await else { return };
+    let disk = t
+        .ok(
+            "POST",
+            "/api/connections",
+            json!({"name": "disk", "config": {"kind": "local", "path": "disk"}}),
+        )
+        .await["id"]
+        .as_i64()
+        .unwrap();
+    let vault = t
+        .ok(
+            "POST",
+            "/api/connections",
+            json!({"name": "vault", "config": {"kind": "local", "path": "vault"}}),
+        )
+        .await["id"]
+        .as_i64()
+        .unwrap();
+    t.ok(
+        "POST",
+        "/api/mounts",
+        json!({"path": "R", "connection_id": disk, "mode": "raw"}),
+    )
+    .await;
+    t.ok(
+        "POST",
+        "/api/mounts",
+        json!({"path": "V", "connection_id": vault, "mode": "hashed"}),
+    )
+    .await;
+    let (s, _) = t
+        .json(
+            "PUT",
+            &format!("/api/connections/{disk}"),
+            json!({"name": "disk", "config": {"kind": "local", "path": "vault"}}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    // still pointing where it was
+    let (_, v) = t.get(&format!("/api/connections/{disk}")).await;
+    assert_eq!(v["config"]["path"], "disk");
+}
