@@ -71,10 +71,12 @@
   let draftTimer: ReturnType<typeof setInterval>;
   /** The text last stored as this tab's draft (null: nothing stored yet). */
   let lastDraft: string | null = null;
-  /** After a failed draft write, that text isn't tried again until `retryAfter`
-   *  (new text is tried at once). */
-  let failedText: string | null = null;
+  /** After a failed draft write no draft is written until `retryAfter`; the
+   *  wait doubles with each failure in a row (5 s up to 60 s) and a write that
+   *  works resets it, so a briefly failing store costs little typing while a
+   *  full one isn't hammered with the whole document every tick. */
   let retryAfter = 0;
+  let retryDelay = 0;
   /** Draft writes run one at a time, in order. */
   let draftQueue: Promise<void> = Promise.resolve();
 
@@ -208,6 +210,20 @@
     return draftQueue;
   }
 
+  /** Write this tab's draft, tracking the backoff. */
+  async function storeDraft(text: string): Promise<boolean> {
+    try {
+      await saveTabDraft(key, tab, { baseEtag: etag, baseHash, text, savedAt: Date.now() });
+    } catch {
+      retryDelay = Math.min(Math.max(retryDelay * 2, 5_000), 60_000);
+      retryAfter = Date.now() + retryDelay;
+      return false;
+    }
+    retryDelay = 0;
+    retryAfter = 0;
+    return true;
+  }
+
   /** Run after any draft write in flight, so it can't land afterwards. */
   function afterDrafts(fn: () => Promise<unknown>): Promise<void> {
     const run = async () => {
@@ -225,18 +241,10 @@
     if (!isSignedIn(userId)) return;
     const text = editor.getDoc();
     if (text === lastDraft) return;
-    if (text === failedText && Date.now() < retryAfter) return;
+    if (Date.now() < retryAfter) return;
     // This tab's own entry: other tabs' drafts (and a recovery offer still
     // on screen) are never overwritten.
-    try {
-      await saveTabDraft(key, tab, { baseEtag: etag, baseHash, text, savedAt: Date.now() });
-    } catch {
-      // Not stored: try this text again later, not on every tick.
-      failedText = text;
-      retryAfter = Date.now() + 30_000;
-      return;
-    }
-    failedText = null;
+    if (!(await storeDraft(text))) return;
     if (!isSignedIn(userId)) {
       await clearTabDraft(key, tab).catch(() => {});
       return;
@@ -253,22 +261,22 @@
     baseHash = d.baseHash ?? null;
     editor.setDoc(d.text);
     draftOffer = null;
-    lastDraft = null;
     // Our own copy carries on from here. The old entry is left alone (it may
     // be another tab's live work); once our copy is stored, it just isn't
     // offered again here. If storing fails, both stay recoverable.
-    if (!isSignedIn(userId)) return;
-    try {
-      await saveTabDraft(key, tab, { baseEtag: etag, baseHash, text: d.text, savedAt: Date.now() });
+    // Queued like any draft write, so an autosave of the replaced text that
+    // is still in flight can't land after it.
+    await afterDrafts(async () => {
+      lastDraft = null;
+      if (!isSignedIn(userId) || !(await storeDraft(d.text))) return;
       // A sign-out may have landed during the write: don't leave it behind.
       if (!isSignedIn(userId)) {
         await clearTabDraft(key, tab);
         return;
       }
       lastDraft = d.text;
-      failedText = null;
       markOfferSeen(d);
-    } catch {}
+    });
   }
 
   function discardDraft() {
@@ -319,8 +327,12 @@
       baseHash = nextHash;
       savedDoc = doc;
       dirty = editor.getDoc() !== savedDoc;
-      lastDraft = null;
-      await afterDrafts(() => clearAfterSave(key, tab, doc));
+      // Not awaited: the save is done; the queue keeps it after any draft
+      // write in flight, and the next draft is written afresh.
+      void afterDrafts(async () => {
+        lastDraft = null;
+        await clearAfterSave(key, tab, doc);
+      });
       status = 'Saved';
       setTimeout(() => status === 'Saved' && (status = ''), 2000);
     } catch (e) {
@@ -346,7 +358,7 @@
           // editor; the folder shows the copy.
           closeConflict();
           dirty = false;
-          await afterDrafts(() => clearTabDraft(key, tab));
+          void afterDrafts(() => clearTabDraft(key, tab));
           alert(msg);
           onclose();
         }
@@ -379,8 +391,10 @@
       editor?.setDoc(t.doc);
       applyRules(f);
       dirty = false;
-      lastDraft = null;
-      await afterDrafts(() => clearTabDraft(key, tab));
+      void afterDrafts(async () => {
+        lastDraft = null;
+        await clearTabDraft(key, tab);
+      });
       closeConflict();
       status = message;
     } catch (e) {

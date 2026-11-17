@@ -119,6 +119,10 @@ pub async fn create(
     {
         return Err(bad("that folder is reserved"));
     }
+    // Check and create under the layout lock, so a concurrent volume or
+    // connection edit can't slip an overlap in between.
+    let mut tx = st.db.begin().await?;
+    lock_layout(&mut tx).await?;
     check_storage_overlap(&st, req.connection_id, &base, &req.mode).await?;
     let (parent, name) = paths::split(&path).unwrap();
     // The mount point's parent must be a folder (create it if missing).
@@ -130,7 +134,7 @@ pub async fn create(
     .bind(req.connection_id)
     .bind(&base)
     .bind(&req.mode)
-    .fetch_one(&st.db)
+    .fetch_one(&mut *tx)
     .await?;
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO mounts (owner_id, path, parent_path, name, volume_id, journal_from)
@@ -141,12 +145,13 @@ pub async fn create(
     .bind(parent)
     .bind(name)
     .bind(volume_id)
-    .fetch_one(&st.db)
+    .fetch_one(&mut *tx)
     .await
     .map_err(|e| match ApiError::from(e) {
         ApiError::Conflict(_) => conflict("something is already mounted there"),
         e => e,
     })?;
+    tx.commit().await?;
     invalidate(&st, u.id);
     journal::record_user(
         &st,
@@ -235,8 +240,20 @@ pub async fn storage_root(
     Ok((id, paths::join(&folder, base)))
 }
 
+/// Serialises changes to where volumes live (new volumes, re-pointed
+/// connections) together with their overlap checks. Hold it in the
+/// transaction that writes the change; checks may read outside it, since
+/// every earlier change has committed by the time the lock is granted.
+pub async fn lock_layout(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> ApiResult<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock(1398035010, 0)")
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
 /// A raw view over a hashed store (or a hashed store inside a raw folder) on
 /// the same storage would let raw deletes and moves destroy blobs. Refuse it.
+/// Call under `lock_layout`.
 pub async fn check_storage_overlap(
     st: &AppState,
     connection_id: i64,

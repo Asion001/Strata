@@ -287,6 +287,7 @@ pub async fn create_user(
         }
     };
     let root_base = format!("users/{}", user.id);
+    crate::mounts::lock_layout(&mut tx).await?;
     if existing_default {
         // e.g. an admin raw-mounted `users/<id>` before this user existed
         crate::mounts::check_storage_overlap(st, conn_id, &root_base, "hashed").await?;
@@ -324,7 +325,7 @@ async fn insert_local_connection(
     };
     let op = cfg.operator(&st.cfg.local_base)?;
     let caps = Capabilities::detect(&cfg, &op, &st.cfg.local_base);
-    let enc = st.secrets.encrypt(&serde_json::to_vec(&cfg).unwrap())?;
+    let enc = st.encrypt_config(&cfg)?;
     let (storage_id, storage_folder) = cfg.location(&st.cfg.local_base)?;
     Ok(sqlx::query_scalar(
         "INSERT INTO connections (owner_id, name, kind, config_enc, capabilities, is_default, storage_id, storage_folder)

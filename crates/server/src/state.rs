@@ -104,6 +104,12 @@ impl AppState {
         serde_json::from_slice(&plain).map_err(|e| ApiError::Internal(e.into()))
     }
 
+    /// Serialise and encrypt a config for `config_enc`.
+    pub fn encrypt_config(&self, cfg: &ConnectionConfig) -> ApiResult<Vec<u8>> {
+        let plain = serde_json::to_vec(cfg).map_err(|e| ApiError::Internal(e.into()))?;
+        Ok(self.secrets.encrypt(&plain)?)
+    }
+
     /// Cached OpenDAL operator for a connection.
     pub async fn operator(&self, connection_id: i64) -> ApiResult<Operator> {
         if let Some(op) = self.ops.get(&connection_id) {

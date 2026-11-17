@@ -63,8 +63,10 @@ impl Row {
 }
 
 /// Compute and store a connection's storage location (see migration 0006).
-/// When none can be computed (undecryptable config, invalid path) the stored
-/// one is cleared rather than trusted.
+/// A config whose location is invalid (e.g. a bad path) has its stored one
+/// cleared rather than trusted. One that can't be decrypted keeps it: that
+/// points at the server's key, not the connection, and the last known
+/// location keeps overlap checks working until the key is fixed.
 pub async fn store_location(st: &AppState, id: i64) -> ApiResult<(String, String)> {
     // The row lock orders this against a concurrent `update`, which writes
     // its config and location together.
@@ -75,9 +77,8 @@ pub async fn store_location(st: &AppState, id: i64) -> ApiResult<(String, String
             .fetch_optional(&mut *tx)
             .await?
             .ok_or(ApiError::NotFound)?;
-    let loc = st
-        .decrypt_config(&enc)
-        .and_then(|cfg| cfg.location(&st.cfg.local_base).map_err(ApiError::Internal));
+    let cfg = st.decrypt_config(&enc)?;
+    let loc = cfg.location(&st.cfg.local_base).map_err(ApiError::Internal);
     let (sid, folder) = match &loc {
         Ok((sid, folder)) => (Some(sid.as_str()), Some(folder.as_str())),
         Err(_) => (None, None),
@@ -212,9 +213,7 @@ pub async fn create(
         .operator(&st.cfg.local_base)
         .map_err(|e| bad(format!("invalid config: {e}")))?;
     let caps = Capabilities::detect(&req.config, &op, &st.cfg.local_base);
-    let enc = st
-        .secrets
-        .encrypt(&serde_json::to_vec(&req.config).unwrap())?;
+    let enc = st.encrypt_config(&req.config)?;
     let (sid, sfolder) = req
         .config
         .location(&st.cfg.local_base)
@@ -278,18 +277,18 @@ pub async fn update(
         .config
         .location(&st.cfg.local_base)
         .map_err(|e| bad(format!("invalid config: {e}")))?;
+    let mut tx = st.db.begin().await?;
+    crate::mounts::lock_layout(&mut tx).await?;
     let volumes: Vec<(String, String)> =
         sqlx::query_as("SELECT base_path, mode FROM volumes WHERE connection_id = $1")
             .bind(id)
-            .fetch_all(&st.db)
+            .fetch_all(&mut *tx)
             .await?;
     for (base, mode) in &volumes {
         crate::mounts::check_overlap_at(&st, &sid, &paths::join(&sfolder, base), mode, Some(id))
             .await?;
     }
-    let enc = st
-        .secrets
-        .encrypt(&serde_json::to_vec(&req.config).unwrap())?;
+    let enc = st.encrypt_config(&req.config)?;
     // Config and location change together, in one statement.
     sqlx::query(
         "UPDATE connections SET name = $2, config_enc = $3, capabilities = $4,
@@ -301,8 +300,9 @@ pub async fn update(
     .bind(sqlx::types::Json(caps))
     .bind(&sid)
     .bind(&sfolder)
-    .execute(&st.db)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     st.forget_operator(id);
     let res = probe_operator(&op).await;
     store_probe(&st, id, &res).await?;
