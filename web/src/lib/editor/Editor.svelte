@@ -227,6 +227,11 @@
     if (!isSignedIn(userId)) return;
     try {
       await saveTabDraft(key, tab, { baseEtag: etag, baseHash, text: d.text, savedAt: Date.now() });
+      // A sign-out may have landed during the write: don't leave it behind.
+      if (!isSignedIn(userId)) {
+        await clearTabDraft(key, tab);
+        return;
+      }
       lastDraft = d.text;
       markOfferSeen(d);
     } catch {}

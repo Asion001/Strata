@@ -81,10 +81,31 @@ pub async fn store_location(st: &AppState, id: i64) -> ApiResult<(String, String
 /// Recompute every connection's location at start-up, so rows written by
 /// older versions (missing, or in an older format) always match today's rule.
 pub async fn backfill_locations(st: &AppState) {
-    let ids: Vec<i64> = sqlx::query_scalar("SELECT id FROM connections")
-        .fetch_all(&st.db)
-        .await
-        .unwrap_or_default();
+    let mut ids: Option<Vec<i64>> = None;
+    for attempt in 0..5 {
+        match sqlx::query_scalar("SELECT id FROM connections")
+            .fetch_all(&st.db)
+            .await
+        {
+            Ok(v) => {
+                ids = Some(v);
+                break;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "recomputing connection locations (attempt {}): {e}",
+                    attempt + 1
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(1 << attempt)).await;
+            }
+        }
+    }
+    let Some(ids) = ids else {
+        tracing::error!(
+            "could not recompute connection locations; overlap checks may use stale rows"
+        );
+        return;
+    };
     for id in ids {
         if let Err(e) = store_location(st, id).await {
             tracing::warn!("connection {id}: cannot determine its storage location: {e}");

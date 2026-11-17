@@ -61,33 +61,18 @@ impl ConnectionConfig {
     /// same files, so their folders can overlap (e.g. two users' WebDAV or S3
     /// connections to one share or bucket). Credentials are not part of it.
     pub fn location(&self, local_base: &Path) -> Result<(String, String)> {
-        // Canonical folder: `a//b`, `/a/b/` and `a/b` are the same place.
-        let canon = |p: &str| {
-            p.split('/')
-                .filter(|c| !c.is_empty() && *c != ".")
-                .collect::<Vec<_>>()
-                .join("/")
-        };
-        let norm = |r: &Option<String>| canon(r.as_deref().unwrap_or(""));
+        let root = |r: &Option<String>| canonical_folder(r.as_deref().unwrap_or(""));
         Ok(match self {
             // Relative to the storage base (every local connection lives below
             // it), so moving the base doesn't make stored locations disagree.
             Self::Local { path } => {
                 self.local_dir(local_base)?; // validates the path
-                // Canonical form: `a//b`, `./a` and `a/` all become `a/b`, `a`.
-                let canon: Vec<String> = Path::new(path.trim_start_matches('/'))
-                    .components()
-                    .filter_map(|c| match c {
-                        Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
-                        _ => None,
-                    })
-                    .collect();
-                ("local".into(), canon.join("/"))
+                ("local".into(), canonical_folder(path)?)
             }
             Self::S3 {
                 bucket,
                 endpoint,
-                root,
+                root: r,
                 ..
             } => {
                 let host = match endpoint.as_deref() {
@@ -100,11 +85,13 @@ impl ConnectionConfig {
                 } else {
                     host
                 };
-                (format!("s3:{host}|{bucket}"), norm(root))
+                (format!("s3:{host}|{bucket}"), root(r)?)
             }
-            Self::Ftp { endpoint, root, .. } => (
+            Self::Ftp {
+                endpoint, root: r, ..
+            } => (
                 format!("ftp:{}", endpoint_host(endpoint, &[21, 990])),
-                norm(root),
+                root(r)?,
             ),
         })
     }
@@ -226,6 +213,18 @@ impl ConnectionConfig {
             .layer(TimeoutLayer::new().with_timeout(Duration::from_secs(60)))
             .layer(RetryLayer::new().with_max_times(3)))
     }
+}
+
+/// The one canonical form of a folder inside a storage, for every backend:
+/// `a//b`, `/a/b/` and `a/b` are the same place. `.` and `..` are refused
+/// rather than interpreted (FTP servers resolve them, S3 keys don't), so two
+/// spellings of one place can never look like different places.
+pub fn canonical_folder(p: &str) -> Result<String> {
+    let parts: Vec<&str> = p.split('/').filter(|c| !c.is_empty()).collect();
+    if parts.iter().any(|c| *c == "." || *c == "..") {
+        bail!("folder paths may not contain '.' or '..'");
+    }
+    Ok(parts.join("/"))
 }
 
 /// `host[:port]` of an endpoint URL, lowercased, without scheme, path or a
@@ -426,5 +425,7 @@ mod tests {
             s3("a", Some("data//store/")).location(base).unwrap(),
             s3("a", Some("/data/store")).location(base).unwrap()
         );
+        assert!(s3("a", Some("pub/../store")).location(base).is_err());
+        assert!(s3("a", Some("./data")).location(base).is_err());
     }
 }

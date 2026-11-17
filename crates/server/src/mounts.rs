@@ -173,6 +173,22 @@ pub fn overlaps(a: &(String, String), b: &(String, String)) -> bool {
         && (paths::strip_prefix(&a.1, &b.1).is_some() || paths::strip_prefix(&b.1, &a.1).is_some())
 }
 
+/// A volume's location from the stored columns of its connection (as
+/// fetched with a JOIN), falling back to reading the config; `None` if the
+/// config can't be read (such a connection can't reach any storage). The
+/// one rule shared by mount guards and save locks.
+pub async fn location_of(
+    st: &AppState,
+    connection_id: i64,
+    base: &str,
+    stored: (Option<String>, Option<String>),
+) -> ApiResult<Option<(String, String)>> {
+    match stored {
+        (Some(r), Some(f)) => Ok(Some((r, paths::join(&f, base)))),
+        _ => storage_root_if_readable(st, connection_id, base).await,
+    }
+}
+
 /// Like `storage_root`, but `None` when the connection's config can't be
 /// read at all (such a connection can't reach any storage). Database errors
 /// are still errors.
@@ -257,12 +273,8 @@ pub async fn check_overlap_at(
         if Some(cid) == except {
             continue;
         }
-        let other = match (sid, sfolder) {
-            (Some(r), Some(f)) => (r, paths::join(&f, &obase)),
-            _ => match storage_root_if_readable(st, cid, &obase).await? {
-                Some(x) => x,
-                None => continue, // unreadable config: can't reach storage
-            },
+        let Some(other) = location_of(st, cid, &obase, (sid, sfolder)).await? else {
+            continue; // unreadable config: can't reach storage
         };
         if overlaps(&(root.to_string(), folder.to_string()), &other) {
             return Err(conflict(

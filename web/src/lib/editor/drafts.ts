@@ -179,7 +179,7 @@ export function clearAllDrafts(): Promise<void> {
 export async function keepOnlyUser(userId: number): Promise<void> {
   const mine = (k: string) => k.startsWith(`${userId}|`);
   try {
-    const m = JSON.parse(localStorage.getItem(SEEN_KEY) ?? '{}');
+    const m = seenMap();
     for (const k of Object.keys(m)) if (!mine(k)) delete m[k];
     localStorage.setItem(SEEN_KEY, JSON.stringify(m));
   } catch {}
