@@ -6,20 +6,21 @@
  * how current pages look. It comes in with the new app shell, when the pages
  * that depend on those defaults are rebuilt.
  *
- * Everything in this file outside @layer is unlayered, so it always wins over
- * Tailwind utilities. That keeps today's look intact while new components
- * use utilities.
+ * Layer order, weakest first: theme, base (element defaults), components
+ * (the shared helper classes), utilities. Utilities beat the old global
+ * styles, so shadcn-svelte components styled with utilities look as designed.
+ * Svelte's scoped <style> blocks are unlayered and still beat all of them.
+ *
+ * `dark:` uses Tailwind's default, prefers-color-scheme, which is the same
+ * switch the variables below use.
  */
 @layer theme, base, components, utilities;
 @import 'tailwindcss/theme.css' layer(theme);
-@import 'tailwindcss/utilities.css' layer(utilities);
-@import 'tw-animate-css';
+@import 'tailwindcss/utilities.css' layer(utilities) source(none);
 
-/* Unit tests mention class names that the app itself never uses. */
+/* Only app source generates utilities; unit tests are left out. */
+@source './**/*.{svelte,ts}';
 @source not './**/*.test.ts';
-
-/* `dark:` follows the OS setting, the same as the variables below. */
-@custom-variant dark (@media (prefers-color-scheme: dark));
 
 /*
  * shadcn-svelte's color names, mapped onto Strata's existing variables so old
@@ -91,42 +92,50 @@
     --ok: #4ade80;
   }
 }
-* { box-sizing: border-box; }
-html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); }
-body { -webkit-tap-highlight-color: transparent; }
-a { color: var(--accent); text-decoration: none; }
-button, input, select {
-  font: inherit; color: inherit;
+/* Element defaults. shadcn-svelte's base rule gives borders the theme color. */
+@layer base {
+  *, ::before, ::after { border-color: var(--border); }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); }
+  body { -webkit-tap-highlight-color: transparent; }
+  a { color: var(--accent); text-decoration: none; }
+  button, input, select {
+    font: inherit; color: inherit;
+  }
+  button {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 7px 12px; cursor: pointer; white-space: nowrap;
+  }
+  button:hover { background: var(--hover); }
+  button.primary { background: var(--accent); color: var(--accent-text); border-color: transparent; }
+  button.danger { color: var(--danger); }
+  button:disabled { opacity: .5; cursor: default; }
+  input, select {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; width: 100%;
+  }
+  input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  label { display: grid; gap: 4px; font-size: .9em; color: var(--muted); }
+  h1 { font-size: 1.4em; margin: 4px 0 16px; }
+  h2 { font-size: 1.1em; margin: 20px 0 10px; }
+  table { width: 100%; border-collapse: collapse; }
+  td, th { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--border); }
+  dialog {
+    border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel); color: var(--text);
+    padding: 20px; width: min(480px, calc(100vw - 32px));
+  }
+  dialog::backdrop { background: rgb(0 0 0 / .45); }
 }
-button {
-  background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
-  padding: 7px 12px; cursor: pointer; white-space: nowrap;
+
+/* Shared helper classes used across the existing pages. */
+@layer components {
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+  .muted { color: var(--muted); }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .grow { flex: 1; }
+  .error { color: var(--danger); }
+  .badge { font-size: .75em; padding: 1px 7px; border-radius: 99px; border: 1px solid var(--border); color: var(--muted); }
+  .badge.ok { color: var(--ok); border-color: currentColor; }
+  .badge.err { color: var(--danger); border-color: currentColor; }
+  .page { max-width: 960px; margin: 0 auto; padding: 16px; }
+  .stack { display: grid; gap: 12px; }
 }
-button:hover { background: var(--hover); }
-button.primary { background: var(--accent); color: var(--accent-text); border-color: transparent; }
-button.danger { color: var(--danger); }
-button:disabled { opacity: .5; cursor: default; }
-input, select {
-  background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; width: 100%;
-}
-input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
-label { display: grid; gap: 4px; font-size: .9em; color: var(--muted); }
-.card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
-.muted { color: var(--muted); }
-.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-.grow { flex: 1; }
-.error { color: var(--danger); }
-.badge { font-size: .75em; padding: 1px 7px; border-radius: 99px; border: 1px solid var(--border); color: var(--muted); }
-.badge.ok { color: var(--ok); border-color: currentColor; }
-.badge.err { color: var(--danger); border-color: currentColor; }
-.page { max-width: 960px; margin: 0 auto; padding: 16px; }
-h1 { font-size: 1.4em; margin: 4px 0 16px; }
-h2 { font-size: 1.1em; margin: 20px 0 10px; }
-table { width: 100%; border-collapse: collapse; }
-td, th { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--border); }
-dialog {
-  border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel); color: var(--text);
-  padding: 20px; width: min(480px, calc(100vw - 32px));
-}
-dialog::backdrop { background: rgb(0 0 0 / .45); }
-.stack { display: grid; gap: 12px; }
