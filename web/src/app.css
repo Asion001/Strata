@@ -1,10 +1,11 @@
 /*
  * Tailwind v4 and shadcn-svelte foundation.
  *
- * Tailwind's preflight (its CSS reset) is left out on purpose for now: the
- * existing styles below assume browser defaults, so loading it would change
- * how current pages look. It comes in with the new app shell, when the pages
- * that depend on those defaults are rebuilt.
+ * Tailwind's preflight (its CSS reset) is left out for now: the existing
+ * pages assume browser defaults, so loading it would change how they look.
+ * shadcn-svelte components get a small reset of their own instead (see
+ * @layer base). The full preflight replaces both once the old pages are
+ * rebuilt in the new shell.
  *
  * Layer order, weakest first: theme, base (element defaults), components
  * (the shared helper classes), utilities. Utilities beat the old global
@@ -23,43 +24,71 @@
 @source not './**/*.test.ts';
 
 /*
- * shadcn-svelte's color names, mapped onto Strata's existing variables so old
- * and new UI share one palette. Strata's --muted is a text color, while
- * shadcn's "muted" is a background, so the mapping goes through Tailwind's
- * --color-* names instead of redefining --muted.
+ * shadcn-svelte's palette, mapped onto Strata's existing variables so old and
+ * new UI share one palette. Components use these through utilities
+ * (bg-background, text-muted-foreground) and a few use the bare variables
+ * (var(--sidebar-border)), so both are defined.
  *
- * The utility names follow shadcn, not the old helper classes: bg-muted and
- * bg-accent are the soft hover tint, text-muted-foreground is the old .muted
- * text color, and the brand blue is "primary".
+ * Two names clash: Strata's --muted is a text color and --accent is the brand
+ * blue, while shadcn's muted and accent are soft background tints. Those two
+ * stay Strata's as bare variables and exist for shadcn only as utilities:
+ * bg-muted and bg-accent are the hover tint, text-muted-foreground is the old
+ * .muted text color, and the brand blue is "primary".
  */
+:root {
+  --background: var(--bg);
+  --foreground: var(--text);
+  --card: var(--panel);
+  --card-foreground: var(--text);
+  --popover: var(--panel);
+  --popover-foreground: var(--text);
+  --primary: var(--accent);
+  --primary-foreground: var(--accent-text);
+  --secondary: var(--hover);
+  --secondary-foreground: var(--text);
+  --muted-foreground: var(--muted);
+  --accent-foreground: var(--text);
+  --destructive: var(--danger);
+  --input: var(--border);
+  --ring: var(--accent);
+  --sidebar: var(--panel);
+  --sidebar-foreground: var(--text);
+  --sidebar-primary: var(--accent);
+  --sidebar-primary-foreground: var(--accent-text);
+  --sidebar-accent: var(--hover);
+  --sidebar-accent-foreground: var(--text);
+  --sidebar-border: var(--border);
+  --sidebar-ring: var(--accent);
+}
+
 @theme inline {
-  --color-background: var(--bg);
-  --color-foreground: var(--text);
-  --color-card: var(--panel);
-  --color-card-foreground: var(--text);
-  --color-popover: var(--panel);
-  --color-popover-foreground: var(--text);
-  --color-primary: var(--accent);
-  --color-primary-foreground: var(--accent-text);
-  --color-secondary: var(--hover);
-  --color-secondary-foreground: var(--text);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
   --color-muted: var(--hover);
-  --color-muted-foreground: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
   --color-accent: var(--hover);
-  --color-accent-foreground: var(--text);
-  --color-destructive: var(--danger);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
   --color-success: var(--ok);
   --color-border: var(--border);
-  --color-input: var(--border);
-  --color-ring: var(--accent);
-  --color-sidebar: var(--panel);
-  --color-sidebar-foreground: var(--text);
-  --color-sidebar-primary: var(--accent);
-  --color-sidebar-primary-foreground: var(--accent-text);
-  --color-sidebar-accent: var(--hover);
-  --color-sidebar-accent-foreground: var(--text);
-  --color-sidebar-border: var(--border);
-  --color-sidebar-ring: var(--accent);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
@@ -97,43 +126,62 @@
   }
 }
 /*
- * Element defaults. shadcn-svelte marks its elements with data-slot, so the
- * old element styles skip them through :where(:not([data-slot])) and those
- * components get a clean start, as preflight would give them. :where() adds
- * no specificity, so old pages match as before. Inside shadcn components,
- * borders take the theme color, like shadcn's own base rule.
+ * Element defaults. shadcn-svelte marks its elements with data-slot.
+ *
+ * 1. Inside those components, a reset with the parts of Tailwind's preflight
+ *    that shadcn relies on, so its utility classes start from zero.
+ * 2. The old element styles skip data-slot elements and their contents
+ *    through :where(). :where() adds no specificity, so old pages
+ *    match as before. New element rules here need the same guard until the
+ *    old pages are rebuilt and the full preflight replaces all of this.
  */
 @layer base {
-  :where([data-slot], [data-slot] *), :where([data-slot], [data-slot] *)::before, :where([data-slot], [data-slot] *)::after { border-color: var(--border); }
+  :where([data-slot], [data-slot] *),
+  :where([data-slot], [data-slot] *)::before,
+  :where([data-slot], [data-slot] *)::after {
+    box-sizing: border-box; margin: 0; padding: 0;
+    border: 0 solid var(--border); outline-color: color-mix(in oklab, var(--ring) 50%, transparent);
+  }
+  :where([data-slot], [data-slot] *):is(h1, h2, h3, h4, h5, h6) { font-size: inherit; font-weight: inherit; }
+  :where([data-slot], [data-slot] *):is(ol, ul, menu) { list-style: none; }
+  :where([data-slot], [data-slot] *):is(a) { color: inherit; text-decoration: inherit; }
+  :where([data-slot], [data-slot] *):is(button, input, select, optgroup, textarea) {
+    font: inherit; letter-spacing: inherit; color: inherit; background-color: transparent; border-radius: 0; opacity: 1;
+  }
+  :where([data-slot], [data-slot] *):is(button, [role='button']) { cursor: pointer; }
+  :where([data-slot], [data-slot] *):is(img, svg, video, canvas) { display: block; vertical-align: middle; }
+  :where([data-slot], [data-slot] *):is(img, video) { max-width: 100%; height: auto; }
+  :where([data-slot], [data-slot] *):is(table) { border-collapse: collapse; text-indent: 0; border-color: inherit; }
+  :where([data-slot], [data-slot] *)::placeholder { color: var(--muted); opacity: 1; }
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); }
   body { -webkit-tap-highlight-color: transparent; }
-  a:where(:not([data-slot])) { color: var(--accent); text-decoration: none; }
-  button:where(:not([data-slot])), input:where(:not([data-slot])), select:where(:not([data-slot])) {
+  a:where(:not([data-slot], [data-slot] *)) { color: var(--accent); text-decoration: none; }
+  button:where(:not([data-slot], [data-slot] *)), input:where(:not([data-slot], [data-slot] *)), select:where(:not([data-slot], [data-slot] *)) {
     font: inherit; color: inherit;
   }
-  button:where(:not([data-slot])) {
+  button:where(:not([data-slot], [data-slot] *)) {
     background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
     padding: 7px 12px; cursor: pointer; white-space: nowrap;
   }
-  button:where(:not([data-slot])):hover { background: var(--hover); }
-  button.primary:where(:not([data-slot])) { background: var(--accent); color: var(--accent-text); border-color: transparent; }
-  button.danger:where(:not([data-slot])) { color: var(--danger); }
-  button:where(:not([data-slot])):disabled { opacity: .5; cursor: default; }
-  input:where(:not([data-slot])), select:where(:not([data-slot])) {
+  button:where(:not([data-slot], [data-slot] *)):hover { background: var(--hover); }
+  button.primary:where(:not([data-slot], [data-slot] *)) { background: var(--accent); color: var(--accent-text); border-color: transparent; }
+  button.danger:where(:not([data-slot], [data-slot] *)) { color: var(--danger); }
+  button:where(:not([data-slot], [data-slot] *)):disabled { opacity: .5; cursor: default; }
+  input:where(:not([data-slot], [data-slot] *)), select:where(:not([data-slot], [data-slot] *)) {
     background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; width: 100%;
   }
-  input:where(:not([data-slot])):focus, select:where(:not([data-slot])):focus { outline: 2px solid var(--accent); outline-offset: -1px; }
-  label:where(:not([data-slot])) { display: grid; gap: 4px; font-size: .9em; color: var(--muted); }
-  h1:where(:not([data-slot])) { font-size: 1.4em; margin: 4px 0 16px; }
-  h2:where(:not([data-slot])) { font-size: 1.1em; margin: 20px 0 10px; }
-  table:where(:not([data-slot])) { width: 100%; border-collapse: collapse; }
-  td:where(:not([data-slot])), th:where(:not([data-slot])) { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--border); }
-  dialog:where(:not([data-slot])) {
+  input:where(:not([data-slot], [data-slot] *)):focus, select:where(:not([data-slot], [data-slot] *)):focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  label:where(:not([data-slot], [data-slot] *)) { display: grid; gap: 4px; font-size: .9em; color: var(--muted); }
+  h1:where(:not([data-slot], [data-slot] *)) { font-size: 1.4em; margin: 4px 0 16px; }
+  h2:where(:not([data-slot], [data-slot] *)) { font-size: 1.1em; margin: 20px 0 10px; }
+  table:where(:not([data-slot], [data-slot] *)) { width: 100%; border-collapse: collapse; }
+  td:where(:not([data-slot], [data-slot] *)), th:where(:not([data-slot], [data-slot] *)) { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--border); }
+  dialog:where(:not([data-slot], [data-slot] *)) {
     border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel); color: var(--text);
     padding: 20px; width: min(480px, calc(100vw - 32px));
   }
-  dialog:where(:not([data-slot]))::backdrop { background: rgb(0 0 0 / .45); }
+  dialog:where(:not([data-slot], [data-slot] *))::backdrop { background: rgb(0 0 0 / .45); }
 }
 
 /* Shared helper classes used across the existing pages. */
