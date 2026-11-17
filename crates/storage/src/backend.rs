@@ -151,11 +151,6 @@ impl ConnectionConfig {
 
     /// Build an OpenDAL operator rooted at this connection.
     pub fn operator(&self, local_base: &Path) -> Result<Operator> {
-        // Same path rule as `location`: a root with `..` is refused, so
-        // every connection that can reach storage has a location.
-        if let Self::S3 { root, .. } | Self::Ftp { root, .. } = self {
-            canonical_folder(root.as_deref().unwrap_or(""))?;
-        }
         static INIT: std::sync::Once = std::sync::Once::new();
         INIT.call_once(opendal::install_default);
         let op = match self {
@@ -190,8 +185,10 @@ impl ConnectionConfig {
                 if let Some(e) = endpoint.as_deref().filter(|e| !e.is_empty()) {
                     b = b.endpoint(e);
                 }
-                if let Some(r) = root.as_deref().filter(|r| !r.is_empty()) {
-                    b = b.root(r);
+                // The canonical root, exactly what `location` records.
+                let r = canonical_folder(root.as_deref().unwrap_or(""))?;
+                if !r.is_empty() {
+                    b = b.root(&format!("/{r}"));
                 }
                 Operator::new(b)?
             }
@@ -208,8 +205,10 @@ impl ConnectionConfig {
                 if let Some(p) = password.as_deref().filter(|p| !p.is_empty()) {
                     b = b.password(p);
                 }
-                if let Some(r) = root.as_deref().filter(|r| !r.is_empty()) {
-                    b = b.root(r);
+                // The canonical root, exactly what `location` records.
+                let r = canonical_folder(root.as_deref().unwrap_or(""))?;
+                if !r.is_empty() {
+                    b = b.root(&format!("/{r}"));
                 }
                 Operator::new(b)?
             }
