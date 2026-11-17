@@ -77,6 +77,8 @@
    *  full one isn't hammered with the whole document every tick. */
   let retryAfter = 0;
   let retryDelay = 0;
+  /** A save clean-up already tried a write in this backoff window. */
+  let afterSaveTried = false;
   /** Draft writes run one at a time, in order. */
   let draftQueue: Promise<void> = Promise.resolve();
 
@@ -208,7 +210,7 @@
   /** Queue a draft write. `final` (closing, leaving the page) ignores the
    *  backoff: it is the last chance to keep this text. */
   function autosave(final = false): Promise<void> {
-    const run = () => writeDraft(final);
+    const run = () => writeDraft(final ? 'final' : 'tick');
     draftQueue = draftQueue.then(run, run);
     return draftQueue;
   }
@@ -236,7 +238,10 @@
     return draftQueue;
   }
 
-  async function writeDraft(final = false) {
+  /** 'tick': the 2-second autosave; 'final': closing or leaving the page;
+   *  'afterSave': text typed during a save, whose draft the save's clean-up
+   *  just removed. */
+  async function writeDraft(why: 'tick' | 'final' | 'afterSave' = 'tick') {
     if (!editor || !dirty) return;
     // Only while this user is still the one signed in here (any tab may
     // have signed out); checked again after writing, since a sign-out can
@@ -244,7 +249,14 @@
     if (!isSignedIn(userId)) return;
     const text = editor.getDoc();
     if (text === lastDraft) return;
-    if (!final && Date.now() < retryAfter) return;
+    if (Date.now() < retryAfter) {
+      // Backing off: only a last chance, or one save clean-up per backoff
+      // window, still tries.
+      if (why === 'tick' || (why === 'afterSave' && afterSaveTried)) return;
+      if (why === 'afterSave') afterSaveTried = true;
+    } else {
+      afterSaveTried = false; // a new window: the regular retry is due
+    }
     // This tab's own entry: other tabs' drafts (and a recovery offer still
     // on screen) are never overwritten.
     if (!(await storeDraft(text))) return;
@@ -336,9 +348,9 @@
         lastDraft = null;
         await clearAfterSave(key, tab, doc);
         // Typed during the save? That text's draft was just cleared with
-        // the rest: one attempt to store it again now, backoff or not (at
-        // most one per save, so a failing store isn't hammered).
-        await writeDraft(true);
+        // the rest: store it again now (while backing off, at most once per
+        // backoff window, so a failing store isn't hammered).
+        await writeDraft('afterSave');
       });
       status = 'Saved';
       setTimeout(() => status === 'Saved' && (status = ''), 2000);

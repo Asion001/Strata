@@ -111,6 +111,18 @@ impl ConnectionConfig {
     }
 
     /// Keep secrets from `old` when the UI sends a blank (redacted) value.
+    /// Does this (edited) config leave a secret blank, meaning "keep the old
+    /// one"? Only then does `merge_secrets` need the old config.
+    pub fn has_blank_secret(&self) -> bool {
+        match self {
+            Self::Local { .. } => false,
+            Self::S3 {
+                secret_access_key, ..
+            } => secret_access_key.is_empty(),
+            Self::Ftp { password, .. } => password.as_deref() == Some(""),
+        }
+    }
+
     pub fn merge_secrets(&mut self, old: &Self) {
         match (self, old) {
             (
@@ -369,8 +381,20 @@ mod tests {
             root: None,
         };
         let mut new = old.redacted();
+        assert!(new.has_blank_secret());
+        assert!(!old.has_blank_secret());
         new.merge_secrets(&old);
         assert_eq!(new, old);
+        let ftp = |password: Option<&str>| ConnectionConfig::Ftp {
+            endpoint: "ftp://h".into(),
+            user: None,
+            password: password.map(Into::into),
+            root: None,
+        };
+        assert!(ftp(Some("")).has_blank_secret());
+        assert!(!ftp(None).has_blank_secret());
+        assert!(!ftp(Some("p")).has_blank_secret());
+        assert!(!ConnectionConfig::Local { path: "x".into() }.has_blank_secret());
     }
 
     #[test]

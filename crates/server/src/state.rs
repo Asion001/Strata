@@ -135,14 +135,6 @@ impl AppState {
         Ok(op)
     }
 
-    /// A deleted connection: no generation to keep either (ids aren't reused,
-    /// and an operator cached by a racing reader is never looked up again
-    /// by a live connection).
-    pub fn drop_operator(&self, connection_id: i64) {
-        self.op_gens.remove(&connection_id);
-        self.ops.remove(&connection_id);
-    }
-
     pub fn forget_operator(&self, connection_id: i64) {
         let mut g = self.op_gens.entry(connection_id).or_insert(0);
         *g += 1;
