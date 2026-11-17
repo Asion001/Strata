@@ -6,8 +6,11 @@ describe('cn', () => {
     expect(cn('a', false, null, undefined, 'b', { c: true, d: false })).toBe('a b c');
   });
 
-  it('lets a later Tailwind class win over a conflicting earlier one', () => {
-    expect(cn('px-2 py-1', 'px-4')).toBe('py-1 px-4');
-    expect(cn('text-muted-foreground', 'text-destructive')).toBe('text-destructive');
+  // Strata's own color names must be read as colors, not font sizes, so a
+  // text color and a text size both survive and a later color replaces one.
+  it('keeps text size and Strata color names apart', () => {
+    expect(cn('text-sm text-muted-foreground')).toBe('text-sm text-muted-foreground');
+    expect(cn('text-sm text-muted-foreground', 'text-success')).toBe('text-sm text-success');
+    expect(cn('bg-sidebar-accent', 'bg-destructive')).toBe('bg-destructive');
   });
 });

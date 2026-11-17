@@ -63,8 +63,11 @@
   --sidebar-ring: var(--accent);
 }
 
-/* One font stack for old pages (the :root rule below) and font-sans. */
-@theme {
+/*
+ * One font stack for old pages (the :root rule below) and font-sans.
+ * static: always emitted, even though no utility uses it yet.
+ */
+@theme static {
   --font-sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
 }
 
