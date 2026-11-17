@@ -25,6 +25,8 @@ export async function api<T = any>(method: string, url: string, body?: unknown):
   return r.json();
 }
 
+import { isSvg } from './format';
+
 export const enc = encodeURIComponent;
 
 export interface Entry {
@@ -44,6 +46,19 @@ export interface User {
 
 export function contentUrl(path: string, download = false) {
   return `/api/files/content?path=${enc(path)}${download ? '&download=1' : ''}`;
+}
+/** Image-preview route: the only place SVG is served as an image. Use it
+ *  only in <img> elements. */
+export function imageUrl(path: string) {
+  return `/api/files/image?path=${enc(path)}`;
+}
+/** Pick the preview source: SVG only ever through the image route (and
+ *  then only inside <img>), everything else through the content route. */
+export function pickPreview(name: string, content: string, image: string) {
+  return isSvg(name) ? image : content;
+}
+export function previewUrl(path: string) {
+  return pickPreview(path, contentUrl(path), imageUrl(path));
 }
 export function thumbUrl(path: string, etag: string | null, size = 128) {
   return `/api/files/thumb?path=${enc(path)}&size=${size}&v=${enc(etag ?? '')}`;

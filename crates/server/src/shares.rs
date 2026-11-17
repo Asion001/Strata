@@ -224,7 +224,30 @@ pub async fn content(
 ) -> ApiResult<Response> {
     let (_, m, rel, _) = open(&st, &token, &q).await?;
     let node = vfs::stat(&st, &m, &rel).await?;
-    files::serve(&st, &m, &rel, &node, &headers, q.download.is_some()).await
+    let purpose = crate::safe::Purpose::Content {
+        download: q.download.is_some(),
+    };
+    files::serve(&st, &m, &rel, &node, &headers, purpose).await
+}
+
+/// Public image-preview route (same rules as `files::image`).
+pub async fn image(
+    State(st): State<AppState>,
+    Path(token): Path<String>,
+    Query(q): Query<PublicQuery>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    let (_, m, rel, _) = open(&st, &token, &q).await?;
+    let node = vfs::stat(&st, &m, &rel).await?;
+    files::serve(
+        &st,
+        &m,
+        &rel,
+        &node,
+        &headers,
+        crate::safe::Purpose::ImagePreview,
+    )
+    .await
 }
 
 pub async fn thumb(

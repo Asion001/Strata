@@ -29,6 +29,7 @@ export function parent(p: string) {
 const IMG = /\.(jpe?g|png|gif|webp|bmp|tiff?)$/i;
 export const isImage = (n: string) => IMG.test(n);
 export const isVideo = (n: string) => /\.(mp4|webm|mov|m4v)$/i.test(n);
+export const isSvg = (n: string) => /\.svg$/i.test(n);
 export const isAudio = (n: string) => /\.(mp3|m4a|flac|ogg|wav|opus)$/i.test(n);
 
 export function icon(e: { name: string; is_dir: boolean; mount_id?: number | null }): string {

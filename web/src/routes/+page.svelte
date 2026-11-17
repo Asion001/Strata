@@ -1,7 +1,7 @@
 <script lang="ts">
   import { page } from '$app/state';
   import { goto } from '$app/navigation';
-  import { api, contentUrl, thumbUrl, type Entry } from '$lib/api';
+  import { api, contentUrl, previewUrl, thumbUrl, type Entry } from '$lib/api';
   import { bytes, when, join, parent, icon, isImage } from '$lib/format';
   import { runUpload, type UploadTask } from '$lib/upload';
   import VirtualList from '$lib/VirtualList.svelte';
@@ -239,7 +239,7 @@
 
 {#if viewerIndex >= 0}
   <Viewer
-    items={viewable.map((v) => ({ name: v.name, size: v.size, src: contentUrl(join(path, v.name)), download: contentUrl(join(path, v.name), true) }))}
+    items={viewable.map((v) => ({ name: v.name, size: v.size, src: previewUrl(join(path, v.name)), download: contentUrl(join(path, v.name), true) }))}
     bind:index={viewerIndex}
     onclose={() => (viewerIndex = -1)} />
 {/if}

@@ -1,0 +1,5 @@
+<!doctype html>
+<html><body><h1>evil</h1>
+<script>document.title = "PWNED"; window.__pwned = true; fetch("/api/auth/me").then(r => r.text()).then(t => { window.__leak = t; });</script>
+<img src=x onerror="window.__pwned = true">
+</body></html>

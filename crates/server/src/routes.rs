@@ -64,6 +64,7 @@ pub fn router(st: AppState) -> Router {
         .route("/files/stat", get(files::stat))
         .route("/files/content", get(files::content))
         .route("/files/thumb", get(thumbs::get))
+        .route("/files/image", get(files::image))
         .route("/files/mkdir", post(files::mkdir))
         .route("/files/move", post(files::move_))
         .route("/files/copy", post(files::copy))
@@ -89,6 +90,7 @@ pub fn router(st: AppState) -> Router {
         .route("/public/{token}/unlock", post(shares::unlock))
         .route("/public/{token}/content", get(shares::content))
         .route("/public/{token}/thumb", get(shares::thumb))
+        .route("/public/{token}/image", get(shares::image))
         .fallback(|| async { crate::error::ApiError::NotFound })
         .layer(SetResponseHeaderLayer::if_not_present(
             header::CACHE_CONTROL,

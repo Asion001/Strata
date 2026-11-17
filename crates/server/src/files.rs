@@ -6,7 +6,6 @@ use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::http::header::{self, HeaderMap, HeaderValue};
 use axum::response::{IntoResponse, Response};
-use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::Deserialize;
 use serde_json::json;
 use strata_storage::paths;
@@ -14,8 +13,10 @@ use strata_storage::paths;
 use crate::auth::AuthUser;
 use crate::error::{ApiError, ApiResult, bad};
 use crate::mounts::{self, Mount};
+use crate::safe;
 use crate::state::AppState;
 use crate::vfs::{self, Node};
+use futures::StreamExt;
 
 #[derive(Deserialize)]
 pub struct PathQuery {
@@ -72,34 +73,136 @@ pub fn parse_range(headers: &HeaderMap, size: u64) -> ApiResult<Option<(u64, u64
     Ok(Some((start, end)))
 }
 
-/// Serve file content with Range, ETag and Content-Disposition support.
+/// Read the first bytes of a file, for content sniffing.
+async fn head_bytes(st: &AppState, m: &Mount, rel: &str, node: &Node) -> ApiResult<Vec<u8>> {
+    let n = (node.size as u64).min(safe::SNIFF_LEN);
+    let mut s = vfs::read_stream(st, m, rel, node, 0, n).await?;
+    let mut out = Vec::with_capacity(n as usize);
+    while let Some(b) = s.next().await {
+        out.extend_from_slice(&b.map_err(|e| ApiError::Internal(e.into()))?);
+    }
+    Ok(out)
+}
+
+/// Cache key for a file version's classification.
+fn class_key(m: &Mount, rel: &str, node: &Node) -> Option<String> {
+    node.etag
+        .as_ref()
+        .map(|e| format!("{}|{rel}|{e}", m.volume_id))
+}
+
+fn cached_class(st: &AppState, m: &Mount, rel: &str, node: &Node) -> Option<safe::Class> {
+    st.decisions.get(&class_key(m, rel, node)?)
+}
+
+fn remember_class(st: &AppState, m: &Mount, rel: &str, node: &Node, class: safe::Class) {
+    if let Some(k) = class_key(m, rel, node) {
+        st.decisions.insert(k, class);
+    }
+}
+
+/// Classify a file's head; only a complete head (min(size, SNIFF_LEN)) may
+/// decide, and be cached, for this version.
+fn classify_head(st: &AppState, m: &Mount, rel: &str, node: &Node, head: &[u8]) -> safe::Class {
+    let class = safe::classify(&node.name, head);
+    if head.len() as u64 == (node.size as u64).min(safe::SNIFF_LEN) {
+        remember_class(st, m, rel, node, class);
+    }
+    class
+}
+
+/// Serve file bytes safely (see `safe`): sniffed Content-Type, sandboxing
+/// headers, Range, ETag and a header-safe Content-Disposition.
 pub async fn serve(
     st: &AppState,
     m: &Mount,
     rel: &str,
     node: &Node,
     headers: &HeaderMap,
-    download: bool,
+    purpose: safe::Purpose,
 ) -> ApiResult<Response> {
     if node.is_dir {
         return Err(bad("this is a folder"));
     }
     let size = node.size as u64;
-    let etag = node.etag.as_ref().map(|e| format!("\"{e}\""));
+    // The validator covers the decision too, so a cached response matches.
+    // `s2`: version of the serving rules (bump when they change), so responses cached under older
+    // rules are not revalidated into place.
+    let etag = node
+        .etag
+        .as_deref()
+        .map(safe::header_safe_tag)
+        .map(|e| match purpose {
+            safe::Purpose::ImagePreview => format!("\"s2i-{e}\""),
+            safe::Purpose::Content { .. } => format!("\"s2-{e}\""),
+        });
     if let (Some(et), Some(inm)) = (&etag, headers.get(header::IF_NONE_MATCH))
         && inm.as_bytes() == et.as_bytes()
     {
-        return Ok(StatusCode::NOT_MODIFIED.into_response());
+        let mut resp = StatusCode::NOT_MODIFIED.into_response();
+        let h = resp.headers_mut();
+        safe::protect(h);
+        h.insert(header::ETAG, HeaderValue::from_str(et).unwrap());
+        h.insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("private, no-cache"),
+        );
+        return Ok(resp);
     }
     let range = parse_range(headers, size)?;
     let (start, end) = range.unwrap_or((0, size));
-    let stream = vfs::read_stream(st, m, rel, node, start, end).await?;
-    let mime = mime_guess::from_path(&node.name).first_or_octet_stream();
+    // One read serves both the type decision and the body when the body
+    // starts at 0: peek its first bytes, then hand them on. The type and the
+    // bytes therefore always come from the same version of the file.
+    // The type is decided from the file's first SNIFF_LEN bytes (never
+    // fewer, so a tiny Range probe can't decide it for everyone). When the
+    // body covers them, type and bytes come from the same read (peek, then
+    // replay). Mid-file or short ranges read the head separately first; on
+    // external backends a concurrent overwrite can then mislabel that one
+    // response, but the type is always a safe, non-executable one.
+    let full_head = size.min(safe::SNIFF_LEN);
+    let (class, stream) = match cached_class(st, m, rel, node) {
+        Some(c) => (c, vfs::read_stream(st, m, rel, node, start, end).await?),
+        None if start == 0 => {
+            // Read at least the full head in this one read, even for a tiny
+            // probe like bytes=0-1, then serve only what was asked for.
+            let mut stream = vfs::read_stream(st, m, rel, node, 0, end.max(full_head)).await?;
+            let mut head: Vec<u8> = Vec::new();
+            let mut peeked = Vec::new();
+            while (head.len() as u64) < full_head {
+                match stream.next().await {
+                    Some(Ok(b)) => {
+                        let take = b.len().min(full_head as usize - head.len());
+                        head.extend_from_slice(&b[..take]);
+                        peeked.push(b);
+                    }
+                    Some(Err(e)) => return Err(ApiError::Internal(e.into())),
+                    None => break,
+                }
+            }
+            let class = classify_head(st, m, rel, node, &head);
+            let stream: vfs::ByteStream = if end < full_head {
+                let part = bytes::Bytes::from(head).slice(..(end as usize).min(full_head as usize));
+                Box::pin(futures::stream::once(async move { Ok(part) }))
+            } else {
+                let replay = futures::stream::iter(peeked.into_iter().map(Ok));
+                Box::pin(replay.chain(stream))
+            };
+            (class, stream)
+        }
+        None => {
+            let head = head_bytes(st, m, rel, node).await?;
+            let class = classify_head(st, m, rel, node, &head);
+            (class, vfs::read_stream(st, m, rel, node, start, end).await?)
+        }
+    };
+    let decision = safe::decide_class(class, purpose);
     let mut resp = Response::new(Body::from_stream(stream));
     let h = resp.headers_mut();
+    safe::protect(h);
     h.insert(
         header::CONTENT_TYPE,
-        HeaderValue::from_str(mime.as_ref()).unwrap(),
+        HeaderValue::from_static(decision.content_type),
     );
     h.insert(header::CONTENT_LENGTH, HeaderValue::from(end - start));
     h.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
@@ -107,20 +210,12 @@ pub async fn serve(
         header::CACHE_CONTROL,
         HeaderValue::from_static("private, no-cache"),
     );
-    // Never let user content run as active HTML on our origin.
-    h.insert("content-security-policy", HeaderValue::from_static("sandbox; default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'"));
-    h.insert(
-        "x-content-type-options",
-        HeaderValue::from_static("nosniff"),
-    );
     if let Some(et) = etag {
         h.insert(header::ETAG, HeaderValue::from_str(&et).unwrap());
     }
-    let disp = if download { "attachment" } else { "inline" };
-    let enc = utf8_percent_encode(&node.name, NON_ALPHANUMERIC).to_string();
     h.insert(
         header::CONTENT_DISPOSITION,
-        HeaderValue::from_str(&format!("{disp}; filename*=UTF-8''{enc}")).unwrap(),
+        safe::content_disposition(decision.inline, &node.name),
     );
     if range.is_some() {
         *resp.status_mut() = StatusCode::PARTIAL_CONTENT;
@@ -141,7 +236,24 @@ pub async fn content(
     let path = paths::normalize(&q.path)?;
     let (m, rel) = mounts::resolve(&st, u.id, &path).await?;
     let node = vfs::stat(&st, &m, &rel).await?;
-    serve(&st, &m, &rel, &node, &headers, q.download.is_some()).await
+    let purpose = safe::Purpose::Content {
+        download: q.download.is_some(),
+    };
+    serve(&st, &m, &rel, &node, &headers, purpose).await
+}
+
+/// `GET /api/files/image?path=`: the image-preview route. The UI loads it only
+/// through `<img>`; it is the one place SVG is served as `image/svg+xml`.
+pub async fn image(
+    State(st): State<AppState>,
+    AuthUser(u): AuthUser,
+    Query(q): Query<PathQuery>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    let path = paths::normalize(&q.path)?;
+    let (m, rel) = mounts::resolve(&st, u.id, &path).await?;
+    let node = vfs::stat(&st, &m, &rel).await?;
+    serve(&st, &m, &rel, &node, &headers, safe::Purpose::ImagePreview).await
 }
 
 pub async fn stat(

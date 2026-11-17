@@ -10,6 +10,7 @@ pub mod files;
 pub mod journal;
 pub mod mounts;
 pub mod routes;
+pub mod safe;
 pub mod shares;
 pub mod state;
 pub mod thumbs;
