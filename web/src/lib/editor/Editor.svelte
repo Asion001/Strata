@@ -73,14 +73,16 @@
   let lastDraft: string | null = null;
   /** After a failed draft write, autosave ticks skip until `retryAfter`; the
    *  wait doubles with each failed regular write in a row (5 s up to 60 s)
-   *  and any write that works resets it, so a briefly failing store costs
-   *  little typing while a full one isn't hammered every tick. Writes made
-   *  during the wait (closing the editor, after a save, restoring a draft)
-   *  still try, and don't lengthen it if they fail. */
+   *  and a regular write that works resets it, so a briefly failing store
+   *  costs little typing while a full one isn't hammered every tick. During
+   *  the wait, a few extra writes still try (restoring a draft, and once per
+   *  window each: closing or leaving the page, after a save); they never
+   *  change the backoff, whether they fail or work (a small write fitting a
+   *  nearly full store says little about the whole document). */
   let retryAfter = 0;
   let retryDelay = 0;
-  /** The backoff window (its `retryAfter`) a save clean-up already wrote in. */
-  let afterSaveWindow = 0;
+  /** Per reason, the backoff window (its `retryAfter`) an extra write used. */
+  const extraWindow = { final: 0, afterSave: 0 };
   /** Draft writes run one at a time, in order. */
   let draftQueue: Promise<void> = Promise.resolve();
 
@@ -217,19 +219,27 @@
     return draftQueue;
   }
 
-  /** Write this tab's draft, tracking the backoff. */
-  async function storeDraft(text: string): Promise<boolean> {
-    const extra = Date.now() < retryAfter; // made during the wait
+  function inBackoff() {
+    return Date.now() < retryAfter;
+  }
+
+  /** Write this tab's draft. A regular write (`extra` false) moves the
+   *  backoff: a failure doubles it, success ends it. An extra one, made
+   *  during the wait, leaves it alone. */
+  async function storeDraft(text: string, extra: boolean): Promise<boolean> {
     try {
       await saveTabDraft(key, tab, { baseEtag: etag, baseHash, text, savedAt: Date.now() });
     } catch {
-      if (extra) return false;
-      retryDelay = Math.min(Math.max(retryDelay * 2, 5_000), 60_000);
-      retryAfter = Date.now() + retryDelay;
+      if (!extra) {
+        retryDelay = Math.min(Math.max(retryDelay * 2, 5_000), 60_000);
+        retryAfter = Date.now() + retryDelay;
+      }
       return false;
     }
-    retryDelay = 0;
-    retryAfter = 0;
+    if (!extra) {
+      retryDelay = 0;
+      retryAfter = 0;
+    }
     return true;
   }
 
@@ -253,15 +263,16 @@
     if (!isSignedIn(userId)) return;
     const text = editor.getDoc();
     if (text === lastDraft) return;
-    if (Date.now() < retryAfter) {
-      // Backing off: only a last chance, or one save clean-up per backoff
-      // window, still tries; neither lengthens the backoff if it fails.
-      if (why === 'tick' || (why === 'afterSave' && afterSaveWindow === retryAfter)) return;
-      if (why === 'afterSave') afterSaveWindow = retryAfter;
+    const extra = inBackoff();
+    if (extra) {
+      // Backing off: ticks wait; closing and after-save writes try once
+      // per window.
+      if (why === 'tick' || extraWindow[why] === retryAfter) return;
+      extraWindow[why] = retryAfter;
     }
     // This tab's own entry: other tabs' drafts (and a recovery offer still
     // on screen) are never overwritten.
-    if (!(await storeDraft(text))) return;
+    if (!(await storeDraft(text, extra))) return;
     if (!isSignedIn(userId)) {
       await clearTabDraft(key, tab).catch(() => {});
       return;
@@ -285,7 +296,7 @@
     // is still in flight can't land after it.
     await afterDrafts(async () => {
       lastDraft = null;
-      if (!isSignedIn(userId) || !(await storeDraft(d.text))) return;
+      if (!isSignedIn(userId) || !(await storeDraft(d.text, inBackoff()))) return;
       // A sign-out may have landed during the write: don't leave it behind.
       if (!isSignedIn(userId)) {
         await clearTabDraft(key, tab);
@@ -449,7 +460,9 @@
 
   async function close() {
     if (dirty && !confirm('Close with unsaved changes? A draft stays in this browser for up to 30 days, until you sign out, or until someone else signs in here.')) return;
-    await autosave(true); // the last seconds of typing too
+    // The last seconds of typing too; stuck storage never keeps the editor
+    // from closing.
+    await Promise.race([autosave(true), new Promise((r) => setTimeout(r, 2000))]);
     onclose();
   }
 
