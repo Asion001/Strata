@@ -1,3 +1,110 @@
+/*
+ * Tailwind v4 and shadcn-svelte setup. This only makes the tools available;
+ * nothing on the existing pages changes yet.
+ *
+ * Only the theme and utilities layers load. Tailwind's preflight (its CSS
+ * reset) is left out, and the existing styles below stay unlayered, so they
+ * keep winning over any utility. So shadcn-svelte components are not
+ * usable yet. The next UI step, which rebuilds the app shell with the first
+ * components, finishes the setup against real components: preflight and
+ * shadcn's base rule (theme border and outline colors), scoping the old
+ * element styles, tw-animate-css, and the rem scale (the root font size is
+ * 15px, so rem-based sizes come out about 6% smaller).
+ *
+ * `dark:` uses Tailwind's default, prefers-color-scheme, which is the same
+ * switch the variables below use.
+ */
+@layer theme, base, components, utilities;
+@import 'tailwindcss/theme.css' layer(theme);
+@import 'tailwindcss/utilities.css' layer(utilities) source(none);
+
+/*
+ * Only shadcn-svelte components generate utilities for now, so words in the
+ * existing pages' styles can't turn into stray utility classes. The next
+ * step widens this to the pages it rebuilds.
+ */
+@source './lib/components/**/*.{svelte,ts}';
+
+/*
+ * shadcn-svelte's palette, mapped onto Strata's existing variables so old and
+ * new UI share one palette. Components use these through utilities
+ * (bg-background, text-muted-foreground) and a few use the bare variables
+ * (var(--sidebar-border)), so both are defined.
+ *
+ * Two names clash: Strata's --muted is a text color and --accent is the brand
+ * blue, while shadcn's muted and accent are soft background tints. Those two
+ * stay Strata's as bare variables and exist for shadcn only as utilities:
+ * bg-muted and bg-accent are the hover tint, text-muted-foreground is the old
+ * .muted text color, and the brand blue is "primary".
+ */
+:root {
+  --background: var(--bg);
+  --foreground: var(--text);
+  --card: var(--panel);
+  --card-foreground: var(--text);
+  --popover: var(--panel);
+  --popover-foreground: var(--text);
+  --primary: var(--accent);
+  --primary-foreground: var(--accent-text);
+  --secondary: var(--hover);
+  --secondary-foreground: var(--text);
+  --muted-foreground: var(--muted);
+  --accent-foreground: var(--text);
+  --destructive: var(--danger);
+  --input: var(--border);
+  --ring: var(--accent);
+  --sidebar: var(--panel);
+  --sidebar-foreground: var(--text);
+  --sidebar-primary: var(--accent);
+  --sidebar-primary-foreground: var(--accent-text);
+  --sidebar-accent: var(--hover);
+  --sidebar-accent-foreground: var(--text);
+  --sidebar-border: var(--border);
+  --sidebar-ring: var(--accent);
+}
+
+/*
+ * One font stack for old pages (the :root rule below) and font-sans.
+ * static: always emitted, even though no utility uses it yet.
+ */
+@theme static {
+  --font-sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--hover);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--hover);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-success: var(--ok);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
 :root {
   --bg: #f8fafc;
   --panel: #ffffff;
@@ -11,7 +118,7 @@
   --ok: #16a34a;
   --radius: 10px;
   color-scheme: light dark;
-  font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  font-family: var(--font-sans);
   font-size: 15px;
 }
 @media (prefers-color-scheme: dark) {
