@@ -131,10 +131,13 @@ pub async fn serve(
     // Content responses carry the file version's ETag, the same value a
     // write's If-Match must present (`vfs::etag_for`, which also carries the
     // serving-rules version).
-    let etag = Some(match purpose {
-        safe::Purpose::ImagePreview => format!("\"r3i-{}\"", vfs::version(node)),
-        safe::Purpose::Content { .. } => vfs::etag_for(node),
-    });
+    let etag = vfs::file_etag(st, m, rel, node)
+        .await?
+        .map(|e| match purpose {
+            // A different validator for the image route's different headers.
+            safe::Purpose::ImagePreview => e.replacen("\"r3", "\"r3i", 1),
+            safe::Purpose::Content { .. } => e,
+        });
     if let (Some(et), Some(inm)) = (&etag, headers.get(header::IF_NONE_MATCH))
         && inm.as_bytes() == et.as_bytes()
     {
@@ -401,8 +404,12 @@ pub async fn put_content(
     };
     let input: vfs::ByteStream = Box::pin(futures::stream::once(async move { Ok(body) }));
     // The version comes from inside the write's lock: never a later one.
-    let (_, node) = vfs::write_stream_if(&st, &m, &rel, input, &expect).await?;
-    let etag = vfs::etag_for(&node);
+    let (written, node) = vfs::write_stream_if(&st, &m, &rel, input, &expect).await?;
+    let etag = if vfs::is_weak(&node) {
+        vfs::content_etag(&written) // we know exactly what we wrote
+    } else {
+        vfs::etag_for(&node)
+    };
     let mut resp = Json(json!({
         "path": path, "size": node.size, "mtime": node.mtime, "etag": etag,
     }))

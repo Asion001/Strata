@@ -53,10 +53,22 @@ export async function expireDrafts(now = Date.now()): Promise<void> {
   for (const d of all) if (now - d.savedAt > DRAFT_TTL_MS) await clearDraft(d.key);
 }
 
-/** Forget every draft in this browser (on sign-out: drafts hold file contents). */
+/** Forget every draft in this browser (on sign-out: drafts hold file
+ *  contents). Waits for the deletion; gives up after a few seconds if an
+ *  open connection somewhere keeps it blocked. */
 export function clearAllDrafts(): Promise<void> {
   return new Promise((resolve) => {
     const req = indexedDB.deleteDatabase(DB);
-    req.onsuccess = req.onerror = req.onblocked = () => resolve();
+    const timer = setTimeout(resolve, 3000);
+    req.onsuccess = req.onerror = () => {
+      clearTimeout(timer);
+      resolve();
+    };
   });
+}
+
+/** Drop drafts that belong to other users (when someone signs in here). */
+export async function keepOnlyUser(userId: number): Promise<void> {
+  const all = await tx<Draft[]>('readonly', (s) => s.getAll() as IDBRequest<Draft[]>);
+  for (const d of all) if (!d.key.startsWith(`${userId}|`)) await clearDraft(d.key);
 }

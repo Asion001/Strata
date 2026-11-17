@@ -259,3 +259,55 @@ async fn the_returned_etag_is_the_written_version() {
         StatusCode::OK
     );
 }
+
+#[tokio::test]
+async fn coarse_mtime_storage_still_detects_same_size_changes() {
+    let Some(t) = app().await else { return };
+    let cid = t
+        .ok(
+            "POST",
+            "/api/connections",
+            json!({"name": "d", "config": {"kind": "local", "path": "d"}}),
+        )
+        .await["id"]
+        .as_i64()
+        .unwrap();
+    t.ok(
+        "POST",
+        "/api/mounts",
+        json!({"path": "Raw", "connection_id": cid, "mode": "raw"}),
+    )
+    .await;
+    let disk = t.dir.path().join("local/d/c.txt");
+    std::fs::create_dir_all(disk.parent().unwrap()).unwrap();
+    // a backend with whole-second mtimes (FAT, many FTP/WebDAV servers)
+    let second = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_000);
+    let write = |content: &[u8]| {
+        std::fs::write(&disk, content).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&disk)
+            .unwrap()
+            .set_modified(second)
+            .unwrap();
+    };
+    write(b"aaaa");
+    let e = get_etag(&t, "Raw/c.txt").await;
+    assert!(
+        e.starts_with("\"r3c-"),
+        "content-based ETag for weak storage: {e}"
+    );
+    write(b"bbbb"); // same size, same mtime, different content
+    assert_ne!(get_etag(&t, "Raw/c.txt").await, e);
+    assert_eq!(
+        put(&t, "Raw/c.txt", "mine", &[("if-match", &e)]).await.0,
+        StatusCode::PRECONDITION_FAILED
+    );
+    assert_eq!(std::fs::read(&disk).unwrap(), b"bbbb");
+    // and a save with the current ETag works and returns the next one
+    let cur = get_etag(&t, "Raw/c.txt").await;
+    let (s, _, h) = put(&t, "Raw/c.txt", "cccc", &[("if-match", &cur)]).await;
+    assert_eq!(s, StatusCode::OK);
+    let next = h["etag"].to_str().unwrap().to_string();
+    assert_eq!(get_etag(&t, "Raw/c.txt").await, next);
+}

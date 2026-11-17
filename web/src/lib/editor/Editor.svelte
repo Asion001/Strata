@@ -49,15 +49,39 @@
 
   let destroyed = false;
 
+  async function readCapped(r: Response, cap: number): Promise<Uint8Array> {
+    const reader = r.body!.getReader();
+    const parts: Uint8Array[] = [];
+    let total = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.length;
+      if (total > cap) {
+        await reader.cancel();
+        throw new Error('This file is too large to open in the editor. Download it instead.');
+      }
+      parts.push(value);
+    }
+    const out = new Uint8Array(total);
+    let off = 0;
+    for (const p of parts) {
+      out.set(p, off);
+      off += p.length;
+    }
+    return out;
+  }
+
   async function fetchText(): Promise<{ text: string; etag: string | null; tooBig: boolean; utf8: boolean }> {
-    // Check the size first: never pull a huge file into the tab.
-    const st = await fetch(`/api/files/stat?path=${encodeURIComponent(path)}`, { cache: 'no-store' });
-    if (st.status === 404) throw new Error('The file no longer exists.');
-    if (st.ok && (await st.json()).size > MAX_VIEW_BYTES)
-      throw new Error('This file is too large to open in the editor. Download it instead.');
     const r = await fetch(contentUrl(path), { cache: 'no-store' });
     if (!r.ok) throw new Error(r.status === 404 ? 'The file no longer exists.' : `Could not open the file (HTTP ${r.status}).`);
-    const bytes = new Uint8Array(await r.arrayBuffer());
+    // Never pull a huge file into the tab: stop at the size limit, whatever
+    // Content-Length says (the file may grow meanwhile).
+    if (Number(r.headers.get('content-length') ?? 0) > MAX_VIEW_BYTES) {
+      await r.body?.cancel();
+      throw new Error('This file is too large to open in the editor. Download it instead.');
+    }
+    const bytes = await readCapped(r, MAX_VIEW_BYTES);
     if (looksBinary(bytes)) throw new Error('This looks like a binary file, so it cannot be opened as text.');
     const strict = decodeUtf8(bytes);
     return {
@@ -101,8 +125,9 @@
       applyRules(f);
       const { createEditor } = await import('./cm');
       if (destroyed) return;
-      editor = await createEditor(host, {
+      const created = await createEditor(host, {
         doc: t.doc,
+        normalizePaste: t.eol !== 'keep',
         name,
         readOnly,
         onChange: (doc) => {
@@ -110,6 +135,11 @@
           renderPreview(doc);
         }
       });
+      if (destroyed) {
+        created.destroy();
+        return;
+      }
+      editor = created;
       renderPreview(t.doc);
       if (!readOnly) {
         const d = await getDraft(key).catch(() => undefined);
@@ -197,7 +227,17 @@
       const target = join(parent(path), conflictName(name, new Date(), seconds));
       const r = await put(target, body, { 'if-none-match': '*' });
       if (r.ok) {
-        await reloadTheirs(`Your version was saved as “${target.slice(target.lastIndexOf('/') + 1)}”.`);
+        const msg = `Your version was saved as “${target.slice(target.lastIndexOf('/') + 1)}”.`;
+        if (conflict?.theirsEtag) {
+          await reloadTheirs(msg);
+        } else {
+          // The original is gone: nothing to reload. Keep editing the text.
+          closeConflict();
+          savedDoc = editor.getDoc();
+          dirty = false;
+          await clearDraft(key).catch(() => {});
+          status = msg;
+        }
         return;
       }
       if (r.status !== 412) {
@@ -257,7 +297,7 @@
   }
 
   function close() {
-    if (dirty && !confirm('Close with unsaved changes? A draft stays in this browser until you sign out or 30 days pass.')) return;
+    if (dirty && !confirm('Close with unsaved changes? A draft stays in this browser for up to 30 days, until you sign out, or until someone else signs in here.')) return;
     onclose();
   }
 

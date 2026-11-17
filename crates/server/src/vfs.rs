@@ -205,9 +205,10 @@ fn meta_mtime(meta: &opendal::Metadata) -> DateTime<Utc> {
         .unwrap_or_else(Utc::now)
 }
 
+/// Our own etag for raw entries whose backend has none: `m:<size>-<mtime ns>`.
 fn raw_etag(meta: &opendal::Metadata) -> String {
     format!(
-        "{:x}-{:x}",
+        "m:{:x}-{:x}",
         meta.content_length(),
         meta.last_modified()
             .map(|t| t.into_inner().as_nanosecond())
@@ -765,8 +766,8 @@ pub async fn touch_blobs(
 /// A file version's identity, the same for every read and write path:
 /// hashed volumes use the content hash; raw volumes a hash of the size and
 /// the backend's etag (the backend's own, or size plus mtime in nanoseconds
-/// where it has none), so an outside change is always noticed. It never
-/// depends on the request time, so it is stable on backends without mtimes.
+/// where it has none). It never depends on the request time. Where that is
+/// too weak to notice a change (see `is_weak`), `file_etag` hashes content.
 pub fn version(node: &Node) -> String {
     match (&node.chunks, &node.etag) {
         (Some(_), Some(e)) => e.clone(),
@@ -775,6 +776,53 @@ pub fn version(node: &Node) -> String {
             blake3::hash(s.as_bytes()).to_hex()[..32].to_string()
         }
     }
+}
+
+/// A raw entry whose backend gives no etag and no sub-second mtime: a
+/// same-size rewrite within the same second would keep its version, so
+/// changes must be detected from the content itself.
+pub fn is_weak(node: &Node) -> bool {
+    if node.chunks.is_some() {
+        return false;
+    }
+    match node.etag.as_deref().and_then(|e| e.strip_prefix("m:")) {
+        Some(rest) => rest
+            .rsplit_once('-')
+            .and_then(|(_, ns)| u128::from_str_radix(ns, 16).ok())
+            .is_none_or(|ns| ns % 1_000_000_000 == 0),
+        None => node.etag.is_none(),
+    }
+}
+
+/// Weak files larger than this get no ETag (can't be saved conditionally).
+pub const CONTENT_ETAG_MAX: i64 = 20 * 1024 * 1024;
+
+/// ETag for a version known by its content hash.
+pub fn content_etag(h: &Hash) -> String {
+    format!("\"r3c-{}\"", &h.hex()[..32])
+}
+
+/// The ETag a file is served with and saves are checked against. Strong
+/// versions come from metadata; weak raw entries are hashed (up to
+/// `CONTENT_ETAG_MAX`; above that they get none).
+pub async fn file_etag(
+    st: &AppState,
+    m: &Mount,
+    rel: &str,
+    node: &Node,
+) -> ApiResult<Option<String>> {
+    if !is_weak(node) {
+        return Ok(Some(etag_for(node)));
+    }
+    if node.size > CONTENT_ETAG_MAX {
+        return Ok(None);
+    }
+    let mut s = read_stream(st, m, rel, node, 0, node.size as u64).await?;
+    let mut h = blake3::Hasher::new();
+    while let Some(b) = s.next().await {
+        h.update(&b.map_err(|e| ApiError::Internal(e.into()))?);
+    }
+    Ok(Some(content_etag(&Hash(*h.finalize().as_bytes()))))
 }
 
 /// HTTP ETag for a file version (content responses and writes). The `r3`
@@ -793,6 +841,25 @@ pub enum Expect {
     Etag(String),
     /// The file must not exist (`If-None-Match: *`).
     Absent,
+}
+
+/// Check a precondition on a raw entry (or anything), using `file_etag`.
+async fn check_expect_at(st: &AppState, m: &Mount, rel: &str, expect: &Expect) -> ApiResult<()> {
+    let current = current_file(st, m, rel).await?;
+    if let Some(n) = &current
+        && n.is_dir
+    {
+        return Err(conflict("a folder with that name already exists"));
+    }
+    let tag = match &current {
+        Some(n) => file_etag(st, m, rel, n).await?,
+        None => None,
+    };
+    match (expect, &current) {
+        (Expect::Any, _) | (Expect::Absent, None) => Ok(()),
+        (Expect::Etag(want), Some(_)) if tag.as_deref() == Some(want.as_str()) => Ok(()),
+        _ => Err(ApiError::PreconditionFailed(tag)),
+    }
 }
 
 /// Check a precondition against the current state (call under the volume
@@ -854,9 +921,6 @@ pub async fn put_hashed_file_if(
     // Saving over an existing file needs no parent folders: if the file is
     // still there, so is its folder. Only plain writes and creations make
     // missing parents, and never for a write that is going to be refused.
-    if *expect != Expect::Any {
-        check_expect(expect, get_node(st, m.volume_id, rel).await?.as_ref())?;
-    }
     if !parent.is_empty() && !matches!(expect, Expect::Etag(_)) {
         mkdir_in(st, m, parent).await?;
     }
@@ -937,7 +1001,7 @@ pub async fn write_stream_if(
     // Refuse early (before writing anything, or creating parent folders)
     // when the precondition already fails; re-checked under the lock below.
     if *expect != Expect::Any {
-        check_expect(expect, current_file(st, m, rel).await?.as_ref())?;
+        check_expect_at(st, m, rel, expect).await?;
     }
     let mut whole = blake3::Hasher::new();
     if m.is_hashed() {
@@ -975,6 +1039,17 @@ pub async fn write_stream_if(
     } else {
         let op = op(st, m).await?;
         let path = backend_path(m, rel, false);
+        // Conditional writes (editor saves, at most a few MB) hold the volume
+        // lock for the whole write: the backend writer can create parent
+        // folders, which must not happen for a save that is then refused.
+        // Plain writes (uploads, copies) only lock around the final close.
+        let early_lock = if *expect != Expect::Any {
+            let l = lock_volume(st, m.volume_id).await?;
+            check_expect_at(st, m, rel, expect).await?;
+            Some(l)
+        } else {
+            None
+        };
         let mut w = op.writer_with(&path).chunk(8 << 20).await?;
         while let Some(b) = input.next().await {
             let b = match b {
@@ -989,26 +1064,16 @@ pub async fn write_stream_if(
         }
         // The atomic close makes the file visible: do it under the volume lock
         // so the journal entry lands in the same order as the change.
-        let lock = match lock_volume(st, m.volume_id).await {
-            Ok(l) => l,
-            Err(e) => {
-                let _ = w.abort().await;
-                return Err(e);
-            }
-        };
-        if *expect != Expect::Any {
-            let current = match current_file(st, m, rel).await {
-                Ok(c) => c,
+        let lock = match early_lock {
+            Some(l) => l,
+            None => match lock_volume(st, m.volume_id).await {
+                Ok(l) => l,
                 Err(e) => {
                     let _ = w.abort().await;
                     return Err(e);
                 }
-            };
-            if let Err(e) = check_expect(expect, current.as_ref()) {
-                let _ = w.abort().await;
-                return Err(e);
-            }
-        }
+            },
+        };
         w.close().await?;
         let node = stat(st, m, rel).await?;
         let created = cache_node(st, m, rel, &node).await?;

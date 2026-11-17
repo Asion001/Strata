@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto';
 import { describe, expect, it } from 'vitest';
-import { DRAFT_TTL_MS, clearAllDrafts, clearDraft, draftKey, expireDrafts, getDraft, saveDraft } from './drafts';
+import { DRAFT_TTL_MS, clearAllDrafts, clearDraft, draftKey, expireDrafts, getDraft, keepOnlyUser, saveDraft } from './drafts';
 
 describe('drafts', () => {
   it('saves, reads and clears by user, mount and path', async () => {
@@ -22,5 +22,13 @@ describe('drafts', () => {
     expect((await getDraft('new'))?.text).toBe('y');
     await clearAllDrafts();
     expect(await getDraft('new')).toBeUndefined();
+  });
+
+  it('keeps only the signed-in user\'s drafts', async () => {
+    await saveDraft({ key: draftKey(1, 1, 'a'), baseEtag: null, text: 'mine', savedAt: Date.now() });
+    await saveDraft({ key: draftKey(2, 1, 'a'), baseEtag: null, text: 'theirs', savedAt: Date.now() });
+    await keepOnlyUser(1);
+    expect((await getDraft(draftKey(1, 1, 'a')))?.text).toBe('mine');
+    expect(await getDraft(draftKey(2, 1, 'a'))).toBeUndefined();
   });
 });
