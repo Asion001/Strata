@@ -21,13 +21,10 @@ export function draftKey(userId: number, mountId: number | null, path: string): 
 
 function open(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB, 2);
-    req.onupgradeneeded = (e) => {
-      const db = req.result;
-      const store =
-        e.oldVersion < 1 ? db.createObjectStore(STORE, { keyPath: 'key' }) : req.transaction!.objectStore(STORE);
-      if (!store.indexNames.contains('savedAt')) store.createIndex('savedAt', 'savedAt');
-    };
+    // Schema version 1 forever: a bump would lock out (and silently stop
+    // the autosave of) tabs still running an older build.
+    const req = indexedDB.open(DB, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(STORE, { keyPath: 'key' });
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
   });
@@ -53,9 +50,10 @@ export const getDraft = (key: string) =>
   tx<Draft | undefined>('readonly', (s) => s.get(key) as IDBRequest<Draft | undefined>);
 export const clearDraft = (key: string) => tx('readwrite', (s) => s.delete(key)).then(() => undefined);
 
-/** Delete the draft only if this tab wrote it (one transaction), so saving in
- *  one tab never throws away another tab's unsaved work on the same file. */
-export async function clearOwnDraft(key: string, tab: string): Promise<void> {
+/** After a save: delete the draft if this tab wrote it, or if it holds
+ *  exactly what was just saved (one transaction). Another tab's different
+ *  unsaved work on the same file stays. */
+export async function clearOwnDraft(key: string, tab: string, saved?: string): Promise<void> {
   const db = await open();
   try {
     await new Promise<void>((resolve, reject) => {
@@ -64,7 +62,7 @@ export async function clearOwnDraft(key: string, tab: string): Promise<void> {
       const req = s.get(key);
       req.onsuccess = () => {
         const d = req.result as Draft | undefined;
-        if (d && d.tab === tab) s.delete(key);
+        if (d && (d.tab === tab || (saved !== undefined && d.text === saved))) s.delete(key);
       };
       t.oncomplete = () => resolve();
       t.onerror = () => reject(t.error);
@@ -77,17 +75,18 @@ export async function clearOwnDraft(key: string, tab: string): Promise<void> {
 /** Drafts are kept for 30 days at most. */
 export const DRAFT_TTL_MS = 30 * 24 * 3600 * 1000;
 
-/** Remove drafts older than the TTL (keys only, one transaction). */
+/** Remove drafts older than the TTL (one transaction, one draft in memory
+ *  at a time). */
 export async function expireDrafts(now = Date.now()): Promise<void> {
   const db = await open();
   try {
     await new Promise<void>((resolve, reject) => {
       const t = db.transaction(STORE, 'readwrite');
-      const req = t.objectStore(STORE).index('savedAt').openKeyCursor(IDBKeyRange.upperBound(now - DRAFT_TTL_MS, true));
+      const req = t.objectStore(STORE).openCursor();
       req.onsuccess = () => {
         const c = req.result;
         if (!c) return;
-        t.objectStore(STORE).delete(c.primaryKey);
+        if (now - (c.value as Draft).savedAt > DRAFT_TTL_MS) c.delete();
         c.continue();
       };
       t.oncomplete = () => resolve();

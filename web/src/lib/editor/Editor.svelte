@@ -58,6 +58,7 @@
   let previewTimer: ReturnType<typeof setTimeout>;
   let draftTimer: ReturnType<typeof setInterval>;
   let lastDraft = '';
+  let offerParked = false;
 
   let destroyed = false;
   /** This editor instance: drafts record which tab wrote them. */
@@ -163,7 +164,9 @@
       editor = created;
       renderPreview(t.doc);
       if (!readOnly) {
-        const d = await getDraft(key).catch(() => undefined);
+        // The newest unsaved work for this file, or an older one set aside
+        // while a previous session ignored its recovery offer.
+        const d = (await getDraft(key).catch(() => undefined)) ?? (await getDraft(`${key}|recovered`).catch(() => undefined));
         if (destroyed) return;
         if (d && d.text !== t.doc) draftOffer = d;
         draftTimer = setInterval(autosave, 2000);
@@ -185,9 +188,12 @@
 
   async function autosave() {
     if (!editor || !dirty) return;
-    // A recovered draft is still on offer: don't overwrite it with this
-    // session's text until the user restores or discards it.
-    if (draftOffer) return;
+    // A recovered draft is still on offer: before this session's text takes
+    // its place, keep it under a side key (and in memory for Restore).
+    if (draftOffer && !offerParked) {
+      offerParked = true;
+      await saveDraft({ ...draftOffer, key: `${key}|recovered` }).catch(() => {});
+    }
     // Only while this user is still the one signed in here (any tab may
     // have signed out); checked again after writing, since a sign-out can
     // land in between.
@@ -206,13 +212,16 @@
     etag = draftOffer.baseEtag;
     baseHash = draftOffer.baseHash ?? null;
     editor.setDoc(draftOffer.text);
+    // The restored draft is this tab's now (so its save clears it).
+    void saveDraft({ ...draftOffer, key, tab, savedAt: Date.now() }).catch(() => {});
     draftOffer = null;
     lastDraft = '';
   }
 
   async function discardDraft() {
     draftOffer = null;
-    await clearDraft(key).catch(() => {});
+    await clearDraft(`${key}|recovered`).catch(() => {});
+    if (!offerParked) await clearDraft(key).catch(() => {});
   }
 
   async function put(target: string, body: Uint8Array<ArrayBuffer>, precondition: Record<string, string>) {
@@ -256,7 +265,7 @@
       savedDoc = doc;
       dirty = editor.getDoc() !== savedDoc;
       lastDraft = '';
-      await clearOwnDraft(key, tab).catch(() => {});
+      await clearOwnDraft(key, tab, doc).catch(() => {});
       status = 'Saved';
       setTimeout(() => status === 'Saved' && (status = ''), 2000);
     } catch (e) {

@@ -172,14 +172,8 @@ pub async fn storage_root(
     base: &str,
 ) -> ApiResult<(String, String)> {
     let cfg = st.connection_config(connection_id).await?;
-    Ok(match cfg.local_dir(&st.cfg.local_base)? {
-        // Two local connections may point at overlapping server folders.
-        Some(dir) => (
-            String::from("local"),
-            paths::join(dir.to_string_lossy().trim_matches('/'), base),
-        ),
-        None => (format!("conn:{connection_id}"), base.to_string()),
-    })
+    let (id, folder) = cfg.location(&st.cfg.local_base)?;
+    Ok((id, paths::join(&folder, base)))
 }
 
 /// A raw view over a hashed store (or a hashed store inside a raw folder) on

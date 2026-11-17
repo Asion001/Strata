@@ -56,6 +56,47 @@ impl ConnectionConfig {
         }
     }
 
+    /// Where this connection's files physically live, as (storage identity,
+    /// folder inside it). Two connections with the same identity reach the
+    /// same files, so their folders can overlap (e.g. two users' WebDAV or S3
+    /// connections to one share or bucket). Credentials are not part of it.
+    pub fn location(&self, local_base: &Path) -> Result<(String, String)> {
+        let norm = |r: &Option<String>| r.as_deref().unwrap_or("").trim_matches('/').to_string();
+        Ok(match self {
+            Self::Local { .. } => {
+                let dir = self.local_dir(local_base)?.unwrap();
+                (
+                    "local".into(),
+                    dir.to_string_lossy().trim_matches('/').to_string(),
+                )
+            }
+            Self::S3 {
+                bucket,
+                endpoint,
+                root,
+                ..
+            } => (
+                format!(
+                    "s3:{}|{}",
+                    endpoint
+                        .as_deref()
+                        .unwrap_or("aws")
+                        .trim_end_matches('/')
+                        .to_ascii_lowercase(),
+                    bucket
+                ),
+                norm(root),
+            ),
+            Self::Ftp { endpoint, root, .. } => (
+                format!(
+                    "ftp:{}",
+                    endpoint.trim_end_matches('/').to_ascii_lowercase()
+                ),
+                norm(root),
+            ),
+        })
+    }
+
     /// A copy with secrets blanked, safe to send to the UI.
     pub fn redacted(&self) -> Self {
         let mut c = self.clone();
@@ -298,5 +339,36 @@ mod tests {
         let mut new = old.redacted();
         new.merge_secrets(&old);
         assert_eq!(new, old);
+    }
+
+    #[test]
+    fn same_remote_storage_has_the_same_location() {
+        let s3 = |key: &str, root: Option<&str>| ConnectionConfig::S3 {
+            bucket: "b".into(),
+            region: None,
+            endpoint: Some("https://S3.example.com/".into()),
+            access_key_id: key.into(),
+            secret_access_key: "s".into(),
+            root: root.map(str::to_string),
+        };
+        let base = Path::new("/data");
+        assert_eq!(
+            s3("alice", Some("/x/")).location(base).unwrap(),
+            s3("bob", Some("x")).location(base).unwrap()
+        );
+        assert_ne!(
+            s3("a", None).location(base).unwrap().1,
+            s3("a", Some("y")).location(base).unwrap().1
+        );
+        let ftp = ConnectionConfig::Ftp {
+            endpoint: "ftp://nas".into(),
+            user: Some("u".into()),
+            password: None,
+            root: None,
+        };
+        assert_eq!(
+            ftp.location(base).unwrap(),
+            ("ftp:ftp://nas".to_string(), String::new())
+        );
     }
 }

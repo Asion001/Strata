@@ -936,9 +936,8 @@ async fn overlapping_raw_volumes(st: &AppState, m: &Mount) -> ApiResult<Vec<i64>
         if id == m.volume_id {
             continue;
         }
-        let Ok((r, f)) = mounts::storage_root(st, cid, &base).await else {
-            continue;
-        };
+        // A failure here must fail the save, never silently skip a lock.
+        let (r, f) = mounts::storage_root(st, cid, &base).await?;
         if r == root
             && (paths::strip_prefix(&f, &folder).is_some()
                 || paths::strip_prefix(&folder, &f).is_some())
