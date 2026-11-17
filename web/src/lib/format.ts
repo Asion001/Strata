@@ -29,6 +29,11 @@ export function parent(p: string) {
 const IMG = /\.(jpe?g|png|gif|webp|bmp|tiff?)$/i;
 export const isImage = (n: string) => IMG.test(n);
 export const isVideo = (n: string) => /\.(mp4|webm|mov|m4v)$/i.test(n);
+/** Files the text editor opens (by name; content is checked on open). */
+export const isTextName = (n: string) =>
+  /\.(txt|md|markdown|json|ya?ml|toml|ini|cfg|conf|log|csv|tsv|xml|html?|css|scss|js|mjs|cjs|ts|mts|tsx|jsx|svelte|vue|rs|go|py|rb|php|java|kt|swift|c|h|cpp|hpp|cs|sh|bash|zsh|fish|sql|env|gitignore|dockerfile|editorconfig|properties)$/i.test(n) ||
+  /^(dockerfile|makefile|readme|license|changelog)$/i.test(n);
+
 export const isSvg = (n: string) => /\.svg$/i.test(n);
 export const isAudio = (n: string) => /\.(mp3|m4a|flac|ogg|wav|opus)$/i.test(n);
 

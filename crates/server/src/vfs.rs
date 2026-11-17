@@ -762,6 +762,55 @@ pub async fn touch_blobs(
         .collect())
 }
 
+/// A file version's identity, the same for every read and write path:
+/// hashed volumes use the content hash; raw volumes a hash of size, mtime
+/// and the backend's own etag (so an outside change is always noticed).
+pub fn version(node: &Node) -> String {
+    match (&node.chunks, &node.etag) {
+        (Some(_), Some(e)) => e.clone(),
+        _ => {
+            let s = format!(
+                "{}|{}|{}",
+                node.size,
+                node.mtime.timestamp_nanos_opt().unwrap_or(0),
+                node.etag.as_deref().unwrap_or("")
+            );
+            blake3::hash(s.as_bytes()).to_hex()[..32].to_string()
+        }
+    }
+}
+
+/// HTTP ETag for a file version (content responses and writes).
+pub fn etag_for(node: &Node) -> String {
+    format!("\"v-{}\"", version(node))
+}
+
+/// What a write expects to find at the target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Expect {
+    /// Overwrite or create unconditionally (uploads, copies).
+    Any,
+    /// The file must exist with this ETag (as from `etag_for`).
+    Etag(String),
+    /// The file must not exist (`If-None-Match: *`).
+    Absent,
+}
+
+/// Check a precondition against the current state (call under the volume
+/// lock, so nothing can change between the check and the write).
+pub fn check_expect(expect: &Expect, current: Option<&Node>) -> ApiResult<()> {
+    if let Some(n) = current
+        && n.is_dir
+    {
+        return Err(conflict("a folder with that name already exists"));
+    }
+    match (expect, current) {
+        (Expect::Any, _) | (Expect::Absent, None) => Ok(()),
+        (Expect::Etag(want), Some(n)) if *want == etag_for(n) => Ok(()),
+        (_, cur) => Err(ApiError::PreconditionFailed(cur.map(etag_for))),
+    }
+}
+
 /// Point a hashed file at a list of stored chunks. Returns true if it is new.
 pub async fn put_hashed_file(
     st: &AppState,
@@ -771,11 +820,26 @@ pub async fn put_hashed_file(
     sizes: &[i64],
     mtime: Option<DateTime<Utc>>,
 ) -> ApiResult<bool> {
+    put_hashed_file_if(st, m, rel, chunks, sizes, mtime, &Expect::Any).await
+}
+
+/// `put_hashed_file` with a precondition, checked under the volume lock in
+/// the same critical section as the write.
+pub async fn put_hashed_file_if(
+    st: &AppState,
+    m: &Mount,
+    rel: &str,
+    chunks: &[Hash],
+    sizes: &[i64],
+    mtime: Option<DateTime<Utc>>,
+    expect: &Expect,
+) -> ApiResult<bool> {
     let (parent, name) = paths::split(rel).ok_or_else(|| bad("cannot write to a mount point"))?;
     if !parent.is_empty() {
         mkdir_in(st, m, parent).await?;
     }
     let lock = lock_volume(st, m.volume_id).await?;
+    check_expect(expect, get_node(st, m.volume_id, rel).await?.as_ref())?;
     let content = manifest_hash(chunks);
     let size: i64 = sizes.iter().sum();
     let inserted: Option<bool> = sqlx::query_scalar(
@@ -819,7 +883,21 @@ pub async fn write_stream(
     st: &AppState,
     m: &Mount,
     rel: &str,
+    input: ByteStream,
+) -> ApiResult<Hash> {
+    write_stream_if(st, m, rel, input, &Expect::Any).await
+}
+
+/// `write_stream` with a precondition. Hashed: checked when the node is
+/// written. Raw: checked against the backend under the volume lock right
+/// before the atomic close that makes the new content visible; on failure
+/// the write is aborted and nothing changes.
+pub async fn write_stream_if(
+    st: &AppState,
+    m: &Mount,
+    rel: &str,
     mut input: ByteStream,
+    expect: &Expect,
 ) -> ApiResult<Hash> {
     let mut whole = blake3::Hasher::new();
     if m.is_hashed() {
@@ -852,7 +930,7 @@ pub async fn write_stream(
         for c in chunker.finish() {
             put(st, m, &store, c, &mut hashes, &mut sizes).await?;
         }
-        put_hashed_file(st, m, rel, &hashes, &sizes, None).await?;
+        put_hashed_file_if(st, m, rel, &hashes, &sizes, None, expect).await?;
     } else {
         let op = op(st, m).await?;
         let path = backend_path(m, rel, false);
@@ -877,6 +955,20 @@ pub async fn write_stream(
                 return Err(e);
             }
         };
+        if *expect != Expect::Any {
+            let current = match stat(st, m, rel).await {
+                Ok(n) => Some(n),
+                Err(ApiError::NotFound) => None,
+                Err(e) => {
+                    let _ = w.abort().await;
+                    return Err(e);
+                }
+            };
+            if let Err(e) = check_expect(expect, current.as_ref()) {
+                let _ = w.abort().await;
+                return Err(e);
+            }
+        }
         w.close().await?;
         let node = stat(st, m, rel).await?;
         let existed = !cache_node(st, m, rel, &node).await?;

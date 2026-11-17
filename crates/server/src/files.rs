@@ -128,14 +128,12 @@ pub async fn serve(
     // The validator covers the decision too, so a cached response matches.
     // `s2`: version of the serving rules (bump when they change), so responses cached under older
     // rules are not revalidated into place.
-    let etag = node
-        .etag
-        .as_deref()
-        .map(safe::header_safe_tag)
-        .map(|e| match purpose {
-            safe::Purpose::ImagePreview => format!("\"s2i-{e}\""),
-            safe::Purpose::Content { .. } => format!("\"s2-{e}\""),
-        });
+    // Content responses carry the file version's ETag, the same value a
+    // write's If-Match must present (`vfs::etag_for`).
+    let etag = Some(match purpose {
+        safe::Purpose::ImagePreview => format!("\"vi-{}\"", vfs::version(node)),
+        safe::Purpose::Content { .. } => vfs::etag_for(node),
+    });
     if let (Some(et), Some(inm)) = (&etag, headers.get(header::IF_NONE_MATCH))
         && inm.as_bytes() == et.as_bytes()
     {
@@ -349,4 +347,67 @@ pub async fn search(
     }
     let hits = vfs::search(&st, u.id, term, q.limit.unwrap_or(100).clamp(1, 500)).await?;
     Ok(Json(json!({ "hits": hits })))
+}
+
+/// Largest file the in-browser editor may save.
+pub const MAX_EDIT_BYTES: usize = 5 * 1024 * 1024;
+
+/// One ETag from an If-Match / If-None-Match value (`W/` and lists are not
+/// meaningful for our strong, single-version tags).
+fn single_etag(v: &HeaderValue) -> ApiResult<String> {
+    let s = v
+        .to_str()
+        .map_err(|_| bad("invalid precondition header"))?
+        .trim();
+    if s.contains(',') || s.starts_with("W/") {
+        return Err(bad("If-Match takes exactly one strong ETag"));
+    }
+    Ok(s.to_string())
+}
+
+/// `PUT /api/files/content?path=`: save a whole file (the text editor).
+///
+/// * existing file: `If-Match: <ETag from GET>`, 412 if it changed, 428
+///   if the header is missing (no blind overwrites);
+/// * new file: `If-None-Match: *`, 412 if it exists meanwhile.
+///
+/// The precondition is checked under the volume lock in the same critical
+/// section as the write, and the write takes the normal store paths, so
+/// the journal and websocket push fire as for uploads.
+pub async fn put_content(
+    State(st): State<AppState>,
+    AuthUser(u): AuthUser,
+    Query(q): Query<PathQuery>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> ApiResult<Response> {
+    let path = paths::normalize(&q.path)?;
+    let (m, rel) = mounts::resolve(&st, u.id, &path).await?;
+    if rel.is_empty() {
+        return Err(bad("cannot write to a mount point"));
+    }
+    if body.len() > MAX_EDIT_BYTES {
+        return Err(bad("file too large to save from the editor"));
+    }
+    let expect = match (
+        headers.get(header::IF_MATCH),
+        headers.get(header::IF_NONE_MATCH),
+    ) {
+        (Some(v), None) => vfs::Expect::Etag(single_etag(v)?),
+        (None, Some(v)) if single_etag(v)? == "*" => vfs::Expect::Absent,
+        (None, None) => return Err(ApiError::PreconditionRequired),
+        _ => return Err(bad("use either If-Match: <etag> or If-None-Match: *")),
+    };
+    let input: vfs::ByteStream = Box::pin(futures::stream::once(async move { Ok(body) }));
+    vfs::write_stream_if(&st, &m, &rel, input, &expect).await?;
+    let node = vfs::stat(&st, &m, &rel).await?;
+    let etag = vfs::etag_for(&node);
+    let mut resp = Json(json!({
+        "path": path, "size": node.size, "mtime": node.mtime, "etag": etag,
+    }))
+    .into_response();
+    if let Ok(v) = HeaderValue::from_str(&etag) {
+        resp.headers_mut().insert(header::ETAG, v);
+    }
+    Ok(resp)
 }

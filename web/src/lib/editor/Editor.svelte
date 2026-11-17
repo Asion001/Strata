@@ -1,0 +1,341 @@
+<script lang="ts">
+  // Text/code editor with conflict-safe saves:
+  // - loads the file with its ETag, saves with If-Match (412 -> conflict dialog);
+  // - autosaves unsaved drafts to IndexedDB every 2 s, offers them back on reopen;
+  // - keeps the file's line endings and trailing newline;
+  // - Ctrl/Cmd+S saves; leaving with unsaved changes asks first.
+  import { onDestroy, onMount } from 'svelte';
+  import { beforeNavigate } from '$app/navigation';
+  import { contentUrl } from '$lib/api';
+  import { join, parent } from '$lib/format';
+  import { MAX_EDIT_BYTES, conflictName, decodeUtf8, fromEditor, looksBinary, toEditor, type Eol } from './textio';
+  import { clearDraft, draftKey, getDraft, saveDraft, type Draft } from './drafts';
+
+  let {
+    path,
+    userId,
+    mountId,
+    onclose
+  }: { path: string; userId: number; mountId: number | null; onclose: () => void } = $props();
+
+  // One editor instance per file: the parent re-creates it ({#key}) when
+  // the path changes, so these never go stale.
+  const name = $derived(path.slice(path.lastIndexOf('/') + 1));
+  const isMarkdown = $derived(/\.(md|markdown)$/i.test(name));
+  const key = $derived(draftKey(userId, mountId, path));
+
+  let host: HTMLDivElement;
+  let diffHost = $state<HTMLDivElement>();
+  let editor: Awaited<ReturnType<typeof import('./cm').createEditor>> | null = null;
+  let mergeView: { destroy(): void } | null = null;
+
+  let loading = $state(true);
+  let error = $state('');
+  let notice = $state('');
+  let readOnly = $state(false);
+  let dirty = $state(false);
+  let saving = $state(false);
+  let status = $state('');
+  let etag = $state<string | null>(null);
+  let eol: Eol = '\n';
+  let savedDoc = '';
+  let draftOffer = $state<Draft | null>(null);
+  let conflict = $state<{ theirsEtag: string | null; showDiff: boolean } | null>(null);
+  let preview = $state('');
+  let showPreview = $state(false);
+  let previewTimer: ReturnType<typeof setTimeout>;
+  let draftTimer: ReturnType<typeof setInterval>;
+  let lastDraft = '';
+
+  async function fetchText(): Promise<{ text: string; etag: string | null; tooBig: boolean; utf8: boolean }> {
+    const r = await fetch(contentUrl(path), { cache: 'no-store' });
+    if (!r.ok) throw new Error(r.status === 404 ? 'The file no longer exists.' : `Could not open the file (HTTP ${r.status}).`);
+    const bytes = new Uint8Array(await r.arrayBuffer());
+    if (looksBinary(bytes)) throw new Error('This looks like a binary file, so it cannot be opened as text.');
+    const strict = decodeUtf8(bytes);
+    return {
+      text: strict ?? new TextDecoder('utf-8').decode(bytes),
+      etag: r.headers.get('etag'),
+      tooBig: bytes.length > MAX_EDIT_BYTES,
+      utf8: strict !== null
+    };
+  }
+
+  function renderPreview(doc: string) {
+    if (!isMarkdown) return;
+    clearTimeout(previewTimer);
+    previewTimer = setTimeout(async () => {
+      const { renderMarkdown } = await import('./markdown');
+      preview = renderMarkdown(doc);
+    }, 150);
+  }
+
+  onMount(async () => {
+    showPreview = isMarkdown;
+    try {
+      const f = await fetchText();
+      etag = f.etag;
+      const t = toEditor(f.text);
+      eol = t.eol;
+      savedDoc = t.doc;
+      if (f.tooBig) {
+        readOnly = true;
+        notice = 'This file is larger than 5 MB, so it opens read-only.';
+      } else if (!f.utf8) {
+        readOnly = true;
+        notice = 'This file is not UTF-8 text, so it opens read-only.';
+      }
+      const { createEditor } = await import('./cm');
+      editor = await createEditor(host, {
+        doc: t.doc,
+        name,
+        readOnly,
+        onChange: (doc) => {
+          dirty = doc !== savedDoc;
+          renderPreview(doc);
+        }
+      });
+      renderPreview(t.doc);
+      if (!readOnly) {
+        const d = await getDraft(key).catch(() => undefined);
+        if (d && d.text !== t.doc) draftOffer = d;
+        draftTimer = setInterval(autosave, 2000);
+      }
+    } catch (e) {
+      error = (e as Error).message;
+    } finally {
+      loading = false;
+    }
+  });
+
+  onDestroy(() => {
+    clearInterval(draftTimer);
+    clearTimeout(previewTimer);
+    editor?.destroy();
+    mergeView?.destroy();
+  });
+
+  async function autosave() {
+    if (!editor || !dirty) return;
+    const text = editor.getDoc();
+    if (text === lastDraft) return;
+    lastDraft = text;
+    await saveDraft({ key, baseEtag: etag, text, savedAt: Date.now() }).catch(() => {});
+  }
+
+  function restoreDraft() {
+    if (!draftOffer || !editor) return;
+    // Keep the draft's base: if the file changed since, saving asks how to resolve.
+    etag = draftOffer.baseEtag;
+    editor.setDoc(draftOffer.text);
+    draftOffer = null;
+  }
+
+  async function discardDraft() {
+    draftOffer = null;
+    await clearDraft(key).catch(() => {});
+  }
+
+  async function put(target: string, body: string, precondition: Record<string, string>) {
+    return fetch(`/api/files/content?path=${encodeURIComponent(target)}`, {
+      method: 'PUT',
+      headers: { 'x-strata': '1', 'content-type': 'text/plain; charset=utf-8', ...precondition },
+      body
+    });
+  }
+
+  async function save() {
+    if (!editor || readOnly || saving) return;
+    saving = true;
+    status = 'Saving…';
+    const doc = editor.getDoc();
+    try {
+      const r = await put(path, fromEditor(doc, eol), etag ? { 'if-match': etag } : { 'if-none-match': '*' });
+      const body = await r.json().catch(() => ({}));
+      if (r.status === 412) {
+        conflict = { theirsEtag: body.etag ?? null, showDiff: false };
+        status = '';
+        return;
+      }
+      if (!r.ok) throw new Error(body.error ?? `HTTP ${r.status}`);
+      etag = r.headers.get('etag') ?? body.etag;
+      savedDoc = doc;
+      dirty = editor.getDoc() !== savedDoc;
+      lastDraft = '';
+      await clearDraft(key).catch(() => {});
+      status = 'Saved';
+      setTimeout(() => status === 'Saved' && (status = ''), 2000);
+    } catch (e) {
+      status = `Save failed: ${(e as Error).message}`;
+    } finally {
+      saving = false;
+    }
+  }
+
+  async function keepMine() {
+    if (!editor) return;
+    const body = fromEditor(editor.getDoc(), eol);
+    // A copy next to the original; add seconds if that name is taken too.
+    for (const seconds of [false, true]) {
+      const target = join(parent(path), conflictName(name, new Date(), seconds));
+      const r = await put(target, body, { 'if-none-match': '*' });
+      if (r.ok) {
+        await reloadTheirs(`Your version was saved as “${target.slice(target.lastIndexOf('/') + 1)}”.`);
+        return;
+      }
+      if (r.status !== 412) {
+        status = `Could not save a copy (HTTP ${r.status})`;
+        return;
+      }
+    }
+    status = 'Could not save a copy: the name is taken.';
+  }
+
+  async function reloadTheirs(message = '') {
+    try {
+      const f = await fetchText();
+      const t = toEditor(f.text);
+      etag = f.etag;
+      eol = t.eol;
+      savedDoc = t.doc;
+      editor?.setDoc(t.doc);
+      dirty = false;
+      lastDraft = '';
+      await clearDraft(key).catch(() => {});
+      closeConflict();
+      status = message;
+    } catch (e) {
+      status = (e as Error).message;
+    }
+  }
+
+  async function showDiff() {
+    if (!editor || !conflict) return;
+    conflict.showDiff = true;
+    try {
+      const theirs = toEditor((await fetchText()).text).doc;
+      await Promise.resolve();
+      if (diffHost) {
+        const { createMergeView } = await import('./cm');
+        mergeView?.destroy();
+        mergeView = await createMergeView(diffHost, editor.getDoc(), theirs, name);
+      }
+    } catch (e) {
+      status = (e as Error).message;
+    }
+  }
+
+  function closeConflict() {
+    mergeView?.destroy();
+    mergeView = null;
+    conflict = null;
+  }
+
+  function close() {
+    if (dirty && !confirm('Discard unsaved changes? (A draft stays saved in this browser.)')) return;
+    onclose();
+  }
+
+  beforeNavigate((nav) => {
+    if (dirty && !confirm('You have unsaved changes. Leave anyway?')) nav.cancel();
+  });
+
+  // Ctrl/Cmd+S anywhere while the editor is open (not only in the text area).
+  function onKey(e: KeyboardEvent) {
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 's') {
+      e.preventDefault();
+      void save();
+    }
+  }
+
+  function beforeUnload(e: BeforeUnloadEvent) {
+    if (dirty) {
+      e.preventDefault();
+      e.returnValue = '';
+    }
+  }
+</script>
+
+<svelte:window onbeforeunload={beforeUnload} onkeydown={onKey} />
+
+<div class="editor" role="dialog" aria-modal="true" aria-label="Edit {name}" tabindex="-1">
+  <header>
+    <span class="name">{name}{dirty ? ' •' : ''}</span>
+    <span class="status" aria-live="polite">{status}</span>
+    {#if isMarkdown}
+      <button onclick={() => (showPreview = !showPreview)}>{showPreview ? 'Hide preview' : 'Preview'}</button>
+    {/if}
+    {#if !readOnly && !error}
+      <button class="primary" onclick={save} disabled={saving || !dirty} title="Ctrl/Cmd+S">Save</button>
+    {/if}
+    <button onclick={close} aria-label="Close">✕</button>
+  </header>
+
+  {#if notice}<div class="banner">{notice}</div>{/if}
+  {#if draftOffer}
+    <div class="banner">
+      Unsaved changes from {new Date(draftOffer.savedAt).toLocaleString()} were found{draftOffer.baseEtag !== etag ? ' (the file has changed since)' : ''}.
+      <button onclick={restoreDraft}>Restore</button>
+      <button onclick={discardDraft}>Discard</button>
+    </div>
+  {/if}
+
+  {#if error}
+    <div class="error pad">{error}</div>
+  {/if}
+  <div class="body" class:split={showPreview} class:hidden={!!error}>
+    <div class="cm" bind:this={host}>{#if loading}<div class="pad muted">Loading…</div>{/if}</div>
+    {#if showPreview}
+      <!-- Sanitised by DOMPurify (see markdown.ts); raw HTML is disabled. -->
+      <article class="preview">{@html preview}</article>
+    {/if}
+  </div>
+</div>
+
+{#if conflict}
+  <div class="conflict-bg">
+    <div class="conflict card stack" class:wide={conflict.showDiff} role="alertdialog" aria-label="Save conflict">
+      <b>Someone else changed “{name}” while you were editing.</b>
+      <p class="muted">Nothing has been overwritten. Choose what to do with your changes:</p>
+      {#if conflict.showDiff}
+        <div class="labels"><span>Yours</span><span>Theirs (saved)</span></div>
+        <div class="diff" bind:this={diffHost}></div>
+      {/if}
+      <div class="row">
+        <button class="primary" onclick={keepMine}>Keep mine as a copy</button>
+        <button onclick={() => reloadTheirs()}>Reload theirs</button>
+        {#if !conflict.showDiff}<button onclick={showDiff}>View differences</button>{/if}
+        <span class="grow"></span>
+        <button onclick={closeConflict}>Back to editing</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<style>
+  .editor { position: fixed; inset: 0; z-index: 45; background: var(--bg); display: flex; flex-direction: column; }
+  header { display: flex; gap: 8px; align-items: center; padding: 8px 12px; padding-top: max(8px, env(safe-area-inset-top)); border-bottom: 1px solid var(--border); background: var(--panel); }
+  .name { font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .status { color: var(--muted); font-size: .9em; }
+  .banner { padding: 8px 12px; background: var(--hover); border-bottom: 1px solid var(--border); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .pad { padding: 16px; }
+  .body { flex: 1; min-height: 0; display: grid; grid-template-columns: 1fr; }
+  .body.split { grid-template-columns: 1fr 1fr; }
+  .body.hidden { display: none; }
+  .cm { min-height: 0; overflow: auto; background: var(--panel); }
+  .cm :global(.cm-editor) { height: 100%; font-size: 14px; }
+  .cm :global(.cm-scroller) { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .preview { overflow: auto; padding: 16px 24px; border-left: 1px solid var(--border); line-height: 1.6; }
+  .preview :global(pre) { background: var(--hover); padding: 10px; border-radius: 8px; overflow: auto; }
+  .preview :global(img) { max-width: 100%; }
+  .conflict-bg { position: fixed; inset: 0; z-index: 60; background: rgb(0 0 0 / .45); display: grid; place-items: center; padding: 16px; }
+  .conflict { width: min(560px, 100%); max-height: 90dvh; overflow: auto; }
+  .conflict.wide { width: min(1200px, 100%); }
+  .conflict p { margin: 0; }
+  .labels { display: grid; grid-template-columns: 1fr 1fr; color: var(--muted); font-size: .9em; }
+  .diff { max-height: 60dvh; overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
+  @media (max-width: 800px) {
+    .body.split { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; }
+    .preview { border-left: 0; border-top: 1px solid var(--border); }
+  }
+</style>

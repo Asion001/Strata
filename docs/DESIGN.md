@@ -107,6 +107,29 @@ Blob names are the plain BLAKE3 hash today. The store's naming function
 already accepts a per-connection key (BLAKE3 keyed mode) for when encryption
 at rest arrives, so the backend will not learn content hashes.
 
+## Text editor
+Text, Markdown and code open in a CodeMirror 6 editor that loads lazily,
+with language modes loaded per file extension. Markdown gets a live preview
+(markdown-it with raw HTML off, then DOMPurify).
+
+Saves never overwrite silently:
+- `PUT /api/files/content?path=` takes `If-Match` with the ETag from the
+  GET. A changed file gets 412 with its current ETag. A missing precondition
+  on a write gets 428, and creating a file takes `If-None-Match: *`.
+- GET and PUT share one version function: hashed volumes use the content
+  hash; raw volumes hash size, mtime and the backend etag, so an outside
+  change is caught.
+- The check runs under the volume lock in the same critical section as the
+  write (raw: right before the atomic close, aborting on mismatch).
+- Writes take the normal store paths, so the journal and websocket push fire.
+
+On a 412, the editor offers three choices: keep mine (a copy named
+`name (conflict YYYY-MM-DD HH-MM).ext`), reload theirs, or view a side-by-side
+diff. Unsaved drafts autosave to IndexedDB every 2 s, keyed by user, mount and
+path with their base ETag, and are offered back on reopen. Line endings and
+the trailing newline are preserved. Files over 5 MB or not valid UTF-8 open
+read-only, and files with NUL bytes in their first 8 KB are refused.
+
 ## Security notes
 * Argon2id passwords; sessions are random tokens stored as BLAKE3 hashes.
 * Cookie sessions require an `X-Strata` header on mutating requests (CSRF).
