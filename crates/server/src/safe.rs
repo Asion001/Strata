@@ -128,21 +128,83 @@ fn ftyp(head: &[u8]) -> Option<&'static str> {
     (pick != "raw").then_some(pick)
 }
 
-/// MPEG audio frame header (MP3 and friends).
-fn mpeg_frame(h: &[u8]) -> bool {
-    h.len() >= 3
-        && h[0] == 0xFF
-        && h[1] & 0xE0 == 0xE0
-        && h[1] != 0xFE // FF FE is the UTF-16LE byte-order mark
-        && h[1] & 0x06 != 0 // layer not reserved (00 is ADTS AAC, below)
-        && h[1] & 0x18 != 0x08 // MPEG version not reserved
-        && h[2] & 0xF0 != 0xF0 // bitrate index not "bad"
-        && h[2] & 0x0C != 0x0C // sample rate not reserved
+/// Length of the MPEG audio frame starting at `h`, if `h` starts with a
+/// valid frame header (Layer I/II/III, MPEG 1/2/2.5).
+fn mpeg_frame_len(h: &[u8]) -> Option<usize> {
+    if h.len() < 4 || h[0] != 0xFF || h[1] & 0xE0 != 0xE0 {
+        return None;
+    }
+    let version = (h[1] >> 3) & 3; // 0 = 2.5, 2 = 2, 3 = 1
+    let layer = (h[1] >> 1) & 3; // 1 = III, 2 = II, 3 = I
+    let bitrate_idx = (h[2] >> 4) as usize;
+    let rate_idx = ((h[2] >> 2) & 3) as usize;
+    let padding = ((h[2] >> 1) & 1) as usize;
+    if version == 1 || layer == 0 || bitrate_idx == 0 || bitrate_idx == 15 || rate_idx == 3 {
+        return None;
+    }
+    const RATES: [[usize; 3]; 4] = [
+        [11025, 12000, 8000],
+        [0, 0, 0],
+        [22050, 24000, 16000],
+        [44100, 48000, 32000],
+    ];
+    const BR_V1: [[usize; 15]; 3] = [
+        [
+            0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320,
+        ], // III
+        [
+            0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384,
+        ], // II
+        [
+            0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448,
+        ], // I
+    ];
+    const BR_V2: [[usize; 15]; 3] = [
+        [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160], // II and III
+        [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160],
+        [
+            0, 32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256,
+        ], // I
+    ];
+    let rate = RATES[version as usize][rate_idx];
+    let li = (layer - 1) as usize;
+    let kbps = if version == 3 {
+        BR_V1[li][bitrate_idx]
+    } else {
+        BR_V2[li][bitrate_idx]
+    };
+    let len = match layer {
+        3 => (12 * kbps * 1000 / rate + padding) * 4,
+        1 if version != 3 => 72 * kbps * 1000 / rate + padding,
+        _ => 144 * kbps * 1000 / rate + padding,
+    };
+    (len >= 4).then_some(len)
 }
 
-/// ADTS frame header (raw .aac).
+/// MPEG audio (MP3 and friends): a valid frame header followed by another
+/// one exactly a frame later. One header alone is too weak: three ordinary
+/// bytes of Windows-1251 text (e.g. "я...") can look like one.
+fn mpeg_frame(h: &[u8]) -> bool {
+    match mpeg_frame_len(h) {
+        Some(len) => h.len() >= len + 4 && mpeg_frame_len(&h[len..]).is_some(),
+        None => false,
+    }
+}
+
+/// ADTS (raw .aac): a header whose frame length points at the next header.
 fn adts_frame(h: &[u8]) -> bool {
-    h.len() >= 3 && h[0] == 0xFF && h[1] & 0xF6 == 0xF0 && (h[2] >> 2) & 0x0F < 13
+    let header = |h: &[u8]| -> Option<usize> {
+        if h.len() < 7 || h[0] != 0xFF || h[1] & 0xF6 != 0xF0 || (h[2] >> 2) & 0x0F >= 13 {
+            return None;
+        }
+        let len =
+            (((h[3] & 0x03) as usize) << 11) | ((h[4] as usize) << 3) | ((h[5] as usize) >> 5);
+        (len >= 7).then_some(len)
+    };
+    match header(h) {
+        Some(len) => h.len() >= len + 7 && header(&h[len..]).is_some(),
+        None => false,
+    }
 }
 
 /// Text flavour of the start of a file, if it looks like text.
@@ -169,10 +231,6 @@ fn text_kind(head: &[u8]) -> Option<&'static str> {
         .count();
     // A stray byte or two (e.g. a DOS EOF marker) in a short file is fine.
     (controls <= 2 + head.len() / 100).then_some("text/plain")
-}
-
-fn looks_like_text(head: &[u8]) -> bool {
-    text_kind(head).is_some()
 }
 
 /// How to serve a file's bytes.
@@ -210,15 +268,13 @@ pub struct Class {
 }
 
 pub fn classify(name: &str, head: &[u8]) -> Class {
+    let sniffed = sniff(head);
+    let text = text_kind(head);
     let svg = ext(name) == "svg"
-        && looks_like_text(head)
-        && String::from_utf8_lossy(head)
-            .to_ascii_lowercase()
-            .contains("<svg");
-    let base = match sniff(head) {
-        Some(t) => t,
-        None => text_kind(head).unwrap_or("application/octet-stream"),
-    };
+        && sniffed.is_none()
+        && text.is_some()
+        && head.windows(4).any(|w| w.eq_ignore_ascii_case(b"<svg"));
+    let base = sniffed.or(text).unwrap_or("application/octet-stream");
     Class { base, svg }
 }
 
@@ -404,7 +460,16 @@ mod tests {
         assert_eq!(sniff(b"\0\0\0\x18ftypheic"), Some("image/heic"));
         assert_eq!(sniff(b"\0\0\0\x18ftypcrx "), None);
         assert_eq!(sniff(b"ID3\x04\x00"), Some("audio/mpeg"));
-        assert_eq!(sniff(&[0xFF, 0xFB, 0x90, 0x00]), Some("audio/mpeg"));
+        // two MP3 frames (MPEG-1 Layer III, 128 kbps, 44.1 kHz: 417 bytes)
+        let mut mp3 = vec![0xFF, 0xFB, 0x90, 0x00];
+        mp3.resize(417, 0);
+        mp3.extend_from_slice(&[0xFF, 0xFB, 0x90, 0x00]);
+        assert_eq!(sniff(&mp3), Some("audio/mpeg"));
+        assert_eq!(
+            sniff(&[0xFF, 0xFB, 0x90, 0x00]),
+            None,
+            "one header is not enough"
+        );
         // Windows-1251 Cyrillic text stays viewable
         let cp1251 = [
             0xCF, 0xF0, 0xE8, 0xE2, 0xE5, 0xF2, b' ', 0xEC, 0xE8, 0xF0, b'\n',
@@ -448,7 +513,17 @@ mod tests {
         // Canon CR3 is not media
         assert_eq!(sniff(b"\0\0\0\x18ftypcrx \0\0\0\0crx isom"), None);
         // ADTS AAC
-        assert_eq!(sniff(&[0xFF, 0xF1, 0x50, 0x80, 0x02]), Some("audio/aac"));
+        let mut aac = vec![0xFF, 0xF1, 0x50, 0x80, 0x02, 0x1F, 0xFC];
+        aac.resize(16, 0);
+        aac.extend_from_slice(&[0xFF, 0xF1, 0x50, 0x80, 0x02, 0x1F, 0xFC]);
+        assert_eq!(sniff(&aac), Some("audio/aac"));
+        // CP1251 text starting with "ясно" / "явно" is text, not audio
+        let ya: Vec<u8> = vec![0xFF, 0xF1, 0xED, 0xEE, b' ', 0xFF, 0xE2, 0xED, 0xEE, b'\n'];
+        assert_eq!(decide("n.txt", &ya, C).content_type, "text/plain");
+        let ya2: Vec<u8> = vec![
+            0xFF, 0xE2, 0xED, 0xEE, b' ', 0xF2, 0xE5, 0xEA, 0xF1, 0xF2, b'\n',
+        ];
+        assert_eq!(decide("n.txt", &ya2, C).content_type, "text/plain");
         // short CP1251 text ending with a DOS EOF marker
         let mut t = vec![0xCF, 0xF0, 0xE8, 0xE2, 0xE5, 0xF2, b'\n'];
         t.push(0x1A);
