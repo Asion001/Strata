@@ -404,6 +404,11 @@ pub async fn put_content(
         headers.get(header::IF_MATCH),
         headers.get(header::IF_NONE_MATCH),
     ) {
+        // `If-Match: *` ("any version") would skip the conflict check the
+        // editor relies on: an exact ETag is required.
+        (Some(v), None) if single_etag(v)? == "*" => {
+            return Err(bad("If-Match needs the ETag of the version being edited"));
+        }
         (Some(v), None) => vfs::Expect::Etag {
             etag: single_etag(v)?,
             // BLAKE3 of the bytes the client's edit is based on: lets raw

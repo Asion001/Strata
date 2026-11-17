@@ -894,8 +894,9 @@ async fn verify_raw_base(
 }
 
 /// Under the lock: the version must still be the one `verify_raw_base`
-/// checked. Coarse versions can't prove that, so their content is hashed
-/// again (at most 5 MB).
+/// checked, and the content still the base. Metadata alone can miss a
+/// same-size rewrite within the backend's timestamp granularity (a second,
+/// or a kernel tick), so the content is hashed again (at most 5 MB).
 async fn recheck_raw_base(
     st: &AppState,
     m: &Mount,
@@ -910,16 +911,32 @@ async fn recheck_raw_base(
         if !same {
             return Err(ApiError::PreconditionFailed(Some(etag_for(b))));
         }
-        if is_coarse(b)
-            && let Expect::Etag {
-                base: Some(base), ..
-            } = expect
+        if let Expect::Etag {
+            base: Some(base), ..
+        } = expect
             && digest_node(st, m, rel, b).await? != *base
         {
             return Err(ApiError::PreconditionFailed(Some(etag_for(b))));
         }
     }
     Ok(())
+}
+
+/// Lock every raw volume overlapping this one. The set is checked again
+/// under the lock: a volume created (or re-pointed) onto the same folder
+/// meanwhile is locked too.
+async fn lock_overlapping_raw(st: &AppState, m: &Mount) -> ApiResult<VolumeLock> {
+    let mut ids = overlapping_raw_volumes(st, m).await?;
+    for _ in 0..3 {
+        let l = lock_volumes(st, &ids).await?;
+        let now = overlapping_raw_volumes(st, m).await?;
+        if now.iter().all(|v| ids.contains(v)) {
+            return Ok(l);
+        }
+        l.release().await?;
+        ids = now;
+    }
+    Err(conflict("the storage layout kept changing; try again"))
 }
 
 /// Raw volumes whose folders overlap this one's on the same storage
@@ -1129,7 +1146,7 @@ pub async fn write_stream_if(
             // The (up to 5 MB) content comparison runs before the lock; under
             // the lock only a cheap re-check that nothing changed since.
             let verified = verify_raw_base(st, m, rel, expect).await?;
-            let l = lock_volumes(st, &overlapping_raw_volumes(st, m).await?).await?;
+            let l = lock_overlapping_raw(st, m).await?;
             recheck_raw_base(st, m, rel, expect, &verified).await?;
             Some(l)
         } else {

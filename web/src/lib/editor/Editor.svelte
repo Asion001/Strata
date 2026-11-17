@@ -4,7 +4,7 @@
   // - autosaves unsaved drafts to IndexedDB every 2 s, offers them back on reopen;
   // - keeps the file's line endings and trailing newline;
   // - Ctrl/Cmd+S saves; leaving with unsaved changes asks first.
-  import { onDestroy, onMount } from 'svelte';
+  import { onDestroy, onMount, untrack } from 'svelte';
   import { beforeNavigate } from '$app/navigation';
   import { contentUrl } from '$lib/api';
   import { join, parent } from '$lib/format';
@@ -39,7 +39,10 @@
   // the path changes, so these never go stale.
   const name = $derived(path.slice(path.lastIndexOf('/') + 1));
   const isMarkdown = $derived(/\.(md|markdown)$/i.test(name));
-  const key = $derived(draftKey(userId, mountId, path));
+  // The mount the file was opened from: the page's mount follows the folder
+  // being browsed and may change while this editor is open.
+  const openedMount = untrack(() => mountId);
+  const key = $derived(draftKey(userId, openedMount, path));
 
   let host: HTMLDivElement;
   let diffHost = $state<HTMLDivElement>();

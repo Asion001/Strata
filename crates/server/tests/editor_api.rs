@@ -92,6 +92,11 @@ async fn exercise(t: &TestApp, dir: &str) {
         put(t, &f, "x", &[]).await.0,
         StatusCode::PRECONDITION_REQUIRED
     );
+    // "any version" would skip the conflict check
+    assert_eq!(
+        put(t, &f, "x", &[("if-match", "*")]).await.0,
+        StatusCode::BAD_REQUEST
+    );
     // save with the right ETag
     let (s, _, h) = put(t, &f, "# two\n", &[("if-match", &e1)]).await;
     assert_eq!(s, StatusCode::OK);
