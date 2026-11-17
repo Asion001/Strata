@@ -46,8 +46,7 @@ const COLS: &str = "id, owner_id, name, kind, config_enc, capabilities, is_defau
 
 impl Row {
     fn view(self, st: &AppState) -> ApiResult<ConnectionView> {
-        let cfg: ConnectionConfig = serde_json::from_slice(&st.secrets.decrypt(&self.config_enc)?)
-            .map_err(|e| ApiError::Internal(e.into()))?;
+        let cfg = st.decrypt_config(&self.config_enc)?;
         Ok(ConnectionView {
             id: self.id,
             owner_id: self.owner_id,
@@ -64,54 +63,36 @@ impl Row {
 }
 
 /// Compute and store a connection's storage location (see migration 0006).
+/// When none can be computed (undecryptable config, invalid path) the stored
+/// one is cleared rather than trusted.
 pub async fn store_location(st: &AppState, id: i64) -> ApiResult<(String, String)> {
-    // Optimistic: computed from the config as read, written only if that is
-    // still the config (a concurrent edit stores its own location in the same
-    // statement as its config). Raced? Read again.
-    for _ in 0..5 {
-        let (enc, cfg) = st.connection_config_enc(id).await?;
-        let loc = match cfg.location(&st.cfg.local_base) {
-            Ok(l) => l,
-            Err(e) => {
-                // No valid location: clear any stale one rather than trust it.
-                sqlx::query(
-                    "UPDATE connections SET storage_id = NULL, storage_folder = NULL WHERE id = $1 AND config_enc = $2",
-                )
-                .bind(id)
-                .bind(&enc)
-                .execute(&st.db)
-                .await?;
-                return Err(ApiError::Internal(e));
-            }
-        };
-        let r = sqlx::query(
-            "UPDATE connections SET storage_id = $2, storage_folder = $3
-             WHERE id = $1 AND config_enc = $4
-               AND (storage_id IS DISTINCT FROM $2 OR storage_folder IS DISTINCT FROM $3)",
-        )
-        .bind(id)
-        .bind(&loc.0)
-        .bind(&loc.1)
-        .bind(&enc)
-        .execute(&st.db)
-        .await?;
-        if r.rows_affected() == 1 {
-            return Ok(loc);
-        }
-        // Nothing written: either already up to date, or the config changed.
-        let still: bool =
-            sqlx::query_scalar("SELECT config_enc = $2 FROM connections WHERE id = $1")
-                .bind(id)
-                .bind(&enc)
-                .fetch_one(&st.db)
-                .await?;
-        if still {
-            return Ok(loc);
-        }
-    }
-    Err(ApiError::Internal(anyhow::anyhow!(
-        "connection {id} kept changing"
-    )))
+    // The row lock orders this against a concurrent `update`, which writes
+    // its config and location together.
+    let mut tx = st.db.begin().await?;
+    let enc: Vec<u8> =
+        sqlx::query_scalar("SELECT config_enc FROM connections WHERE id = $1 FOR UPDATE")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or(ApiError::NotFound)?;
+    let loc = st
+        .decrypt_config(&enc)
+        .and_then(|cfg| cfg.location(&st.cfg.local_base).map_err(ApiError::Internal));
+    let (sid, folder) = match &loc {
+        Ok((sid, folder)) => (Some(sid.as_str()), Some(folder.as_str())),
+        Err(_) => (None, None),
+    };
+    sqlx::query(
+        "UPDATE connections SET storage_id = $2, storage_folder = $3
+         WHERE id = $1 AND (storage_id IS DISTINCT FROM $2 OR storage_folder IS DISTINCT FROM $3)",
+    )
+    .bind(id)
+    .bind(sid)
+    .bind(folder)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    loc
 }
 
 /// Recompute every connection's location at start-up, so rows written by

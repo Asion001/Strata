@@ -91,22 +91,14 @@ impl AppState {
 
     /// Decrypt a connection's config.
     pub async fn connection_config(&self, connection_id: i64) -> ApiResult<ConnectionConfig> {
-        Ok(self.connection_config_enc(connection_id).await?.1)
-    }
-
-    /// A connection's encrypted config as stored, and its decrypted form.
-    pub async fn connection_config_enc(
-        &self,
-        connection_id: i64,
-    ) -> ApiResult<(Vec<u8>, ConnectionConfig)> {
         let enc: Vec<u8> = sqlx::query_scalar("SELECT config_enc FROM connections WHERE id = $1")
             .bind(connection_id)
             .fetch_one(&self.db)
             .await?;
-        let cfg = self.decrypt_config(&enc)?;
-        Ok((enc, cfg))
+        self.decrypt_config(&enc)
     }
 
+    /// Decrypt and parse a stored `config_enc`.
     pub fn decrypt_config(&self, enc: &[u8]) -> ApiResult<ConnectionConfig> {
         let plain = self.secrets.decrypt(enc)?;
         serde_json::from_slice(&plain).map_err(|e| ApiError::Internal(e.into()))

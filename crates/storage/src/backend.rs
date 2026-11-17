@@ -69,7 +69,10 @@ impl ConnectionConfig {
                 ("local".into(), canonical_folder(path)?)
             }
             Self::S3 {
-                bucket, endpoint, ..
+                bucket,
+                endpoint,
+                root,
+                ..
             } => {
                 let host = match endpoint.as_deref() {
                     None | Some("") => "s3.amazonaws.com".to_string(),
@@ -81,24 +84,13 @@ impl ConnectionConfig {
                 } else {
                     host
                 };
-                (format!("s3:{host}|{bucket}"), self.remote_root()?)
+                (format!("s3:{host}|{bucket}"), remote_root(root)?)
             }
-            Self::Ftp { endpoint, .. } => (
+            Self::Ftp { endpoint, root, .. } => (
                 format!("ftp:{}", endpoint_host(endpoint, &[21, 990])),
-                self.remote_root()?,
+                remote_root(root)?,
             ),
         })
-    }
-
-    /// The canonical root folder of a remote (S3/FTP) connection: the one
-    /// value both `operator` and `location` use. Empty for local ones.
-    fn remote_root(&self) -> Result<String> {
-        match self {
-            Self::S3 { root, .. } | Self::Ftp { root, .. } => {
-                canonical_folder(root.as_deref().unwrap_or(""))
-            }
-            Self::Local { .. } => Ok(String::new()),
-        }
     }
 
     /// A copy with secrets blanked, safe to send to the UI.
@@ -180,7 +172,7 @@ impl ConnectionConfig {
                 endpoint,
                 access_key_id,
                 secret_access_key,
-                root: _,
+                root,
             } => {
                 let mut b = services::S3::default()
                     .bucket(bucket)
@@ -191,7 +183,7 @@ impl ConnectionConfig {
                     b = b.endpoint(e);
                 }
                 // The canonical root, exactly what `location` records.
-                let r = self.remote_root()?;
+                let r = remote_root(root)?;
                 if !r.is_empty() {
                     b = b.root(&format!("/{r}"));
                 }
@@ -201,7 +193,7 @@ impl ConnectionConfig {
                 endpoint,
                 user,
                 password,
-                root: _,
+                root,
             } => {
                 let mut b = services::Ftp::default().endpoint(endpoint);
                 if let Some(u) = user.as_deref().filter(|u| !u.is_empty()) {
@@ -211,7 +203,7 @@ impl ConnectionConfig {
                     b = b.password(p);
                 }
                 // The canonical root, exactly what `location` records.
-                let r = self.remote_root()?;
+                let r = remote_root(root)?;
                 if !r.is_empty() {
                     b = b.root(&format!("/{r}"));
                 }
@@ -222,6 +214,12 @@ impl ConnectionConfig {
             .layer(TimeoutLayer::new().with_timeout(Duration::from_secs(60)))
             .layer(RetryLayer::new().with_max_times(3)))
     }
+}
+
+/// The canonical root folder of a remote (S3/FTP) connection: the one value
+/// both `operator` and `location` use.
+fn remote_root(root: &Option<String>) -> Result<String> {
+    canonical_folder(root.as_deref().unwrap_or(""))
 }
 
 /// The one canonical form of a folder inside a storage, for every backend:

@@ -71,8 +71,12 @@
   let draftTimer: ReturnType<typeof setInterval>;
   /** The text last stored as this tab's draft (null: nothing stored yet). */
   let lastDraft: string | null = null;
-  /** After a failed draft write, wait before trying the same text again. */
+  /** After a failed draft write, that text isn't tried again until `retryAfter`
+   *  (new text is tried at once). */
+  let failedText: string | null = null;
   let retryAfter = 0;
+  /** Draft writes run one at a time, in order. */
+  let draftQueue: Promise<void> = Promise.resolve();
 
   let destroyed = false;
   /** This editor instance: drafts record which tab wrote them. */
@@ -199,30 +203,45 @@
     mergeView?.destroy();
   });
 
-  async function autosave() {
+  function autosave(): Promise<void> {
+    draftQueue = draftQueue.then(writeDraft, writeDraft);
+    return draftQueue;
+  }
+
+  /** Run after any draft write in flight, so it can't land afterwards. */
+  function afterDrafts(fn: () => Promise<unknown>): Promise<void> {
+    const run = async () => {
+      await fn().catch(() => {});
+    };
+    draftQueue = draftQueue.then(run, run);
+    return draftQueue;
+  }
+
+  async function writeDraft() {
     if (!editor || !dirty) return;
     // Only while this user is still the one signed in here (any tab may
     // have signed out); checked again after writing, since a sign-out can
     // land in between.
     if (!isSignedIn(userId)) return;
-    if (Date.now() < retryAfter) return;
     const text = editor.getDoc();
     if (text === lastDraft) return;
-    lastDraft = text;
+    if (text === failedText && Date.now() < retryAfter) return;
     // This tab's own entry: other tabs' drafts (and a recovery offer still
     // on screen) are never overwritten.
     try {
       await saveTabDraft(key, tab, { baseEtag: etag, baseHash, text, savedAt: Date.now() });
     } catch {
-      lastDraft = null; // not stored: try again, but not on every tick
+      // Not stored: try this text again later, not on every tick.
+      failedText = text;
       retryAfter = Date.now() + 30_000;
       return;
     }
-    retryAfter = 0;
+    failedText = null;
     if (!isSignedIn(userId)) {
       await clearTabDraft(key, tab).catch(() => {});
-      lastDraft = null; // not stored after all: write it again once allowed
+      return;
     }
+    lastDraft = text;
   }
 
   async function restoreDraft() {
@@ -247,6 +266,7 @@
         return;
       }
       lastDraft = d.text;
+      failedText = null;
       markOfferSeen(d);
     } catch {}
   }
@@ -300,7 +320,7 @@
       savedDoc = doc;
       dirty = editor.getDoc() !== savedDoc;
       lastDraft = null;
-      await clearAfterSave(key, tab, doc).catch(() => {});
+      await afterDrafts(() => clearAfterSave(key, tab, doc));
       status = 'Saved';
       setTimeout(() => status === 'Saved' && (status = ''), 2000);
     } catch (e) {
@@ -326,7 +346,7 @@
           // editor; the folder shows the copy.
           closeConflict();
           dirty = false;
-          await clearTabDraft(key, tab).catch(() => {});
+          await afterDrafts(() => clearTabDraft(key, tab));
           alert(msg);
           onclose();
         }
@@ -360,7 +380,7 @@
       applyRules(f);
       dirty = false;
       lastDraft = null;
-      await clearTabDraft(key, tab).catch(() => {});
+      await afterDrafts(() => clearTabDraft(key, tab));
       closeConflict();
       status = message;
     } catch (e) {

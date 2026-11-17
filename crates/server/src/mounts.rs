@@ -206,12 +206,9 @@ pub async fn storage_root_if_readable(
     let (id, folder) = match stored {
         (Some(id), Some(folder), _) => (id, folder),
         (_, _, enc) => {
-            let cfg: Option<strata_storage::ConnectionConfig> = st
-                .secrets
-                .decrypt(&enc)
-                .ok()
-                .and_then(|p| serde_json::from_slice(&p).ok());
-            let Some(cfg) = cfg else { return Ok(None) };
+            let Ok(cfg) = st.decrypt_config(&enc) else {
+                return Ok(None);
+            };
             let Ok(loc) = cfg.location(&st.cfg.local_base) else {
                 return Ok(None);
             };
