@@ -1,3 +1,66 @@
+/*
+ * Tailwind v4 and shadcn-svelte foundation.
+ *
+ * Tailwind's preflight (its CSS reset) is left out on purpose for now: the
+ * existing styles below assume browser defaults, so loading it would change
+ * how current pages look. It comes in with the new app shell, when the pages
+ * that depend on those defaults are rebuilt.
+ *
+ * Everything in this file outside @layer is unlayered, so it always wins over
+ * Tailwind utilities. That keeps today's look intact while new components
+ * use utilities.
+ */
+@layer theme, base, components, utilities;
+@import 'tailwindcss/theme.css' layer(theme);
+@import 'tailwindcss/utilities.css' layer(utilities);
+@import 'tw-animate-css';
+
+/* Unit tests mention class names that the app itself never uses. */
+@source not './**/*.test.ts';
+
+/* `dark:` follows the OS setting, the same as the variables below. */
+@custom-variant dark (@media (prefers-color-scheme: dark));
+
+/*
+ * shadcn-svelte's color names, mapped onto Strata's existing variables so old
+ * and new UI share one palette. Strata's --muted is a text color, while
+ * shadcn's "muted" is a background, so the mapping goes through Tailwind's
+ * --color-* names instead of redefining --muted.
+ */
+@theme inline {
+  --color-background: var(--bg);
+  --color-foreground: var(--text);
+  --color-card: var(--panel);
+  --color-card-foreground: var(--text);
+  --color-popover: var(--panel);
+  --color-popover-foreground: var(--text);
+  --color-primary: var(--accent);
+  --color-primary-foreground: var(--accent-text);
+  --color-secondary: var(--hover);
+  --color-secondary-foreground: var(--text);
+  --color-muted: var(--hover);
+  --color-muted-foreground: var(--muted);
+  --color-accent: var(--hover);
+  --color-accent-foreground: var(--text);
+  --color-destructive: var(--danger);
+  --color-success: var(--ok);
+  --color-border: var(--border);
+  --color-input: var(--border);
+  --color-ring: var(--accent);
+  --color-sidebar: var(--panel);
+  --color-sidebar-foreground: var(--text);
+  --color-sidebar-primary: var(--accent);
+  --color-sidebar-primary-foreground: var(--accent-text);
+  --color-sidebar-accent: var(--hover);
+  --color-sidebar-accent-foreground: var(--text);
+  --color-sidebar-border: var(--border);
+  --color-sidebar-ring: var(--accent);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
 :root {
   --bg: #f8fafc;
   --panel: #ffffff;
