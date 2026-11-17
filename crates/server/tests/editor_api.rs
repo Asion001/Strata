@@ -6,8 +6,16 @@ use axum::http::StatusCode;
 use common::*;
 use serde_json::json;
 
+/// What the editor knows: for each ETag it saw, the BLAKE3 of those bytes
+/// (sent as X-Strata-Base-Hash with If-Match, like the real client).
+fn bases() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
+    static B: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
+        std::sync::OnceLock::new();
+    B.get_or_init(Default::default)
+}
+
 async fn get_etag(t: &TestApp, path: &str) -> String {
-    let (s, _, h) = t
+    let (s, body, h) = t
         .raw(
             "GET",
             &format!("/api/files/content?path={}", enc(path)),
@@ -16,7 +24,12 @@ async fn get_etag(t: &TestApp, path: &str) -> String {
         )
         .await;
     assert_eq!(s, StatusCode::OK, "GET {path}");
-    h["etag"].to_str().unwrap().to_string()
+    let e = h["etag"].to_str().unwrap().to_string();
+    bases()
+        .lock()
+        .unwrap()
+        .insert(e.clone(), blake3::hash(&body).to_hex().to_string());
+    e
 }
 
 async fn put(
@@ -25,14 +38,34 @@ async fn put(
     body: &str,
     hdrs: &[(&str, &str)],
 ) -> (StatusCode, serde_json::Value, axum::http::HeaderMap) {
+    // Like the editor: an If-Match comes with the hash of its base bytes,
+    // unless the test says otherwise ("x-strata-base-hash": "none").
+    let mut hdrs: Vec<(&str, String)> = hdrs.iter().map(|(k, v)| (*k, v.to_string())).collect();
+    let has_base = hdrs.iter().any(|(k, _)| *k == "x-strata-base-hash");
+    if !has_base
+        && let Some((_, e)) = hdrs.iter().find(|(k, _)| *k == "if-match")
+        && let Some(b) = bases().lock().unwrap().get(e).cloned()
+    {
+        hdrs.push(("x-strata-base-hash", b));
+    }
+    hdrs.retain(|(k, v)| !(*k == "x-strata-base-hash" && v == "none"));
+    let hdrs: Vec<(&str, &str)> = hdrs.iter().map(|(k, v)| (*k, v.as_str())).collect();
     let (s, b, h) = t
         .raw(
             "PUT",
             &format!("/api/files/content?path={}", enc(path)),
             Body::from(body.to_string()),
-            hdrs,
+            &hdrs,
         )
         .await;
+    if s == StatusCode::OK
+        && let Some(e) = h.get("etag")
+    {
+        bases().lock().unwrap().insert(
+            e.to_str().unwrap().to_string(),
+            blake3::hash(body.as_bytes()).to_hex().to_string(),
+        );
+    }
     (s, serde_json::from_slice(&b).unwrap_or_default(), h)
 }
 
@@ -111,6 +144,28 @@ async fn conditional_saves_on_raw_mounts() {
     )
     .await;
     exercise(&t, "Raw").await;
+    // raw If-Match without the base hash is refused: metadata alone can miss changes
+    put(&t, "Raw/b.txt", "x", &[("if-none-match", "*")]).await;
+    let e = get_etag(&t, "Raw/b.txt").await;
+    let (s, _, _) = put(
+        &t,
+        "Raw/b.txt",
+        "y",
+        &[("if-match", &e), ("x-strata-base-hash", "none")],
+    )
+    .await;
+    assert_eq!(s, StatusCode::PRECONDITION_REQUIRED);
+    // hashed versions are content hashes already: no base needed
+    put(&t, "h.txt", "x", &[("if-none-match", "*")]).await;
+    let e = get_etag(&t, "h.txt").await;
+    let (s, _, _) = put(
+        &t,
+        "h.txt",
+        "y",
+        &[("if-match", &e), ("x-strata-base-hash", "none")],
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
 }
 
 #[tokio::test]
@@ -296,6 +351,16 @@ async fn coarse_mtime_storage_still_detects_same_size_changes() {
     write(b"bbbb"); // same size, same mtime, different content
     // the metadata can't tell the versions apart...
     assert_eq!(get_etag(&t, "Raw/c.txt").await, e);
+    // ...so such files are never revalidated into a stale 304
+    let (s, body, _) = t
+        .raw(
+            "GET",
+            "/api/files/content?path=Raw/c.txt",
+            Body::empty(),
+            &[("if-none-match", &e)],
+        )
+        .await;
+    assert_eq!((s, body.as_slice()), (StatusCode::OK, &b"bbbb"[..]));
     // ...but the editor sends the hash of the bytes it is based on
     let base_a = blake3::hash(b"aaaa").to_hex().to_string();
     let (s, _, _) = put(

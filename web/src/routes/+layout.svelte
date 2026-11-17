@@ -11,7 +11,11 @@
   $effect(() => {
     if (isPublic || session.checked) return;
     api('GET', '/api/auth/me')
-      .then((u) => (session.user = u))
+      .then(async (u) => {
+        session.user = u;
+        const { markSignedIn } = await import('$lib/editor/drafts');
+        markSignedIn(u.id);
+      })
       .catch(() => goto('/login?next=' + encodeURIComponent(page.url.pathname + page.url.search)))
       .finally(() => (session.checked = true));
   });

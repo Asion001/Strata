@@ -55,11 +55,28 @@ export async function expireDrafts(now = Date.now()): Promise<void> {
   for (const d of all) if (now - d.savedAt > DRAFT_TTL_MS) await clearDraft(d.key);
 }
 
-/** Tell other tabs that the signed-in user changed (they stop autosaving). */
-export function announceAuthChange() {
+// Who is signed in, shared by every tab (localStorage is synchronous and
+// cross-tab). Autosave only writes while it names the draft's user.
+const AUTH_KEY = 'strata-signed-in';
+
+export function markSignedIn(userId: number) {
   try {
-    new BroadcastChannel('strata-auth').postMessage('changed');
+    localStorage.setItem(AUTH_KEY, String(userId));
   } catch {}
+}
+
+export function markSignedOut() {
+  try {
+    localStorage.removeItem(AUTH_KEY);
+  } catch {}
+}
+
+export function isSignedIn(userId: number): boolean {
+  try {
+    return localStorage.getItem(AUTH_KEY) === String(userId);
+  } catch {
+    return true; // no storage at all: drafts can't outlive the tab anyway
+  }
 }
 
 /** Forget every draft in this browser (on sign-out: drafts hold file

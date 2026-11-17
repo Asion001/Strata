@@ -9,7 +9,7 @@
   import { contentUrl } from '$lib/api';
   import { join, parent } from '$lib/format';
   import { MAX_EDIT_BYTES, MAX_VIEW_BYTES, conflictName, decodeUtf8, fromEditor, looksBinary, toEditor, type Eol } from './textio';
-  import { clearDraft, draftKey, expireDrafts, getDraft, saveDraft, type Draft } from './drafts';
+  import { clearDraft, draftKey, expireDrafts, getDraft, isSignedIn, saveDraft, type Draft } from './drafts';
   import { createBLAKE3 } from 'hash-wasm';
 
   let {
@@ -39,12 +39,15 @@
   let status = $state('');
   let etag = $state<string | null>(null);
   /** BLAKE3 of the bytes the current edit is based on (sent with saves). */
-  let baseHash: string | null = null;
+  let baseHash = $state<string | null>(null);
 
+  // One BLAKE3 instance (WASM) per editor, reused for every hash.
+  let hasher: Awaited<ReturnType<typeof createBLAKE3>> | null = null;
   async function blake3Hex(bytes: Uint8Array): Promise<string> {
-    const h = await createBLAKE3();
-    h.update(bytes);
-    return h.digest('hex');
+    hasher ??= await createBLAKE3();
+    hasher.init();
+    hasher.update(bytes);
+    return hasher.digest('hex');
   }
   let eol: Eol = '\n';
   let savedDoc = '';
@@ -81,7 +84,7 @@
     return out;
   }
 
-  async function fetchText(): Promise<{ text: string; etag: string | null; hash: string; tooBig: boolean; utf8: boolean }> {
+  async function fetchText(): Promise<{ text: string; etag: string | null; hash: string | null; tooBig: boolean; utf8: boolean }> {
     const r = await fetch(contentUrl(path), { cache: 'no-store' });
     if (!r.ok) throw new Error(r.status === 404 ? 'The file no longer exists.' : `Could not open the file (HTTP ${r.status}).`);
     // Never pull a huge file into the tab: stop at the size limit, whatever
@@ -93,11 +96,13 @@
     const bytes = await readCapped(r, MAX_VIEW_BYTES);
     if (looksBinary(bytes)) throw new Error('This looks like a binary file, so it cannot be opened as text.');
     const strict = decodeUtf8(bytes);
+    const tooBig = bytes.length > MAX_EDIT_BYTES;
     return {
       text: strict ?? new TextDecoder('utf-8').decode(bytes),
       etag: r.headers.get('etag'),
-      hash: await blake3Hex(bytes),
-      tooBig: bytes.length > MAX_EDIT_BYTES,
+      // Only editable files need their base hash (sent with saves).
+      hash: tooBig || strict === null ? null : await blake3Hex(bytes),
+      tooBig,
       utf8: strict !== null
     };
   }
@@ -165,16 +170,8 @@
     }
   });
 
-  // Another tab signed out (or someone else signed in): stop writing drafts.
-  let auth: BroadcastChannel | null = null;
-  try {
-    auth = new BroadcastChannel('strata-auth');
-    auth.onmessage = () => clearInterval(draftTimer);
-  } catch {}
-
   onDestroy(() => {
     destroyed = true;
-    auth?.close();
     clearInterval(draftTimer);
     clearTimeout(previewTimer);
     editor?.destroy();
@@ -183,10 +180,15 @@
 
   async function autosave() {
     if (!editor || !dirty) return;
+    // Only while this user is still the one signed in here (any tab may
+    // have signed out); checked again after writing, since a sign-out can
+    // land in between.
+    if (!isSignedIn(userId)) return;
     const text = editor.getDoc();
     if (text === lastDraft) return;
     lastDraft = text;
     await saveDraft({ key, baseEtag: etag, baseHash, text, savedAt: Date.now() }).catch(() => {});
+    if (!isSignedIn(userId)) await clearDraft(key).catch(() => {});
   }
 
   function restoreDraft() {
@@ -220,6 +222,9 @@
     const pre: Record<string, string> = etag ? { 'if-match': etag } : { 'if-none-match': '*' };
     if (etag && baseHash) pre['x-strata-base-hash'] = baseHash;
     try {
+      // The hash of what we're about to save becomes the next base: compute
+      // it first, so a hashing problem can't leave a saved file half-tracked.
+      const nextHash = await blake3Hex(bytes);
       const r = await put(path, bytes, pre);
       const body = await r.json().catch(() => ({}));
       if (r.status === 412) {
@@ -229,7 +234,7 @@
       }
       if (!r.ok) throw new Error(body.error ?? `HTTP ${r.status}`);
       etag = r.headers.get('etag') ?? body.etag;
-      baseHash = await blake3Hex(bytes);
+      baseHash = nextHash;
       savedDoc = doc;
       dirty = editor.getDoc() !== savedDoc;
       lastDraft = '';
@@ -366,7 +371,7 @@
   {#if notice}<div class="banner">{notice}</div>{/if}
   {#if draftOffer}
     <div class="banner">
-      Unsaved changes from {new Date(draftOffer.savedAt).toLocaleString()} were found{draftOffer.baseEtag !== etag ? ' (the file has changed since)' : ''}.
+      Unsaved changes from {new Date(draftOffer.savedAt).toLocaleString()} were found{draftOffer.baseEtag !== etag || (draftOffer.baseHash ?? null) !== baseHash ? ' (the file has changed since)' : ''}.
       <button onclick={restoreDraft}>Restore</button>
       <button onclick={discardDraft}>Discard</button>
     </div>

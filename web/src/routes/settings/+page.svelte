@@ -14,8 +14,8 @@
   async function logout() {
     await api('POST', '/api/auth/logout');
     // Unsaved editor drafts hold file contents: don't leave them behind.
-    const { announceAuthChange, clearAllDrafts } = await import('$lib/editor/drafts');
-    announceAuthChange();
+    const { markSignedOut, clearAllDrafts } = await import('$lib/editor/drafts');
+    markSignedOut(); // stops autosave in every tab before the drafts go
     await clearAllDrafts();
     location.href = '/login';
   }

@@ -86,6 +86,10 @@ async fn head_bytes(st: &AppState, m: &Mount, rel: &str, node: &Node) -> ApiResu
 
 /// Cache key for a file version's classification.
 fn class_key(m: &Mount, rel: &str, node: &Node) -> Option<String> {
+    // A coarse version may not change when the content does: don't cache by it.
+    if vfs::is_coarse(node) {
+        return None;
+    }
     node.etag
         .as_ref()
         .map(|e| format!("{}|{rel}|{e}", m.volume_id))
@@ -134,7 +138,9 @@ pub async fn serve(
         safe::Purpose::ImagePreview => format!("\"r3i-{}\"", vfs::version(node)),
         safe::Purpose::Content { .. } => vfs::etag_for(node),
     });
+    // Coarse raw versions can stay the same across a change: never 304 them.
     if let (Some(et), Some(inm)) = (&etag, headers.get(header::IF_NONE_MATCH))
+        && !vfs::is_coarse(node)
         && inm.as_bytes() == et.as_bytes()
     {
         let mut resp = StatusCode::NOT_MODIFIED.into_response();

@@ -205,9 +205,11 @@ fn meta_mtime(meta: &opendal::Metadata) -> DateTime<Utc> {
         .unwrap_or_else(Utc::now)
 }
 
+/// Our own etag for raw entries whose backend gives none:
+/// `m:<size hex>-<mtime ns hex>` (the prefix lets `is_coarse` recognise it).
 fn raw_etag(meta: &opendal::Metadata) -> String {
     format!(
-        "{:x}-{:x}",
+        "m:{:x}-{:x}",
         meta.content_length(),
         meta.last_modified()
             .map(|t| t.into_inner().as_nanosecond())
@@ -789,7 +791,7 @@ pub fn etag_for(node: &Node) -> String {
 }
 
 /// Largest file whose content is compared on a conditional raw save.
-pub const BASE_CHECK_MAX: i64 = 20 * 1024 * 1024;
+pub const BASE_CHECK_MAX: i64 = 5 * 1024 * 1024;
 
 /// What a write expects to find at the target.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -819,8 +821,40 @@ pub fn check_expect(expect: &Expect, current: Option<&Node>) -> ApiResult<()> {
     }
 }
 
-/// Full check for a raw entry: metadata, then (when the client sent the
-/// hash of its base bytes) the content itself.
+/// A raw entry whose version can miss a change: no backend etag and an
+/// mtime of whole seconds at best, so a same-size rewrite within the same
+/// second keeps its version. Such files are never answered with 304 and
+/// their type isn't cached; saves are protected by the base-content check.
+pub fn is_coarse(node: &Node) -> bool {
+    if node.chunks.is_some() {
+        return false;
+    }
+    match node.etag.as_deref() {
+        None => true,
+        Some(e) => match e.strip_prefix("m:") {
+            Some(rest) => rest
+                .rsplit_once('-')
+                .and_then(|(_, ns)| u128::from_str_radix(ns, 16).ok())
+                .is_none_or(|ns| ns % 1_000_000_000 == 0),
+            None => false,
+        },
+    }
+}
+
+/// BLAKE3 of a file's content, read from an already-stat'ed node.
+async fn digest_node(st: &AppState, m: &Mount, rel: &str, node: &Node) -> ApiResult<Hash> {
+    let mut s = read_stream(st, m, rel, node, 0, node.size as u64).await?;
+    let mut h = blake3::Hasher::new();
+    while let Some(b) = s.next().await {
+        h.update(&b.map_err(|e| ApiError::Internal(e.into()))?);
+    }
+    Ok(Hash(*h.finalize().as_bytes()))
+}
+
+/// Full check for a raw entry (call under the volume lock): metadata, then
+/// the content against the base hash the client's edit started from.
+/// Raw metadata can be too coarse to see every change, so a raw `If-Match`
+/// without a base hash is refused (428) rather than trusted.
 async fn check_expect_content(
     st: &AppState,
     m: &Mount,
@@ -829,16 +863,15 @@ async fn check_expect_content(
 ) -> ApiResult<()> {
     let current = current_file(st, m, rel).await?;
     check_expect(expect, current.as_ref())?;
-    if let (
-        Expect::Etag {
-            base: Some(base), ..
-        },
-        Some(n),
-    ) = (expect, &current)
-        && n.size <= BASE_CHECK_MAX
-        && content_digest(st, m, rel).await? != *base
-    {
-        return Err(ApiError::PreconditionFailed(Some(etag_for(n))));
+    if let (Expect::Etag { base, .. }, Some(n)) = (expect, &current) {
+        let Some(base) = base else {
+            return Err(ApiError::PreconditionRequired);
+        };
+        // An edit can only be based on a file the editor could save
+        // (BASE_CHECK_MAX); anything bigger has changed by definition.
+        if n.size > BASE_CHECK_MAX || digest_node(st, m, rel, n).await? != *base {
+            return Err(ApiError::PreconditionFailed(Some(etag_for(n))));
+        }
     }
     Ok(())
 }
@@ -1009,10 +1042,17 @@ pub async fn write_stream_if(
     } else {
         let op = op(st, m).await?;
         let path = backend_path(m, rel, false);
-        let created_dirs = if *expect != Expect::Any {
-            missing_parents(&op, m, rel).await
+        // Conditional writes (editor saves, at most 5 MB) are checked under
+        // the volume lock *before* any byte is written and keep the lock
+        // until the atomic close: a refused save writes nothing at all (no
+        // temp files on backends that can't abort, no parent folders).
+        // Plain writes (uploads, copies) lock only around the final close.
+        let early = if *expect != Expect::Any {
+            let l = lock_volume(st, m.volume_id).await?;
+            check_expect_content(st, m, rel, expect).await?;
+            Some(l)
         } else {
-            Vec::new()
+            None
         };
         let mut w = op.writer_with(&path).chunk(8 << 20).await?;
         while let Some(b) = input.next().await {
@@ -1028,25 +1068,16 @@ pub async fn write_stream_if(
         }
         // The atomic close makes the file visible: do it under the volume lock
         // so the journal entry lands in the same order as the change.
-        // The precondition is checked here, right before the atomic close
-        // makes the new content visible (the backend writer only creates
-        // parent folders at close, so a refused save leaves no trace).
-        let lock = match lock_volume(st, m.volume_id).await {
-            Ok(l) => l,
-            Err(e) => {
-                let _ = w.abort().await;
-                return Err(e);
-            }
+        let lock = match early {
+            Some(l) => l,
+            None => match lock_volume(st, m.volume_id).await {
+                Ok(l) => l,
+                Err(e) => {
+                    let _ = w.abort().await;
+                    return Err(e);
+                }
+            },
         };
-        if *expect != Expect::Any
-            && let Err(e) = check_expect_content(st, m, rel, expect).await
-        {
-            let _ = w.abort().await;
-            // The writer may have created parent folders that were missing
-            // when it opened (the file vanished meanwhile): remove those.
-            remove_created_dirs(&op, m, &created_dirs).await;
-            return Err(e);
-        }
         w.close().await?;
         let node = stat(st, m, rel).await?;
         let created = cache_node(st, m, rel, &node).await?;
@@ -1062,48 +1093,6 @@ pub async fn write_stream_if(
         .await?;
         lock.release().await?;
         Ok((Hash(*whole.finalize().as_bytes()), node))
-    }
-}
-
-/// Parent folders of `rel` that don't exist on a raw backend right now
-/// (deepest first), so a refused write can remove exactly the ones its
-/// writer created.
-async fn missing_parents(op: &Operator, m: &Mount, rel: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut dir = paths::split(rel)
-        .map(|(p, _)| p.to_string())
-        .unwrap_or_default();
-    while !dir.is_empty()
-        && !op
-            .exists(&backend_path(m, &dir, true))
-            .await
-            .unwrap_or(true)
-    {
-        out.push(dir.clone());
-        dir = paths::split(&dir)
-            .map(|(p, _)| p.to_string())
-            .unwrap_or_default();
-    }
-    out
-}
-
-/// Best effort: remove folders a refused write created, if still empty.
-async fn remove_created_dirs(op: &Operator, m: &Mount, dirs: &[String]) {
-    for dir in dirs {
-        let path = backend_path(m, dir, true);
-        let me = path.trim_start_matches('/').to_string();
-        match op.list(&path).await {
-            Ok(entries)
-                if entries
-                    .iter()
-                    .all(|e| e.path().trim_start_matches('/') == me) =>
-            {
-                if op.delete(&path).await.is_err() {
-                    return;
-                }
-            }
-            _ => return,
-        }
     }
 }
 
