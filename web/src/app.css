@@ -1,29 +1,24 @@
 /*
- * Tailwind v4 and shadcn-svelte setup. This only makes the tools available;
- * nothing on the existing pages changes yet.
+ * Tailwind v4 with its preflight reset, plus the shadcn-svelte palette.
  *
- * Only the theme and utilities layers load. Tailwind's preflight (its CSS
- * reset) is left out, and the existing styles below stay unlayered, so they
- * keep winning over any utility. So shadcn-svelte components are not
- * usable yet. The next UI step, which rebuilds the app shell with the first
- * components, finishes the setup against real components: preflight and
- * shadcn's base rule (theme border and outline colors), scoping the old
- * element styles, tw-animate-css, and the rem scale (the root font size is
- * 15px, so rem-based sizes come out about 6% smaller).
+ * The old pages were written against browser defaults and a few global
+ * element styles. Those styles now live in @layer base and apply only inside
+ * an element with class "legacy" (the layout puts it around old pages), and
+ * never inside a shadcn-svelte component (marked with data-slot). New UI
+ * outside .legacy starts from preflight and is styled with utilities. When
+ * a page is rebuilt, it leaves .legacy and these rules stop applying to it.
  *
- * `dark:` uses Tailwind's default, prefers-color-scheme, which is the same
- * switch the variables below use.
+ * Layer order, weakest first: theme, base, components, utilities. Svelte's
+ * scoped <style> blocks are unlayered and beat all of them.
+ *
+ * `dark:` uses Tailwind's default, prefers-color-scheme, the same switch the
+ * variables below use.
  */
-@layer theme, base, components, utilities;
-@import 'tailwindcss/theme.css' layer(theme);
-@import 'tailwindcss/utilities.css' layer(utilities) source(none);
+@import 'tailwindcss' source(none);
 
-/*
- * Only shadcn-svelte components generate utilities for now, so words in the
- * existing pages' styles can't turn into stray utility classes. The next
- * step widens this to the pages it rebuilds.
- */
-@source './lib/components/**/*.{svelte,ts}';
+/* App source generates utilities; unit tests are left out. */
+@source './**/*.{svelte,ts}';
+@source not './**/*.test.ts';
 
 /*
  * shadcn-svelte's palette, mapped onto Strata's existing variables so old and
@@ -119,7 +114,8 @@
   --radius: 10px;
   color-scheme: light dark;
   font-family: var(--font-sans);
-  font-size: 15px;
+  /* 16px keeps Tailwind's rem scale as designed; text is 15px from body. */
+  font-size: 16px;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -135,42 +131,58 @@
     --ok: #4ade80;
   }
 }
-* { box-sizing: border-box; }
-html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); }
-body { -webkit-tap-highlight-color: transparent; }
-a { color: var(--accent); text-decoration: none; }
-button, input, select {
-  font: inherit; color: inherit;
+/* shadcn-svelte's base rule: theme border and focus outline colors. */
+@layer base {
+  *, ::before, ::after { border-color: var(--border); outline-color: color-mix(in oklab, var(--ring) 50%, transparent); }
+  body { font-size: 15px; background: var(--bg); color: var(--text); -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; }
 }
-button {
-  background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
-  padding: 7px 12px; cursor: pointer; white-space: nowrap;
+
+/*
+ * Old pages: preflight is undone (back to browser defaults, which they were
+ * written against), then the global element styles they were built with.
+ * Scope: inside .legacy, but not inside shadcn-svelte components. The
+ * .legacy class gives the reset enough weight to beat preflight's element
+ * rules, and the element rules below one more step to beat the reset.
+ */
+@layer base {
+  .legacy { line-height: normal; }
+  :is(.legacy *):not(:where([data-slot], [data-slot] *)) {
+    margin: revert; padding: revert; border: revert; list-style: revert;
+    font-size: revert; font-weight: revert; display: revert; vertical-align: revert;
+
+    &:is(a) { color: var(--accent); }
+    &:is(button, input, select, textarea) { font: inherit; color: inherit; }
+    &:is(button) {
+      background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+      padding: 7px 12px; cursor: pointer; white-space: nowrap;
+      &:hover { background: var(--hover); }
+      &.primary { background: var(--accent); color: var(--accent-text); border-color: transparent; }
+      &.danger { color: var(--danger); }
+      &:disabled { opacity: .5; cursor: default; }
+    }
+    &:is(input, select) {
+      background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; width: 100%;
+      &:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+    }
+    &:is(label) { display: grid; gap: 4px; font-size: .9em; color: var(--muted); }
+    &:is(h1) { font-size: 1.4em; margin: 4px 0 16px; }
+    &:is(h2) { font-size: 1.1em; margin: 20px 0 10px; }
+    &:is(table) { width: 100%; }
+    &:is(td, th) { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--border); }
+  }
 }
-button:hover { background: var(--hover); }
-button.primary { background: var(--accent); color: var(--accent-text); border-color: transparent; }
-button.danger { color: var(--danger); }
-button:disabled { opacity: .5; cursor: default; }
-input, select {
-  background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; width: 100%;
+
+/* Old pages' shared helper classes. */
+@layer components {
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+  .muted { color: var(--muted); }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .grow { flex: 1; }
+  .error { color: var(--danger); }
+  .badge { font-size: .75em; padding: 1px 7px; border-radius: 99px; border: 1px solid var(--border); color: var(--muted); }
+  .badge.ok { color: var(--ok); border-color: currentColor; }
+  .badge.err { color: var(--danger); border-color: currentColor; }
+  .page { max-width: 960px; margin: 0 auto; padding: 16px; }
+  .stack { display: grid; gap: 12px; }
 }
-input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
-label { display: grid; gap: 4px; font-size: .9em; color: var(--muted); }
-.card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
-.muted { color: var(--muted); }
-.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-.grow { flex: 1; }
-.error { color: var(--danger); }
-.badge { font-size: .75em; padding: 1px 7px; border-radius: 99px; border: 1px solid var(--border); color: var(--muted); }
-.badge.ok { color: var(--ok); border-color: currentColor; }
-.badge.err { color: var(--danger); border-color: currentColor; }
-.page { max-width: 960px; margin: 0 auto; padding: 16px; }
-h1 { font-size: 1.4em; margin: 4px 0 16px; }
-h2 { font-size: 1.1em; margin: 20px 0 10px; }
-table { width: 100%; border-collapse: collapse; }
-td, th { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--border); }
-dialog {
-  border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel); color: var(--text);
-  padding: 20px; width: min(480px, calc(100vw - 32px));
-}
-dialog::backdrop { background: rgb(0 0 0 / .45); }
-.stack { display: grid; gap: 12px; }

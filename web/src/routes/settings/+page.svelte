@@ -24,6 +24,11 @@
 <div class="page">
   <h1>Settings</h1>
   <p>Signed in as <b>{session.user?.username}</b>. <button onclick={logout}>Sign out</button></p>
+  <!-- On phones the sidebar is hidden, so setup pages are reached from here. -->
+  <nav class="manage card" aria-label="Manage">
+    <a href="/connections">Connections</a>
+    {#if session.user?.is_admin}<a href="/admin">Users</a>{/if}
+  </nav>
   <h2>Change password</h2>
   <form class="card stack" onsubmit={change}>
     <label>Current password <input type="password" bind:value={old_password} autocomplete="current-password" required /></label>
@@ -34,3 +39,10 @@
   <h2>Install</h2>
   <p class="muted">On iPhone or iPad: open this site in Safari, tap Share, then “Add to Home Screen”. On desktop Chrome or Edge: use the install icon in the address bar.</p>
 </div>
+
+<style>
+  .manage { display: grid; padding: 4px 0; }
+  .manage a { padding: 12px 16px; color: var(--text); }
+  .manage a + a { border-top: 1px solid var(--border); }
+  @media (min-width: 768px) { .manage { display: none; } }
+</style>

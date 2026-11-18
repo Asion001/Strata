@@ -4,6 +4,7 @@
   import { api, contentUrl, previewUrl, thumbUrl, type Entry } from '$lib/api';
   import { bytes, when, join, parent, icon, isImage, isTextName } from '$lib/format';
   import { runUpload, type UploadTask } from '$lib/upload';
+  import { reloadMounts } from '$lib/mounts.svelte';
   import VirtualList from '$lib/VirtualList.svelte';
   import Editor from '$lib/editor/Editor.svelte';
   import { staleApp } from '$lib/lazy';
@@ -59,7 +60,8 @@
       ws.onmessage = () => {
         if (first) { first = false; return; }
         clearTimeout(timer);
-        timer = setTimeout(() => load(), 300);
+        // Renames and moves can shift mount paths too, so the sidebar refreshes.
+        timer = setTimeout(() => { load(); reloadMounts(); }, 300);
       };
       ws.onclose = () => { if (!closed) setTimeout(connect, 3000); };
     };
@@ -79,6 +81,7 @@
     try { await fn(); } catch (e) { alert((e as Error).message); }
     menu = null;
     await load();
+    reloadMounts();
   }
 
   const newFolder = () => {
@@ -292,9 +295,13 @@
   .item { text-align: left; border: 0; background: none; padding: 10px; border-radius: 8px; color: var(--text); display: block; }
   .item:hover { background: var(--hover); }
   .item.danger { color: var(--danger); }
+  @media (width < 48rem) {
+    /* Clear of the phone tab bar. */
+    .uploads { bottom: calc(72px + env(safe-area-inset-bottom)); }
+  }
   @media (max-width: 700px) {
     .date { display: none; }
-    .actions { width: 100%; }
+    .actions { width: 100%; flex-wrap: wrap; }
     .search { flex: 1; width: auto; }
     .sheet-bg { align-items: end; }
     .sheet { width: 100%; border-radius: 16px 16px 0 0; padding-bottom: max(12px, env(safe-area-inset-bottom)); }
