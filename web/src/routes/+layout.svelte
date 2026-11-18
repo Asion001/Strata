@@ -4,6 +4,7 @@
   import { afterNavigate, goto } from '$app/navigation';
   import { api } from '$lib/api';
   import { session } from '$lib/session.svelte';
+  import { cn } from '$lib/utils';
   import { markSignedIn } from '$lib/editor/drafts';
   import { reloadMounts } from '$lib/mounts.svelte';
   import AppSidebar from '$lib/components/shell/AppSidebar.svelte';
@@ -35,14 +36,14 @@
 </script>
 
 <!-- Old pages sit inside .legacy, which turns on the global element styles they
-     were built with (see app.css). Rebuilt pages drop it. -->
+     were built with (see app.css). Rebuilt pages (the file list so far) drop it. -->
 {#if isPublic}
   <div class="legacy contents">{@render children()}</div>
 {:else if session.user}
   <div class="flex h-dvh pt-[env(safe-area-inset-top)]">
     <AppSidebar class="hidden md:flex" />
     <div class="flex min-w-0 flex-1 flex-col">
-      <main class="legacy min-h-0 flex-1 overflow-auto md:pr-[env(safe-area-inset-right)]">{@render children()}</main>
+      <main class={cn(page.url.pathname !== '/' && 'legacy', 'min-h-0 flex-1 overflow-auto md:pr-[env(safe-area-inset-right)]')}>{@render children()}</main>
       <BottomNav class="md:hidden" />
     </div>
   </div>
