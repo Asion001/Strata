@@ -34,8 +34,9 @@ pub struct Inner {
     pub db: PgPool,
     pub cfg: Config,
     pub secrets: SecretBox,
-    /// connection id -> operator
-    pub ops: DashMap<i64, Operator>,
+    /// connection id -> operator, with a local connection's folder (kept
+    /// together, so a cached operator always has its folder check)
+    pub ops: DashMap<i64, (Operator, Option<LocalRoot>)>,
     /// connection id -> times its operator was forgotten (a config change),
     /// so an operator built from the old config isn't cached afterwards
     pub op_gens: DashMap<i64, u64>,
@@ -46,8 +47,6 @@ pub struct Inner {
     pub probe_locks: DashMap<i64, Arc<tokio::sync::Mutex<()>>>,
     /// A local connection's folder check still running (see `health`).
     pub root_checks: DashMap<i64, Arc<std::sync::atomic::AtomicUsize>>,
-    /// Local connections' folders, checked before every use (see `operator`).
-    pub local_roots: DashMap<i64, LocalRoot>,
     /// user id -> that user's mounts, longest path first
     pub mounts: DashMap<i64, Arc<Vec<Mount>>>,
     pub events: broadcast::Sender<ChangeEvent>,
@@ -104,7 +103,6 @@ impl AppState {
             offline: DashMap::new(),
             probe_locks: DashMap::new(),
             root_checks: DashMap::new(),
-            local_roots: DashMap::new(),
             mounts: DashMap::new(),
             events,
             decisions: quick_cache::sync::Cache::new(100_000),
@@ -142,11 +140,13 @@ impl AppState {
     /// connection is offline. Health probes use `operator_unchecked`.
     pub async fn operator(&self, connection_id: i64) -> ApiResult<Operator> {
         self.ensure_online(connection_id)?;
-        let op = self.operator_unchecked(connection_id).await?;
         // A local folder that is gone (an unmounted disk) is refused at once,
         // not only after three failed probes: a write would otherwise create
         // the folder again on the disk underneath.
-        if let Some(root) = self.local_roots.get(&connection_id).map(|r| r.clone()) {
+        let (op, root, fresh) = self.operator_and_root(connection_id).await?;
+        if let Some(root) = root
+            && !fresh
+        {
             self.check_root(connection_id, root, Duration::from_secs(5))
                 .await
                 .map_err(|_| missing_folder())?;
@@ -170,8 +170,18 @@ impl AppState {
 
     /// The operator whatever the connection's health (for probes).
     pub async fn operator_unchecked(&self, connection_id: i64) -> ApiResult<Operator> {
-        if let Some(op) = self.ops.get(&connection_id) {
-            return Ok(op.clone());
+        Ok(self.operator_and_root(connection_id).await?.0)
+    }
+
+    /// The (cached) operator and local folder; `fresh` when just built (its
+    /// folder was checked while building).
+    async fn operator_and_root(
+        &self,
+        connection_id: i64,
+    ) -> ApiResult<(Operator, Option<LocalRoot>, bool)> {
+        if let Some(e) = self.ops.get(&connection_id) {
+            let (op, root) = e.clone();
+            return Ok((op, root, false));
         }
         let seen = self.op_gens.get(&connection_id).map(|g| *g).unwrap_or(0);
         let cfg = self.connection_config(connection_id).await?;
@@ -184,18 +194,14 @@ impl AppState {
                 .map_err(|_| missing_folder())?;
         }
         let op = cfg.operator(&self.cfg.local_base)?;
-        match root {
-            Some(r) => self.local_roots.insert(connection_id, r),
-            None => self.local_roots.remove(&connection_id).map(|(_, r)| r),
-        };
         // Cached only if no config change landed meanwhile (the entry is
         // held across the insert, so a concurrent forget waits for it).
         let g = self.op_gens.entry(connection_id).or_insert(0);
         if *g == seen {
-            self.ops.insert(connection_id, op.clone());
+            self.ops.insert(connection_id, (op.clone(), root.clone()));
         }
         drop(g);
-        Ok(op)
+        Ok((op, root, true))
     }
 
     pub fn forget_operator(&self, connection_id: i64) {
@@ -229,6 +235,18 @@ impl LocalRoot {
             .join(format!("conn-{connection_id}"))
     }
 
+    /// Write the marker file (off the async threads).
+    pub async fn write_marker(dir: PathBuf, connection_id: i64) -> ApiResult<()> {
+        let m = Self::marker_path(&dir, connection_id);
+        tokio::task::spawn_blocking(move || {
+            std::fs::create_dir_all(m.parent().unwrap())?;
+            std::fs::write(&m, b"strata connection folder marker\n")
+        })
+        .await
+        .map_err(|e| ApiError::Internal(e.into()))?
+        .map_err(|e| ApiError::Internal(e.into()))
+    }
+
     /// Blocking check (see `AppState::check_root`).
     fn check(&self) -> Result<(), &'static str> {
         match std::fs::metadata(&self.dir) {
@@ -247,21 +265,25 @@ impl LocalRoot {
 
 impl AppState {
     /// Write a local connection's marker into its folder (just created or
-    /// confirmed) and record it.
-    pub async fn mark_root(&self, connection_id: i64, dir: PathBuf) -> ApiResult<()> {
-        let m = LocalRoot::marker_path(&dir, connection_id);
-        tokio::task::spawn_blocking(move || {
-            std::fs::create_dir_all(m.parent().unwrap())?;
-            std::fs::write(&m, b"strata connection folder marker\n")
-        })
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))?
-        .map_err(|e| ApiError::Internal(e.into()))?;
-        sqlx::query("UPDATE connections SET root_marker = TRUE WHERE id = $1")
-            .bind(connection_id)
-            .execute(&self.db)
-            .await?;
-        self.local_roots.remove(&connection_id);
+    /// confirmed) and record it, if the connection still has the config
+    /// `enc` (None: whatever it is now).
+    pub async fn mark_root(
+        &self,
+        connection_id: i64,
+        dir: PathBuf,
+        enc: Option<&[u8]>,
+    ) -> ApiResult<()> {
+        LocalRoot::write_marker(dir, connection_id).await?;
+        sqlx::query(
+            "UPDATE connections SET root_marker = TRUE
+             WHERE id = $1 AND ($2::bytea IS NULL OR config_enc = $2)",
+        )
+        .bind(connection_id)
+        .bind(enc)
+        .execute(&self.db)
+        .await?;
+        // The cached operator's folder check now includes the marker.
+        self.forget_operator(connection_id);
         Ok(())
     }
 
@@ -295,7 +317,7 @@ impl AppState {
         wait: Duration,
     ) -> Result<(), String> {
         use std::sync::atomic::Ordering;
-        const ROOT_CHECKS: usize = 16;
+        const ROOT_CHECKS: usize = 64;
         let running = self
             .root_checks
             .entry(connection_id)

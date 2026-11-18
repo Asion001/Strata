@@ -249,22 +249,28 @@ fn classify(kind: ErrorKind, text: &str) -> Reason {
             if t.contains("timed out") || t.contains("timeout") {
                 Reason::TimedOut
             } else if [
-                "connect",
-                "dns",
-                "refused",
-                "unreachable",
-                "network",
-                "resolve",
+                "connection refused",
+                "connection reset",
+                "failed to connect",
+                "connect error",
+                "dns error",
+                "failed to lookup",
+                "no route to host",
+                "network is unreachable",
+                "host is unreachable",
                 "broken pipe",
-                "reset",
-                "sending request",
+                "error sending request",
                 "send http request",
             ]
             .iter()
             .any(|w| t.contains(w))
             {
                 Reason::Unreachable
-            } else if t.contains("accessdenied") || t.contains("forbidden") || t.contains("403") {
+            } else if t.contains("accessdenied")
+                || t.contains("forbidden")
+                || t.contains("status: 403")
+                || t.contains("status code: 403")
+            {
                 Reason::AccessDenied
             } else {
                 Reason::Failed
@@ -402,6 +408,11 @@ mod tests {
             Reason::TimedOut
         );
         assert_eq!(classify(ErrorKind::Unexpected, "weird"), Reason::Failed);
+        // numbers and words that merely contain the keywords
+        assert_eq!(
+            classify(ErrorKind::Unexpected, "RequestId: 4403AB preset"),
+            Reason::Failed
+        );
         assert_eq!(
             classify(
                 ErrorKind::Unexpected,

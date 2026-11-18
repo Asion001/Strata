@@ -16,6 +16,13 @@ pub const ATOMIC_TMP_DIR: &str = ".strata-tmp";
 /// Nothing else is ever written there and it is hidden from listings.
 pub const PROBE_DIR: &str = ".strata-probe";
 
+/// Does a `/`- (or `\`-) separated path contain the probe folder at any
+/// depth? (Another connection's root, with its probe folder, can lie inside
+/// a connection.)
+pub fn has_probe_component(path: &str) -> bool {
+    path.split(['/', '\\']).any(|c| c == PROBE_DIR)
+}
+
 /// Does a `/`-separated path contain the reserved atomic-write folder?
 pub fn has_reserved_component(path: &str) -> bool {
     path.split('/').any(|c| c == ATOMIC_TMP_DIR)
@@ -148,7 +155,7 @@ impl ConnectionConfig {
         if has_reserved_component(&slashed) {
             bail!("{ATOMIC_TMP_DIR} is reserved");
         }
-        if slashed.split('/').any(|c| c == PROBE_DIR) {
+        if has_probe_component(&slashed) {
             bail!("{PROBE_DIR} is reserved");
         }
         Ok(Some(local_base.join(rel)))
@@ -245,7 +252,7 @@ impl ConnectionConfig {
 /// both `operator` and `location` use.
 fn remote_root(root: &Option<String>) -> Result<String> {
     let r = canonical_folder(root.as_deref().unwrap_or(""))?;
-    if r.split('/').any(|c| c == PROBE_DIR) {
+    if has_probe_component(&r) {
         bail!("{PROBE_DIR} is reserved");
     }
     Ok(r)

@@ -114,9 +114,7 @@ pub async fn create(
     }
     let base = paths::normalize(&req.base_path)?;
     check_access(&st, &u, req.connection_id).await?;
-    if base
-        .split('/')
-        .any(|c| c == strata_storage::backend::PROBE_DIR)
+    if strata_storage::backend::has_probe_component(&base)
         || (strata_storage::backend::has_reserved_component(&base)
             && st.connection_config(req.connection_id).await?.kind() == "local")
     {

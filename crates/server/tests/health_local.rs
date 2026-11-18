@@ -89,6 +89,18 @@ async fn missing_local_folder_goes_offline_and_is_never_recreated() {
         )
         .await;
     assert!(!dir.exists(), "an edit recreated the missing folder");
+    // Testing the unchanged config reports the folder missing (and doesn't
+    // make it).
+    let tested = t
+        .ok(
+            "POST",
+            "/api/connections/test",
+            json!({"id": id, "config": {"kind": "local", "path": "disk"}}),
+        )
+        .await;
+    assert_eq!(tested["ok"], false, "{tested}");
+    assert_eq!(tested["reason"], "not found");
+    assert!(!dir.exists(), "testing recreated the missing folder");
     assert_eq!(renamed["health"], "offline", "{renamed}");
 
     // Back.

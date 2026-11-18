@@ -254,39 +254,6 @@ async fn probe_inner(st: &AppState, id: i64, counted: bool) -> anyhow::Result<Op
         )
     });
 
-    // A folder from before markers existed (new and re-pointed folders get
-    // theirs when they are made) is adopted once it is seen healthy, but
-    // only if it holds something: an empty folder may be the bare mount
-    // point of a disk that isn't mounted right now, and marking that would
-    // make it "the" folder.
-    if found == Found::Ok
-        && let Some(dir) = marker
-            .as_ref()
-            .and_then(|m| m.parent())
-            .and_then(|p| p.parent())
-    {
-        let d = dir.to_path_buf();
-        let has_content = tokio::task::spawn_blocking(move || {
-            std::fs::read_dir(d).is_ok_and(|mut rd| {
-                rd.any(|e| {
-                    e.is_ok_and(|e| {
-                        let n = e.file_name();
-                        n != strata_storage::backend::PROBE_DIR
-                            && n != strata_storage::backend::ATOMIC_TMP_DIR
-                    })
-                })
-            })
-        })
-        .await
-        .unwrap_or(false);
-        if has_content {
-            if let Err(e) = st.mark_root(id, dir.to_path_buf()).await {
-                tracing::warn!("connection {id}: can't write its folder marker: {e}");
-            }
-            st.forget_operator(id);
-        }
-    }
-
     // A manual check ("Check", adding or editing) never counts towards
     // offline: clicking it during a blip mustn't take the storage away from
     // everyone. A success still counts (it ends offline).
@@ -324,6 +291,39 @@ async fn probe_inner(st: &AppState, id: i64, counted: bool) -> anyhow::Result<Op
         // The connection was edited (or deleted) while we probed: this
         // result is about the old config, so it is dropped.
         return Ok(None);
+    }
+
+    // A folder from before markers existed (new and re-pointed folders get
+    // theirs when they are made) is adopted once it is seen healthy, but
+    // only if it holds something: an empty folder may be the bare mount
+    // point of a disk that isn't mounted right now, and marking that would
+    // make it "the" folder.
+    if found == Found::Ok
+        && let Some(dir) = marker
+            .as_ref()
+            .and_then(|m| m.parent())
+            .and_then(|p| p.parent())
+    {
+        let d = dir.to_path_buf();
+        let has_content = tokio::task::spawn_blocking(move || {
+            std::fs::read_dir(d).is_ok_and(|mut rd| {
+                rd.any(|e| {
+                    e.is_ok_and(|e| {
+                        let n = e.file_name();
+                        n != strata_storage::backend::PROBE_DIR
+                            && n != strata_storage::backend::ATOMIC_TMP_DIR
+                    })
+                })
+            })
+        })
+        .await
+        .unwrap_or(false);
+        if has_content {
+            // Only for the config this probe saw (see above).
+            if let Err(e) = st.mark_root(id, dir.to_path_buf(), Some(&enc)).await {
+                tracing::warn!("connection {id}: can't write its folder marker: {e}");
+            }
+        }
     }
 
     if state == State::Offline {

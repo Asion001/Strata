@@ -329,26 +329,28 @@ fn effective_user() -> Option<String> {
     )
 }
 
-/// Does `zfs allow` output grant `snapshot` to `user` (or everyone)? Group
-/// grants aren't resolved: they count as no.
+/// Does `zfs allow` output grant `snapshot` to `user` (or everyone)? ZFS
+/// also needs `mount` to create a snapshot, so both must be granted (on any
+/// of the user's or everyone's lines). Group grants aren't resolved: they
+/// count as no.
 pub fn zfs_allows_snapshot(output: &str, user: &str) -> bool {
-    output.lines().any(|l| {
-        let mut w = l.split_whitespace();
-        let who = match (w.next(), w.next()) {
-            (Some("user"), Some(u)) => !user.is_empty() && u == user,
-            (Some("everyone"), _) => true,
-            _ => return false,
-        };
-        let perms = if l.trim_start().starts_with("everyone") {
-            l.trim_start().trim_start_matches("everyone")
+    let mut perms: Vec<&str> = Vec::new();
+    for l in output.lines() {
+        let l = l.trim_start();
+        let rest = if let Some(r) = l.strip_prefix("everyone") {
+            r
+        } else if let Some(r) = l.strip_prefix("user ") {
+            let mut parts = r.trim_start().splitn(2, char::is_whitespace);
+            match (parts.next(), parts.next()) {
+                (Some(u), Some(p)) if !user.is_empty() && u == user => p,
+                _ => continue,
+            }
         } else {
-            l.trim_start()
-                .splitn(3, char::is_whitespace)
-                .nth(2)
-                .unwrap_or("")
+            continue;
         };
-        who && perms.split(',').any(|p| p.trim() == "snapshot")
-    })
+        perms.extend(rest.split(',').map(str::trim));
+    }
+    perms.contains(&"snapshot") && perms.contains(&"mount")
 }
 
 /// GetBucketVersioning for the connection's bucket.
@@ -436,15 +438,23 @@ mod tests {
         assert!(zfs_allows_snapshot(out, "strata"));
         assert!(!zfs_allows_snapshot(out, "other"));
         assert!(!zfs_allows_snapshot(out, ""));
-        assert!(zfs_allows_snapshot(
+        // snapshot without mount isn't enough
+        assert!(!zfs_allows_snapshot(
             "Local permissions:\n\teveryone snapshot,send\n",
             "x"
         ));
-        assert!(!zfs_allows_snapshot(
-            "Local permissions:\n\tgroup staff snapshot\n",
+        assert!(zfs_allows_snapshot(
+            "Local permissions:\n\teveryone snapshot,send\n\tuser x mount\n",
             "x"
         ));
-        assert!(!zfs_allows_snapshot("\tuser strata snapshotx\n", "strata"));
+        assert!(!zfs_allows_snapshot(
+            "Local permissions:\n\tgroup staff snapshot,mount\n",
+            "x"
+        ));
+        assert!(!zfs_allows_snapshot(
+            "\tuser strata snapshotx,mount\n",
+            "strata"
+        ));
     }
 
     #[test]

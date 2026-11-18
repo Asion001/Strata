@@ -224,7 +224,7 @@ pub async fn create(
     .await?;
     // A local folder gets its marker now (see `state::LocalRoot`).
     if let Some(dir) = req.config.local_dir(&st.cfg.local_base).ok().flatten() {
-        st.mark_root(id, dir).await?;
+        st.mark_root(id, dir, None).await?;
     }
     crate::health::probe_soon(&st, id).await;
     get_view(&st, &u, id).await.map(Json)
@@ -337,14 +337,14 @@ pub async fn update(
         // A new target starts over: not offline, a fresh failure count, and
         // (local) its own folder marker.
         st.offline.remove(&id);
-        st.local_roots.remove(&id);
         if let Some(dir) = req.config.local_dir(&st.cfg.local_base).ok().flatten() {
-            st.mark_root(id, dir).await?;
+            st.mark_root(id, dir, None).await?;
         }
+        // Probed again at once: it may come back online, and goes offline
+        // only after three failed probes as usual. (A rename touches no
+        // storage, so it isn't probed.)
+        crate::health::probe_soon(&st, id).await;
     }
-    // A re-pointed connection is probed again at once: it may come back
-    // online, and goes offline only after three failed probes as usual.
-    crate::health::probe_soon(&st, id).await;
     get_view(&st, &u, id).await.map(Json)
 }
 
@@ -435,12 +435,18 @@ pub async fn test(
         .config
         .local_dir(&st.cfg.local_base)
         .map_err(|e| bad(format!("invalid config: {e}")))?
-        && !unchanged
         && !dir.exists()
     {
-        return Ok(Json(
-            json!({ "ok": true, "error": null, "reason": null, "note": "the folder will be created" }),
-        ));
+        return Ok(Json(if unchanged {
+            // Saving won't make it: report it like a probe would.
+            json!({
+                "ok": false,
+                "reason": "not found",
+                "error": if u.is_admin { Some("the connection's folder is missing") } else { None },
+            })
+        } else {
+            json!({ "ok": true, "error": null, "reason": null, "note": "the folder will be created" })
+        }));
     }
     let op = req
         .config

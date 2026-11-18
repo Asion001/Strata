@@ -133,8 +133,7 @@ pub fn is_reserved(m: &Mount, rel: &str) -> bool {
     let full = paths::join(&m.base_path, rel);
     // The health probes' folder, on any backend and at any depth (another
     // connection's root, with its marker, can be inside this one).
-    full.split('/')
-        .any(|c| c == strata_storage::backend::PROBE_DIR)
+    strata_storage::backend::has_probe_component(&full)
         || (m.connection_kind == "local" && strata_storage::backend::has_reserved_component(&full))
 }
 

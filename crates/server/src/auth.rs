@@ -346,10 +346,7 @@ async fn insert_local_connection(
     .await?;
     // The folder's marker (see `state::LocalRoot`), written with the row.
     if let Some(dir) = cfg.local_dir(&st.cfg.local_base)? {
-        let m = crate::state::LocalRoot::marker_path(&dir, id);
-        std::fs::create_dir_all(m.parent().unwrap()).map_err(|e| ApiError::Internal(e.into()))?;
-        std::fs::write(&m, b"strata connection folder marker\n")
-            .map_err(|e| ApiError::Internal(e.into()))?;
+        crate::state::LocalRoot::write_marker(dir, id).await?;
         sqlx::query("UPDATE connections SET root_marker = TRUE WHERE id = $1")
             .bind(id)
             .execute(&mut **tx)
