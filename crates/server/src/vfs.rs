@@ -318,11 +318,16 @@ async fn scan_dir_inner(
     let dir = backend_path(m, rel, true);
     let listed = match op.list(&dir).await {
         Ok(l) => l,
-        Err(e) if e.kind() == ErrorKind::NotFound && rel.is_empty() => {
-            // Read-only storage cannot get its base folder back: show it empty.
-            if op.info().capability().write {
-                op.create_dir(&dir).await?;
-            }
+        // Read-only storage cannot recreate a missing base folder. Report it
+        // (falls through to the error below) and leave the cache untouched:
+        // listing it as empty would drop every cached entry and the shares
+        // pointing at them while, say, a device behind it is not mounted yet.
+        Err(e)
+            if e.kind() == ErrorKind::NotFound
+                && rel.is_empty()
+                && op.info().capability().write =>
+        {
+            op.create_dir(&dir).await?;
             Vec::new()
         }
         Err(e) => return Err(e.into()),
