@@ -17,7 +17,7 @@ use strata_storage::chunker::StreamChunker;
 use strata_storage::hashed::manifest_hash;
 use strata_storage::{Hash, HashedStore, paths};
 
-use crate::error::{ApiError, ApiResult, bad, conflict};
+use crate::error::{ApiError, ApiResult, bad, conflict, io_error};
 use crate::journal::{self, Change};
 use crate::mounts::{self, Mount};
 use crate::state::AppState;
@@ -1230,13 +1230,9 @@ async fn move_within(
             let a = root.join(paths::join(&m.base_path, from));
             let b = root.join(paths::join(&m.base_path, to));
             if let Some(p) = b.parent() {
-                tokio::fs::create_dir_all(p)
-                    .await
-                    .map_err(|e| ApiError::Internal(e.into()))?;
+                tokio::fs::create_dir_all(p).await.map_err(io_error)?;
             }
-            tokio::fs::rename(&a, &b)
-                .await
-                .map_err(|e| ApiError::Internal(e.into()))?;
+            tokio::fs::rename(&a, &b).await.map_err(io_error)?;
         } else if let Some(op) = &op {
             op.rename(&backend_path(m, from, false), &backend_path(m, to, false))
                 .await?;

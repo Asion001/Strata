@@ -154,10 +154,16 @@ impl ConnectionConfig {
                 let tmp = dir.join(ATOMIC_TMP_DIR);
                 // `create_dir_all` succeeds without writing when `.strata-tmp`
                 // is left over from a time the folder was writable, so also
-                // ask the kernel whether we may write both folders.
-                let writable = std::fs::create_dir_all(&tmp)
-                    .and_then(|()| check_writable(&dir))
-                    .and_then(|()| check_writable(&tmp));
+                // ask the kernel whether we may write the folder itself.
+                let writable = std::fs::create_dir_all(&tmp).and_then(|()| check_writable(&dir));
+                if writable.is_ok()
+                    && let Err(e) = check_writable(&tmp)
+                {
+                    // The folder is writable but its temp folder is not (e.g.
+                    // left behind by another user): an admin must fix it.
+                    // Treating the whole folder as read-only would hide that.
+                    bail!("{} is not writable: {e}", tmp.display());
+                }
                 match writable {
                     Ok(()) => Operator::new(
                         services::Fs::default()

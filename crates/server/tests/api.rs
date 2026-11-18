@@ -1295,6 +1295,37 @@ async fn read_only_local_folder_can_be_browsed_but_not_changed() {
     .await;
     assert_eq!(t.download("Copy.txt").await, b"keep me");
 
+    // probing picks up a folder that turned read-only after it was added
+    let flip = t.dir.path().join("local/flip");
+    std::fs::create_dir_all(&flip).unwrap();
+    let f = local_conn(&t, "Flip", "flip").await;
+    std::fs::set_permissions(&flip, std::fs::Permissions::from_mode(0o555)).unwrap();
+    std::fs::set_permissions(
+        flip.join(".strata-tmp"),
+        std::fs::Permissions::from_mode(0o555),
+    )
+    .unwrap();
+    let v = t
+        .ok("POST", &format!("/api/connections/{f}/probe"), json!({}))
+        .await;
+    assert_eq!(v["capabilities"]["read_only"], true, "{v}");
+    std::fs::set_permissions(&flip, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let v = t
+        .ok("POST", &format!("/api/connections/{f}/probe"), json!({}))
+        .await;
+    // folder writable again, but its temp folder is not: reported, not hidden
+    assert_eq!(v["health"], "error", "{v}");
+    std::fs::set_permissions(
+        flip.join(".strata-tmp"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let v = t
+        .ok("POST", &format!("/api/connections/{f}/probe"), json!({}))
+        .await;
+    assert_eq!(v["health"], "ok", "{v}");
+    assert_eq!(v["capabilities"]["read_only"], false, "{v}");
+
     lock(0o755);
     let mut on_disk: Vec<_> = walk(&disk);
     on_disk.sort();

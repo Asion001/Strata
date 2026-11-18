@@ -120,6 +120,31 @@ pub async fn probe_operator(op: &Operator) -> Result<(), String> {
     }
 }
 
+/// Probe a connection with a freshly built operator and store what it can do
+/// now. A local folder may have been remounted read-only (or writable) since
+/// its operator was cached; rebuilding picks that up, so the server's checks
+/// and the capabilities the UI shows follow the folder.
+async fn probe_fresh(st: &AppState, id: i64) -> Result<(), String> {
+    if let Ok(cfg) = st.connection_config(id).await
+        && cfg.kind() == "local"
+    {
+        st.forget_operator(id);
+    }
+    let op = st.operator(id).await.map_err(|e| e.to_string())?;
+    let res = probe_operator(&op).await;
+    if res.is_ok()
+        && let Ok(cfg) = st.connection_config(id).await
+    {
+        let caps = Capabilities::detect(&cfg, &op, &st.cfg.local_base);
+        let _ = sqlx::query("UPDATE connections SET capabilities = $2 WHERE id = $1")
+            .bind(id)
+            .bind(sqlx::types::Json(caps))
+            .execute(&st.db)
+            .await;
+    }
+    res
+}
+
 async fn store_probe(st: &AppState, id: i64, res: &Result<(), String>) -> ApiResult<()> {
     sqlx::query(
         "UPDATE connections SET health = $2, health_error = $3, health_checked_at = now() WHERE id = $1",
@@ -282,10 +307,7 @@ pub async fn probe(
     Path(id): Path<i64>,
 ) -> ApiResult<Json<ConnectionView>> {
     check_access(&st, &u, id).await?;
-    let res = match st.operator(id).await {
-        Ok(op) => probe_operator(&op).await,
-        Err(e) => Err(e.to_string()),
-    };
+    let res = probe_fresh(&st, id).await;
     store_probe(&st, id, &res).await?;
     get_view(&st, id).await.map(Json)
 }
@@ -325,10 +347,7 @@ pub async fn probe_all(st: &AppState) {
         Err(e) => return tracing::warn!("probe: {e}"),
     };
     for id in ids {
-        let res = match st.operator(id).await {
-            Ok(op) => probe_operator(&op).await,
-            Err(e) => Err(e.to_string()),
-        };
+        let res = probe_fresh(st, id).await;
         if let Err(e) = &res {
             tracing::warn!("connection {id} unhealthy: {e}");
         }

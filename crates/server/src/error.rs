@@ -59,6 +59,15 @@ impl From<opendal::Error> for ApiError {
     }
 }
 
+/// A filesystem error from direct local access (outside OpenDAL).
+pub fn io_error(e: std::io::Error) -> ApiError {
+    if e.kind() == std::io::ErrorKind::ReadOnlyFilesystem {
+        ApiError::ReadOnly
+    } else {
+        ApiError::Internal(e.into())
+    }
+}
+
 impl From<strata_storage::paths::PathError> for ApiError {
     fn from(e: strata_storage::paths::PathError) -> Self {
         ApiError::BadRequest(e.to_string())

@@ -261,6 +261,14 @@ pub async fn create_user(
             .fetch_optional(&mut *tx)
             .await?;
     let existing_default = default.is_some();
+    if let Some(id) = default
+        && !crate::vfs::connection_writable(st, id).await?
+    {
+        // Every private root is a hashed store on it: it must be writable.
+        return Err(ApiError::Internal(anyhow::anyhow!(
+            "the default store is read-only; mount it writable for the server user"
+        )));
+    }
     let conn_id: i64 = match default {
         Some(id) => id,
         None => {
