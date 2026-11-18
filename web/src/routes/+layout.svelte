@@ -35,10 +35,8 @@
 
 </script>
 
-<!-- Pages not rebuilt yet (sign-in, public links) sit inside .legacy, which
-     turns on the global element styles they were built with (see app.css). -->
 {#if isPublic}
-  <div class="legacy contents">{@render children()}</div>
+  {@render children()}
 {:else if session.user}
   <div class="flex h-dvh pt-[env(safe-area-inset-top)]">
     <AppSidebar class="hidden md:flex" />
