@@ -14,7 +14,8 @@ describe('sortEntries', () => {
   });
   it('sorts by size and date with name as the tie-break', () => {
     expect(sortEntries(list, { key: 'size', desc: false }).map((x) => x.name)).toEqual(['adir', 'zdir', 'a.txt', 'b10.txt', 'B2.txt']);
-    expect(sortEntries(list, { key: 'mtime', desc: true }).map((x) => x.name)).toEqual(['zdir', 'adir', 'b10.txt', 'a.txt', 'B2.txt']);
+    expect(sortEntries(list, { key: 'mtime', desc: true }).map((x) => x.name)).toEqual(['adir', 'zdir', 'b10.txt', 'a.txt', 'B2.txt']);
+    expect(sortEntries(list, { key: 'size', desc: true }).map((x) => x.name)).toEqual(['adir', 'zdir', 'B2.txt', 'a.txt', 'b10.txt']);
   });
   it('does not change the input', () => {
     const copy = [...list];

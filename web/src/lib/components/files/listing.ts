@@ -18,8 +18,9 @@ export function sortEntries(list: Entry[], sort: Sort): Entry[] {
   });
   keyed.sort((a, b) => {
     if (a.e.is_dir !== b.e.is_dir) return a.e.is_dir ? -1 : 1;
-    const c = a.v === b.v ? collator.compare(a.e.name, b.e.name) : a.v < b.v ? -1 : 1;
-    return c * dir;
+    // Ties stay in A-to-Z order whichever way the column runs.
+    if (a.v === b.v) return collator.compare(a.e.name, b.e.name) * (sort.key === 'name' ? dir : 1);
+    return (a.v < b.v ? -1 : 1) * dir;
   });
   return keyed.map((k) => k.e);
 }

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { page } from '$app/state';
   import { goto } from '$app/navigation';
+  import { untrack } from 'svelte';
   import { api, contentUrl, previewUrl, thumbUrl, type Entry } from '$lib/api';
   import { bytes, when, join, parent, isImage, isTextName } from '$lib/format';
   import { cn } from '$lib/utils';
@@ -75,12 +76,20 @@
   const sorted = $derived(sortEntries(entries, sort));
   const order = $derived(sorted.map((e) => e.name));
   const selection = new Selection();
-  // A new folder starts with nothing selected; a refresh keeps what's still there.
+  // A new folder starts with nothing selected, both when asked for and when
+  // its listing replaces the old one (a pick made on the old rows must not
+  // carry over to a same-named file). A refresh keeps what's still there.
   $effect(() => {
     path;
+    listedPath;
     selection.clear();
   });
-  $effect(() => selection.prune(order));
+  $effect(() => {
+    const o = order;
+    untrack(() => selection.prune(o));
+  });
+  // While a bulk action runs, the selection bar and Delete key wait.
+  let busy = $state(false);
   const byName = $derived(new Map(sorted.map((e) => [e.name, e])));
   // From the selection, not a scan of the folder: cheap in big folders.
   const picked = $derived([...selection.names].flatMap((n) => byName.get(n) ?? []));
@@ -126,7 +135,7 @@
       ev.preventDefault();
       selection.toggleAll(order);
     } else if (ev.key === 'Escape' && selection.size) selection.clear();
-    else if (ev.key === 'Delete' && selection.size) void removePicked();
+    else if (ev.key === 'Delete' && selection.size && !busy) void removePicked();
   }
 
   async function load(p = path) {
@@ -160,7 +169,8 @@
         if (first) { first = false; return; }
         clearTimeout(timer);
         // Renames and moves can shift mount paths too, so the sidebar refreshes.
-        timer = setTimeout(() => { load(); reloadMounts(); }, 300);
+        // A bulk action refreshes once at its end.
+        timer = setTimeout(() => { if (!busy) { load(); reloadMounts(); } }, 300);
       };
       ws.onclose = () => { if (!closed) setTimeout(connect, 3000); };
     };
@@ -207,16 +217,9 @@
     });
     if (to && to !== from) act(() => api('POST', copy ? '/api/files/copy' : '/api/files/move', { from, to }));
   };
-  const remove = async (e: Entry) => {
+  const remove = (e: Entry) => {
     menu = null;
-    const target = join(listedPath, e.name);
-    const ok = await confirmDialog({
-      title: `Delete “${e.name}”?`,
-      body: e.is_dir ? 'The folder and everything in it will be deleted.' : 'The file will be deleted.',
-      confirm: 'Delete',
-      danger: true
-    });
-    if (ok) act(() => api('POST', '/api/files/delete', { paths: [target] }));
+    void removeItems([e]);
   };
   const share = async (e: Entry) => {
     menu = null;
@@ -250,22 +253,41 @@
   /** Runs `fn` for each item in turn; one failure doesn't stop the rest.
    *  Says what failed, then refreshes. */
   async function each(items: Entry[], verb: string, fn: (e: Entry) => Promise<unknown>) {
+    const dir = listedPath;
     const failed: string[] = [];
     let lastError = '';
-    for (const e of items) {
-      try { await fn(e); } catch (err) { failed.push(e.name); lastError = (err as Error).message; }
+    busy = true;
+    try {
+      for (const e of items) {
+        try { await fn(e); } catch (err) { failed.push(e.name); lastError = err instanceof Error ? err.message : String(err); }
+      }
+    } finally {
+      busy = false;
     }
     if (failed.length === 1) toast(`Couldn't ${verb} “${failed[0]}”: ${lastError}`, 'error');
     else if (failed.length) toast(`Couldn't ${verb} ${failed.length} items (${failed.slice(0, 3).join(', ')}${failed.length > 3 ? ', …' : ''}). ${lastError}`, 'error');
     else toast(`${names(items)} ${verb === 'delete' ? 'deleted' : verb === 'move' ? 'moved' : 'copied'}.`, 'success');
-    selection.clear();
     await load();
     reloadMounts();
+    // What failed stays selected for a retry, if the user is still here.
+    if (listedPath === dir) {
+      selection.clear();
+      for (const n of failed) if (byName.has(n)) selection.toggle(n);
+    }
   }
 
-  async function removePicked() {
-    // Mounts are removed on the Mounts page, never through a file delete.
-    const items = picked.filter((e) => !e.mount_id);
+  /** Mounts are moved and removed on the Mounts page, never as files. */
+  function withoutMounts(items: Entry[], verb: string) {
+    const skipped = items.length - items.filter((e) => !e.mount_id).length;
+    if (skipped) toast(`${skipped === 1 ? 'A mount is' : `${skipped} mounts are`} skipped: ${verb} ${skipped === 1 ? 'it' : 'them'} on the Mounts page.`, 'info', 6000);
+    return items.filter((e) => !e.mount_id);
+  }
+
+  const removePicked = () => removeItems(picked);
+
+  async function removeItems(all: Entry[]) {
+    if (busy) return;
+    const items = withoutMounts(all, 'remove');
     if (!items.length) return;
     const dir = listedPath;
     const ok = await confirmDialog({
@@ -276,11 +298,12 @@
       confirm: 'Delete',
       danger: true
     });
-    if (ok) await each(items, 'delete', (e) => api('POST', '/api/files/delete', { paths: [join(dir, e.name)] }));
+    if (ok && !busy) await each(items, 'delete', (e) => api('POST', '/api/files/delete', { paths: [join(dir, e.name)] }));
   }
 
   async function transferPicked(copy: boolean) {
-    const items = copy ? picked : picked.filter((e) => !e.mount_id);
+    if (busy) return;
+    const items = copy ? picked : withoutMounts(picked, 'move');
     if (!items.length) return;
     const dir = listedPath;
     const dest = await promptDialog({
@@ -294,6 +317,7 @@
     const to = dest.replace(/^\/+|\/+$/g, '');
     // Same folder: a move does nothing and a copy would collide with itself.
     if (to === dir) return void toast('Pick a different folder.', 'info');
+    if (busy) return;
     await each(items, copy ? 'copy' : 'move', (e) =>
       api('POST', copy ? '/api/files/copy' : '/api/files/move', { from: join(dir, e.name), to: join(to, e.name) })
     );
@@ -430,9 +454,9 @@
     <div class="flex items-center gap-2 border-b border-border bg-accent/60 px-4 py-1.5 text-sm" role="toolbar" aria-label="Selected items">
       <Button variant="ghost" size="icon" class="size-8" aria-label="Clear selection" onclick={() => selection.clear()}><XIcon /></Button>
       <span class="mr-auto font-medium" aria-live="polite">{selection.size} selected</span>
-      <Button variant="ghost" size="sm" onclick={() => transferPicked(false)} disabled={pickedMounts === picked.length} title={pickedMounts ? 'Mounts are moved on the Mounts page' : undefined}><FolderInputIcon /><span class="max-sm:sr-only">Move</span></Button>
-      <Button variant="ghost" size="sm" onclick={() => transferPicked(true)}><CopyIcon /><span class="max-sm:sr-only">Copy</span></Button>
-      <Button variant="ghost" size="sm" class="text-destructive hover:text-destructive" onclick={removePicked} disabled={pickedMounts === picked.length} title={pickedMounts ? 'Mounts are removed on the Mounts page' : undefined}><TrashIcon /><span class="max-sm:sr-only">Delete</span></Button>
+      <Button variant="ghost" size="sm" onclick={() => transferPicked(false)} disabled={busy || pickedMounts === picked.length} title={pickedMounts ? 'Mounts are moved on the Mounts page' : undefined}><FolderInputIcon /><span class="max-sm:sr-only">Move</span></Button>
+      <Button variant="ghost" size="sm" onclick={() => transferPicked(true)} disabled={busy}><CopyIcon /><span class="max-sm:sr-only">Copy</span></Button>
+      <Button variant="ghost" size="sm" class="text-destructive hover:text-destructive" onclick={removePicked} disabled={busy || pickedMounts === picked.length} title={pickedMounts ? 'Mounts are removed on the Mounts page' : undefined}><TrashIcon /><span class="max-sm:sr-only">Delete</span></Button>
     </div>
   {/if}
 
