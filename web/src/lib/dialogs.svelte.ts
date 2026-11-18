@@ -13,6 +13,8 @@ export type Field = {
   /** Submit stays disabled while this field is blank (after trimming). */
   required?: boolean;
   min?: number;
+  /** Defaults to new-password for password fields, off for the rest. */
+  autocomplete?: AutoFill;
 };
 
 type Common = {
@@ -58,13 +60,18 @@ function native(r: Request) {
     window.alert(r.opts.copy ? `${text}\n\n${r.opts.copy}` : text);
     r.done();
   } else {
-    // A password typed into window.prompt would show in clear text.
-    if (r.opts.fields.some((f) => f.type === 'password')) {
+    // A password typed into window.prompt would show in clear text: skip
+    // optional ones (left empty), refuse when one is needed.
+    if (r.opts.fields.some((f) => f.type === 'password' && f.required)) {
       window.alert('This part of the app could not load. Reload the page and try again.');
       return r.done(null);
     }
     const out: Record<string, string> = {};
     for (const f of r.opts.fields) {
+      if (f.type === 'password') {
+        out[f.name] = '';
+        continue;
+      }
       const v = window.prompt(`${text}\n\n${f.label}`, f.value ?? '');
       if (v === null) return r.done(null);
       out[f.name] = v;
@@ -124,14 +131,14 @@ export function formDialog(opts: FormOpts): Promise<Record<string, string> | nul
 
 /** One text field (required unless said otherwise); null when cancelled. */
 export async function promptDialog(
-  opts: Common & { label: string; value?: string; confirm?: string; type?: Field['type']; required?: boolean }
+  opts: Common & Pick<Field, 'label' | 'value' | 'type' | 'required' | 'autocomplete'> & { confirm?: string }
 ): Promise<string | null> {
   const r = await formDialog({
     title: opts.title,
     body: opts.body,
     signal: opts.signal,
     confirm: opts.confirm,
-    fields: [{ name: 'v', label: opts.label, value: opts.value, type: opts.type, required: opts.required ?? true }]
+    fields: [{ name: 'v', label: opts.label, value: opts.value, type: opts.type, autocomplete: opts.autocomplete, required: opts.required ?? true }]
   });
   return r ? r.v : null;
 }

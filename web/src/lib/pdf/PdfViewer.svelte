@@ -78,7 +78,8 @@
           body: wrong ? 'Try again.' : 'Enter the password to open this PDF.',
           label: 'Password',
           type: 'password',
-          required: false,
+          // The PDF's own password, not this site's: no password manager.
+          autocomplete: 'off',
           confirm: 'Open'
         });
         if (destroyed) return;

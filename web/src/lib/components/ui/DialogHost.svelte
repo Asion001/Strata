@@ -19,6 +19,7 @@
   // Focused before the first of a run of dialogs; each reopen would
   // otherwise hand focus back to the previous dialog's button.
   let opener: HTMLElement | null = null;
+  let selfClosing = false;
 
   // Fresh field values before the new request renders.
   $effect.pre(() => {
@@ -32,7 +33,11 @@
     const d = el;
     const r = req;
     if (!d) return;
-    if (d.open) d.close();
+    if (d.open) {
+      selfClosing = true;
+      d.close();
+      selfClosing = false;
+    }
     if (!r) {
       // The queue is empty: back to where the user was, if it's still there.
       if (opener?.isConnected) opener.focus();
@@ -80,15 +85,18 @@
   const bodyId = 'strata-dialog-body';
 </script>
 
-<!-- Escape fires "cancel"; stopping keydown keeps it from also reaching
-     window listeners (the viewer and editor close on Escape). A click on the
+<!-- Escape fires "cancel". Keys stop here, so window shortcuts behind the
+     modal (Escape closes the viewer, Ctrl+F, Ctrl+S) don't run. If the
+     browser closes the dialog on its own (a second Escape can't be
+     cancelled), it reopens for the request still waiting. A click on the
      backdrop lands on the <dialog> itself and cancels. -->
 <dialog
   bind:this={el}
   aria-labelledby={titleId}
   aria-describedby={req?.opts.body ? bodyId : undefined}
   oncancel={(e) => { e.preventDefault(); cancel(); }}
-  onkeydown={(e) => { if (e.key === 'Escape') e.stopPropagation(); }}
+  onkeydown={(e) => e.stopPropagation()}
+  onclose={() => { if (!selfClosing && req && el && !el.open) el.showModal(); }}
   onpointerdown={(e) => (downOnBackdrop = e.target === el)}
   onclick={(e) => { if (e.target === el && downOnBackdrop) cancel(); }}
   class="m-auto w-[calc(100%-2rem)] max-w-md rounded-xl border border-border bg-popover p-0 text-popover-foreground shadow-lg backdrop:bg-black/50"
@@ -111,7 +119,7 @@
                 oninput={(e) => (values[f.name] = (e.currentTarget as HTMLInputElement).value)}
                 placeholder={f.placeholder}
                 min={f.min}
-                autocomplete={f.type === 'password' ? 'new-password' : 'off'}
+                autocomplete={f.autocomplete ?? (f.type === 'password' ? 'new-password' : 'off')}
                 data-autofocus={i === 0 || undefined}
               />
               {#if f.hint}<span class="text-xs font-normal text-muted-foreground">{f.hint}</span>{/if}
