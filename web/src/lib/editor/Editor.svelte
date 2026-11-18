@@ -496,8 +496,14 @@
   async function close() {
     if (dirty && !isSignedIn(userId)) {
       // Drafts aren't kept for a signed-out user.
-      if (await confirmDialog({
-        signal: asks.signal, title: 'Close and lose the unsaved changes?', body: 'You are signed out, so no draft is kept.', confirm: 'Close', danger: true })) onclose();
+      const ok = await confirmDialog({
+        signal: asks.signal,
+        title: 'Close and lose the unsaved changes?',
+        body: 'You are signed out, so no draft is kept.',
+        confirm: 'Close',
+        danger: true
+      });
+      if (ok) onclose();
       return;
     }
     if (
@@ -510,21 +516,26 @@
       }))
     )
       return;
-    // The last seconds of typing too; stuck storage never keeps the editor
-    // from closing.
-    // Close quietly only when nothing is unsaved or the draft is known to
-    // be stored; a failed, slow or refused write asks first.
+    if (await draftKeptOrAgreed('Close')) onclose();
+  }
+
+  /** Writes the last seconds of typing to the draft. True when nothing is
+   *  unsaved or the draft is known to be stored; a failed, slow or refused
+   *  write asks first. Stuck storage never blocks for more than 2 s. */
+  async function draftKeptOrAgreed(verb: 'Close' | 'Leave') {
     const r = await atMost(autosave(true), 2000);
-    if (r !== 'clean' && r !== 'stored') {
-      const why: Partial<Record<NonNullable<typeof r>, string>> = {
-        timeout: 'The draft is still being written to this browser and may not be kept.',
-        signedOut: 'You were signed out, so no draft is kept.'
-      };
-      const msg = (r && why[r]) ?? 'The draft could not be stored in this browser.';
-      if (!(await confirmDialog({
-        signal: asks.signal, title: 'Close and lose the unsaved changes?', body: msg, confirm: 'Close anyway', danger: true }))) return;
-    }
-    onclose();
+    if (r === 'clean' || r === 'stored') return true;
+    const why: Partial<Record<NonNullable<typeof r>, string>> = {
+      timeout: 'The draft is still being written to this browser and may not be kept.',
+      signedOut: 'You were signed out, so no draft is kept.'
+    };
+    return confirmDialog({
+      signal: asks.signal,
+      title: `${verb} and lose the unsaved changes?`,
+      body: (r && why[r]) ?? 'The draft could not be stored in this browser.',
+      confirm: `${verb} anyway`,
+      danger: true
+    });
   }
 
   // Set once the user agrees to leave; the navigation we then start passes.
@@ -550,14 +561,18 @@
           : 'You are signed out, so no draft is kept.',
         confirm: 'Leave',
         danger: !kept
-      }).then((ok) => {
+      }).then(async (ok) => {
+        // The draft is only promised once it is known to be stored.
+        if (ok && kept) ok = await draftKeptOrAgreed('Leave');
         leaveAsking = false;
-        if (!ok) return;
+        if (!ok || !to) return;
         leaveAgreed = true;
+        // If the navigation doesn't happen after all (a download, a 204),
+        // the guards come back.
+        setTimeout(() => (leaveAgreed = false), 1000);
         if (nav.type === 'popstate' && delta) history.go(delta);
-        else if (to && to.origin !== location.origin) location.href = to.href;
-        else if (to) void goto(to);
-        else leaveAgreed = false;
+        else if (to.origin !== location.origin) location.href = to.href;
+        else void goto(to);
       });
       return;
     }

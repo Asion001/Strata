@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 vi.mock('$lib/components/ui/DialogHost.svelte', () => ({ default: () => {} }));
 vi.mock('$lib/components/ui/Toaster.svelte', () => ({ default: () => {} }));
 
-const { dialogs, confirmDialog, promptDialog, formDialog, alertDialog } = await import('./dialogs.svelte');
+const { dialogs, confirmDialog, promptDialog, formDialog, alertDialog, cancelAllDialogs } = await import('./dialogs.svelte');
 const { toasts, toast, toastError, dismissToast } = await import('./toast.svelte');
 
 describe('dialogs', () => {
@@ -53,6 +53,13 @@ describe('dialogs', () => {
     expect(await p).toBeNull();
     expect(dialogs.queue).toHaveLength(0);
     expect(await confirmDialog({ title: 'late', signal: ac.signal })).toBe(false);
+  });
+
+  it('cancels everything queued', async () => {
+    const all = [confirmDialog({ title: 'a' }), formDialog({ title: 'b', fields: [] }), alertDialog({ title: 'c' })];
+    cancelAllDialogs();
+    expect(await Promise.all(all)).toEqual([false, null, undefined]);
+    expect(dialogs.queue).toHaveLength(0);
   });
 });
 

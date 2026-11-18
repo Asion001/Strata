@@ -73,14 +73,28 @@ function native(r: Request) {
   }
 }
 
+/** Answers a request the way Cancel does. */
+export function cancelRequest(r: Request | undefined) {
+  if (r?.kind === 'confirm') r.done(false);
+  else if (r?.kind === 'form') r.done(null);
+  else r?.done();
+}
+
+/** Cancels everything queued, e.g. after the page changed underneath. */
+export function cancelAllDialogs() {
+  for (const r of [...dialogs.queue]) cancelRequest(r);
+}
+
 let nextId = 0;
 function push<T>(make: (done: (v: T) => void) => Omit<Request, 'id'>): Promise<T> {
   return new Promise<T>((resolve) => {
     const id = ++nextId;
     let settled = false;
+    let cleanup = () => {};
     const req = make((v) => {
       if (settled) return;
       settled = true;
+      cleanup();
       // By id: the queue holds reactive proxies, not this object.
       const i = dialogs.queue.findIndex((r) => r.id === id);
       if (i >= 0) dialogs.queue.splice(i, 1);
@@ -88,15 +102,11 @@ function push<T>(make: (done: (v: T) => void) => Omit<Request, 'id'>): Promise<T
     });
     dialogs.queue.push({ ...req, id } as Request);
     const signal = req.opts.signal;
+    if (signal?.aborted) return cancelRequest(dialogs.queue[dialogs.queue.length - 1]);
     if (signal) {
-      const withdraw = () => {
-        const r = dialogs.queue.find((q) => q.id === id);
-        if (r?.kind === 'confirm') r.done(false);
-        else if (r?.kind === 'form') r.done(null);
-        else r?.done();
-      };
-      if (signal.aborted) withdraw();
-      else signal.addEventListener('abort', withdraw, { once: true });
+      const withdraw = () => cancelRequest(dialogs.queue.find((q) => q.id === id));
+      signal.addEventListener('abort', withdraw, { once: true });
+      cleanup = () => signal.removeEventListener('abort', withdraw);
     }
     if (!dialogHost.component) loadHost();
   });

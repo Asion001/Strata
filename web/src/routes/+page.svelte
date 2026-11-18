@@ -10,7 +10,7 @@
   import { staleApp } from '$lib/lazy';
   import { session } from '$lib/session.svelte';
   import { alertDialog, confirmDialog, formDialog, promptDialog } from '$lib/dialogs.svelte';
-  import { toast, toastError } from '$lib/toast.svelte';
+  import { toastError } from '$lib/toast.svelte';
 
   let path = $derived(page.url.searchParams.get('p') ?? '');
   let entries = $state<Entry[]>([]);
@@ -86,37 +86,44 @@
     reloadMounts();
   }
 
+  // Each action fixes its target before asking: the folder may change
+  // (Back, a sidebar click) while the dialog is open.
   const newFolder = async () => {
+    const dir = path;
     const name = await promptDialog({ title: 'New folder', label: 'Name', confirm: 'Create' });
-    if (name) act(() => api('POST', '/api/files/mkdir', { path: join(path, name) }));
+    if (name) act(() => api('POST', '/api/files/mkdir', { path: join(dir, name) }));
   };
   const rename = async (e: Entry) => {
     menu = null;
+    const dir = path;
     const name = await promptDialog({ title: `Rename “${e.name}”`, label: 'New name', value: e.name, confirm: 'Rename' });
-    if (name && name !== e.name) act(() => api('POST', '/api/files/move', { from: join(path, e.name), to: join(path, name) }));
+    if (name && name !== e.name) act(() => api('POST', '/api/files/move', { from: join(dir, e.name), to: join(dir, name) }));
   };
   const moveTo = async (e: Entry, copy = false) => {
     menu = null;
+    const from = join(path, e.name);
     const to = await promptDialog({
       title: `${copy ? 'Copy' : 'Move'} “${e.name}”`,
       label: 'To (full path)',
-      value: join(path, e.name),
+      value: from,
       confirm: copy ? 'Copy' : 'Move'
     });
-    if (to && to !== join(path, e.name)) act(() => api('POST', copy ? '/api/files/copy' : '/api/files/move', { from: join(path, e.name), to }));
+    if (to && to !== from) act(() => api('POST', copy ? '/api/files/copy' : '/api/files/move', { from, to }));
   };
   const remove = async (e: Entry) => {
     menu = null;
+    const target = join(path, e.name);
     const ok = await confirmDialog({
       title: `Delete “${e.name}”?`,
       body: e.is_dir ? 'The folder and everything in it will be deleted.' : 'The file will be deleted.',
       confirm: 'Delete',
       danger: true
     });
-    if (ok) act(() => api('POST', '/api/files/delete', { paths: [join(path, e.name)] }));
+    if (ok) act(() => api('POST', '/api/files/delete', { paths: [target] }));
   };
   const share = async (e: Entry) => {
     menu = null;
+    const target = join(path, e.name);
     const f = await formDialog({
       title: `Share “${e.name}”`,
       body: 'Anyone with the link can open it.',
@@ -127,13 +134,12 @@
       ]
     });
     if (!f) return;
-    const days = Number(f.days);
-    if (f.days && !(days > 0)) return void toast('Days must be a positive number.', 'error');
     try {
       const s = await api('POST', '/api/shares', {
-        path: join(path, e.name),
+        path: target,
         password: f.password || null,
-        expires_at: f.days ? new Date(Date.now() + days * 86400000).toISOString() : null
+        // The field allows only whole days from 1 up.
+        expires_at: f.days ? new Date(Date.now() + Number(f.days) * 86400000).toISOString() : null
       });
       const url = `${location.origin}/s/${s.token}`;
       let copied = false;

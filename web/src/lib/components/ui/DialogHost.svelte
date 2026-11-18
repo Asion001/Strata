@@ -3,7 +3,7 @@
   // <dialog> opened with showModal(): it sits above everything (viewer and
   // editor included), traps focus, makes the page behind inert, and gives
   // focus back to where it was when it closes.
-  import { dialogs, type Request } from '$lib/dialogs.svelte';
+  import { cancelRequest, dialogs, type Request } from '$lib/dialogs.svelte';
   import Button from './button/button.svelte';
   import Input from './input/input.svelte';
   import CopyIcon from '@lucide/svelte/icons/copy';
@@ -16,6 +16,9 @@
   // A click only cancels when it also started on the backdrop, not when a
   // text selection inside the dialog ends outside it.
   let downOnBackdrop = false;
+  // Focused before the first of a run of dialogs; each reopen would
+  // otherwise hand focus back to the previous dialog's button.
+  let opener: HTMLElement | null = null;
 
   // Fresh field values before the new request renders.
   $effect.pre(() => {
@@ -30,7 +33,13 @@
     const r = req;
     if (!d) return;
     if (d.open) d.close();
-    if (!r) return;
+    if (!r) {
+      // The queue is empty: back to where the user was, if it's still there.
+      if (opener?.isConnected) opener.focus();
+      opener = null;
+      return;
+    }
+    opener ??= document.activeElement as HTMLElement | null;
     d.showModal();
     // The first field, else the request's default button (data-autofocus).
     const f = d.querySelector<HTMLElement>('[data-autofocus]');
@@ -39,11 +48,7 @@
   });
 
   function cancel() {
-    const r = req;
-    if (!r) return;
-    if (r.kind === 'confirm') r.done(false);
-    else if (r.kind === 'form') r.done(null);
-    else r.done();
+    cancelRequest(req);
   }
 
   function submit(e: SubmitEvent) {
