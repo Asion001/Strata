@@ -135,7 +135,11 @@
       ev.preventDefault();
       selection.toggleAll(order);
     } else if (ev.key === 'Escape' && selection.size) selection.clear();
-    else if (ev.key === 'Delete' && selection.size && !busy) void removePicked();
+    // Delete, or Cmd+Backspace on a Mac (its delete key is Backspace).
+    else if ((ev.key === 'Delete' || (ev.key === 'Backspace' && ev.metaKey)) && selection.size && !busy) {
+      ev.preventDefault();
+      void removePicked();
+    }
   }
 
   async function load(p = path) {
@@ -180,10 +184,16 @@
 
   const crumbs = $derived(path ? path.split('/').map((n, i, a) => ({ name: n, path: a.slice(0, i + 1).join('/') })) : []);
   const viewable = $derived(sorted.filter((e) => !e.is_dir));
+  let viewerItems = $state<{ name: string; size: number; src: string; download: string; path: string }[]>([]);
 
   function open(e: Entry) {
     if (e.is_dir) goto(`/?p=${encodeURIComponent(join(listedPath, e.name))}`);
-    else viewerIndex = viewable.indexOf(e);
+    else {
+      // A snapshot: a refresh (an upload landing, another device) must not
+      // shift which file the open viewer shows.
+      viewerItems = viewable.map((v) => ({ name: v.name, size: v.size, src: previewUrl(join(listedPath, v.name)), download: contentUrl(join(listedPath, v.name), true), path: join(listedPath, v.name) }));
+      viewerIndex = viewable.indexOf(e);
+    }
   }
 
   async function act(fn: () => Promise<unknown>) {
@@ -219,7 +229,7 @@
   };
   const remove = (e: Entry) => {
     menu = null;
-    void removeItems([e]);
+    void removeItems([e], false);
   };
   const share = async (e: Entry) => {
     menu = null;
@@ -252,7 +262,7 @@
 
   /** Runs `fn` for each item in turn; one failure doesn't stop the rest.
    *  Says what failed, then refreshes. */
-  async function each(items: Entry[], verb: string, fn: (e: Entry) => Promise<unknown>) {
+  async function each(items: Entry[], verb: string, fn: (e: Entry) => Promise<unknown>, fromSelection = true) {
     const dir = listedPath;
     const failed: string[] = [];
     let lastError = '';
@@ -270,7 +280,8 @@
     await load();
     reloadMounts();
     // What failed stays selected for a retry, if the user is still here.
-    if (listedPath === dir) {
+    // (A row-menu action leaves the selection alone.)
+    if (fromSelection && listedPath === dir) {
       selection.clear();
       for (const n of failed) if (byName.has(n)) selection.toggle(n);
     }
@@ -285,8 +296,10 @@
 
   const removePicked = () => removeItems(picked);
 
-  async function removeItems(all: Entry[]) {
-    if (busy) return;
+  const waitForBusy = () => toast('Wait for the current action to finish.', 'info');
+
+  async function removeItems(all: Entry[], fromSelection = true) {
+    if (busy) return waitForBusy();
     const items = withoutMounts(all, 'remove');
     if (!items.length) return;
     const dir = listedPath;
@@ -298,11 +311,13 @@
       confirm: 'Delete',
       danger: true
     });
-    if (ok && !busy) await each(items, 'delete', (e) => api('POST', '/api/files/delete', { paths: [join(dir, e.name)] }));
+    if (!ok) return;
+    if (busy) return waitForBusy();
+    await each(items, 'delete', (e) => api('POST', '/api/files/delete', { paths: [join(dir, e.name)] }), fromSelection);
   }
 
   async function transferPicked(copy: boolean) {
-    if (busy) return;
+    if (busy) return waitForBusy();
     const items = copy ? picked : withoutMounts(picked, 'move');
     if (!items.length) return;
     const dir = listedPath;
@@ -314,10 +329,11 @@
       confirm: copy ? 'Copy' : 'Move'
     });
     if (dest === null) return;
-    const to = dest.replace(/^\/+|\/+$/g, '');
+    // Outer spaces and slashes are never meant: ' docs/ ' is docs.
+    const to = dest.trim().replace(/^\/+|\/+$/g, '');
     // Same folder: a move does nothing and a copy would collide with itself.
     if (to === dir) return void toast('Pick a different folder.', 'info');
-    if (busy) return;
+    if (busy) return waitForBusy();
     await each(items, copy ? 'copy' : 'move', (e) =>
       api('POST', copy ? '/api/files/copy' : '/api/files/move', { from: join(dir, e.name), to: join(to, e.name) })
     );
@@ -609,9 +625,9 @@
 {#if viewerIndex >= 0 && Viewer}
   <div class="legacy contents">
   <Viewer
-    items={viewable.map((v) => ({ name: v.name, size: v.size, src: previewUrl(join(listedPath, v.name)), download: contentUrl(join(listedPath, v.name), true) }))}
+    items={viewerItems}
     bind:index={viewerIndex}
-    onedit={(i) => { editing = join(listedPath, viewable[i].name); viewerIndex = -1; }}
+    onedit={(i) => { editing = viewerItems[i].path; viewerIndex = -1; }}
     onclose={() => (viewerIndex = -1)} />
   </div>
 {/if}
@@ -635,5 +651,4 @@
     text-align: left; font-size: 0.875rem; color: inherit;
   }
   .item:hover, .item:focus-visible { background: var(--hover); outline: none; }
-  .item.text-destructive { color: var(--danger); }
 </style>

@@ -1,5 +1,4 @@
-<script lang="ts">
-  // A Lucide icon for an entry's kind (see kindOf), tinted per kind.
+<script lang="ts" module>
   import { kindOf, type Kind } from '$lib/format';
   import { cn } from '$lib/utils';
   import type { Component } from 'svelte';
@@ -12,8 +11,8 @@
   import FileTextIcon from '@lucide/svelte/icons/file-text';
   import FileIcon from '@lucide/svelte/icons/file';
 
-  let { entry, class: className = '' }: { entry: { name: string; is_dir: boolean; mount_id?: number | null }; class?: string } = $props();
 
+  // Built once for every icon on the page.
   const KINDS: Record<Kind, [Component<any>, string]> = {
     mount: [HardDriveIcon, 'text-primary'],
     dir: [FolderIcon, 'text-primary fill-primary/15'],
@@ -25,6 +24,12 @@
     text: [FileTextIcon, 'text-muted-foreground'],
     file: [FileIcon, 'text-muted-foreground']
   };
+</script>
+
+<script lang="ts">
+  // A Lucide icon for an entry's kind (see kindOf), tinted per kind.
+  let { entry, class: className = '' }: { entry: { name: string; is_dir: boolean; mount_id?: number | null }; class?: string } = $props();
+
   const [Icon, tone] = $derived(KINDS[kindOf(entry)]);
 </script>
 
