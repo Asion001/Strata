@@ -8,6 +8,8 @@
   import { reloadMounts } from '$lib/mounts.svelte';
   import AppSidebar from '$lib/components/shell/AppSidebar.svelte';
   import BottomNav from '$lib/components/shell/BottomNav.svelte';
+  import { dialogHost } from '$lib/dialogs.svelte';
+  import { toaster } from '$lib/toast.svelte';
 
   let { children } = $props();
   let isPublic = $derived(page.url.pathname === '/login' || page.url.pathname.startsWith('/s/'));
@@ -39,3 +41,6 @@
     </div>
   </div>
 {/if}
+
+{#if dialogHost.component}<dialogHost.component />{/if}
+{#if toaster.component}<toaster.component />{/if}

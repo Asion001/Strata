@@ -5,7 +5,9 @@
   // - keeps the file's line endings and trailing newline;
   // - Ctrl/Cmd+S saves; leaving with unsaved changes asks first.
   import { onDestroy, onMount, untrack } from 'svelte';
-  import { beforeNavigate } from '$app/navigation';
+  import { beforeNavigate, goto } from '$app/navigation';
+  import { confirmDialog } from '$lib/dialogs.svelte';
+  import { toast } from '$lib/toast.svelte';
   import { contentUrl } from '$lib/api';
   import { join, parent } from '$lib/format';
   import { MAX_EDIT_BYTES, MAX_VIEW_BYTES, conflictName, decodeUtf8, fromEditor, looksBinary, toEditor, type Eol } from './textio';
@@ -311,7 +313,15 @@
   async function restoreDraft() {
     const d = draftOffer;
     if (!d || !editor) return;
-    if (dirty && !confirm('Replace what you typed since opening with the recovered draft?')) return;
+    if (dirty) {
+      const ok = await confirmDialog({
+        title: 'Restore the draft?',
+        body: 'This replaces what you typed since opening with the recovered draft.',
+        confirm: 'Restore'
+      });
+      // The offer may have been dismissed or replaced while the dialog was open.
+      if (!ok || draftOffer !== d || !editor) return;
+    }
     // Keep the draft's base: if the file changed since, saving asks how to resolve.
     etag = d.baseEtag;
     baseHash = d.baseHash ?? null;
@@ -414,7 +424,7 @@
           // Wait briefly for the clean-up, but never let stuck storage keep
           // the editor from closing.
           await atMost(afterDrafts(() => clearTabDraft(key, tab)), 2000);
-          alert(msg);
+          toast(msg, 'success', 8000);
           onclose();
         }
         return;
@@ -482,10 +492,18 @@
   async function close() {
     if (dirty && !isSignedIn(userId)) {
       // Drafts aren't kept for a signed-out user.
-      if (confirm('Close and lose the unsaved changes?')) onclose();
+      if (await confirmDialog({ title: 'Close and lose the unsaved changes?', body: 'You are signed out, so no draft is kept.', confirm: 'Close', danger: true })) onclose();
       return;
     }
-    if (dirty && !confirm('Close with unsaved changes? A draft stays in this browser for up to 30 days, until you sign out, or until someone else signs in here.')) return;
+    if (
+      dirty &&
+      !(await confirmDialog({
+        title: 'Close with unsaved changes?',
+        body: 'A draft stays in this browser for up to 30 days, until you sign out, or until someone else signs in here.',
+        confirm: 'Close'
+      }))
+    )
+      return;
     // The last seconds of typing too; stuck storage never keeps the editor
     // from closing.
     // Close quietly only when nothing is unsaved or the draft is known to
@@ -497,16 +515,40 @@
         signedOut: 'You were signed out, so no draft is kept.'
       };
       const msg = (r && why[r]) ?? 'The draft could not be stored in this browser.';
-      if (!confirm(`${msg} Close anyway and lose the unsaved changes?`)) return;
+      if (!(await confirmDialog({ title: 'Close and lose the unsaved changes?', body: msg, confirm: 'Close anyway', danger: true }))) return;
     }
     onclose();
   }
 
+  // Set once the user agrees to leave; the navigation we then start passes.
+  let leaveAgreed = false;
   beforeNavigate((nav) => {
-    if (dirty && !confirm('You have unsaved changes. Leave anyway?')) {
+    if (dirty && !leaveAgreed) {
+      // Closing or reloading the tab: only the browser's own prompt can
+      // ask, and cancelling is what shows it.
       nav.cancel();
+      if (nav.type === 'leave') return;
+      const to = nav.to?.url;
+      const delta = nav.delta;
+      const kept = isSignedIn(userId);
+      void confirmDialog({
+        title: 'Leave with unsaved changes?',
+        body: kept
+          ? 'A draft stays in this browser, so you can restore it when you open the file again.'
+          : 'You are signed out, so no draft is kept.',
+        confirm: 'Leave',
+        danger: !kept
+      }).then((ok) => {
+        if (!ok) return;
+        leaveAgreed = true;
+        if (nav.type === 'popstate' && delta) history.go(delta);
+        else if (to && to.origin !== location.origin) location.href = to.href;
+        else if (to) void goto(to);
+        else leaveAgreed = false;
+      });
       return;
     }
+    leaveAgreed = false;
     void autosave(true);
   });
 

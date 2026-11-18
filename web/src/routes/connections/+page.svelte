@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { confirmDialog } from '$lib/dialogs.svelte';
+  import { toastError } from '$lib/toast.svelte';
   import { api } from '$lib/api';
   import { session } from '$lib/session.svelte';
 
@@ -40,7 +42,7 @@
       else await api('POST', '/api/connections', body);
       editing = null;
       await load();
-    } catch (err) { alert((err as Error).message); } finally { busy = false; }
+    } catch (err) { toastError(err); } finally { busy = false; }
   }
   async function test() {
     if (!editing) return;
@@ -52,8 +54,9 @@
   }
   async function probe(c: Conn) { await api('POST', `/api/connections/${c.id}/probe`); await load(); }
   async function del(c: Conn) {
-    if (!confirm(`Delete connection "${c.name}"? Unmounted hashed volumes on it lose their file index.`)) return;
-    try { await api('DELETE', `/api/connections/${c.id}`); await load(); } catch (e) { alert((e as Error).message); }
+    const ok = await confirmDialog({ title: `Delete connection “${c.name}”?`, body: 'Unmounted hashed volumes on it lose their file index.', confirm: 'Delete', danger: true });
+    if (!ok) return;
+    try { await api('DELETE', `/api/connections/${c.id}`); await load(); } catch (e) { toastError(e); }
   }
   const fields: Record<string, [string, string, string?][]> = {
     local: [['path', 'Folder (relative to the server storage base)']],

@@ -9,6 +9,8 @@
   import Editor from '$lib/editor/Editor.svelte';
   import { staleApp } from '$lib/lazy';
   import { session } from '$lib/session.svelte';
+  import { alertDialog, confirmDialog, formDialog, promptDialog } from '$lib/dialogs.svelte';
+  import { toast, toastError } from '$lib/toast.svelte';
 
   let path = $derived(page.url.searchParams.get('p') ?? '');
   let entries = $state<Entry[]>([]);
@@ -78,41 +80,66 @@
   }
 
   async function act(fn: () => Promise<unknown>) {
-    try { await fn(); } catch (e) { alert((e as Error).message); }
+    try { await fn(); } catch (e) { toastError(e); }
     menu = null;
     await load();
     reloadMounts();
   }
 
-  const newFolder = () => {
-    const name = prompt('New folder name');
-    if (name) act(() => api('POST', '/api/files/mkdir', { path: join(path, name) }));
+  const newFolder = async () => {
+    const name = await promptDialog({ title: 'New folder', label: 'Name', confirm: 'Create' });
+    if (name?.trim()) act(() => api('POST', '/api/files/mkdir', { path: join(path, name.trim()) }));
   };
-  const rename = (e: Entry) => {
-    const name = prompt('Rename to', e.name);
+  const rename = async (e: Entry) => {
+    menu = null;
+    const name = (await promptDialog({ title: `Rename “${e.name}”`, label: 'New name', value: e.name, confirm: 'Rename' }))?.trim();
     if (name && name !== e.name) act(() => api('POST', '/api/files/move', { from: join(path, e.name), to: join(path, name) }));
   };
-  const moveTo = (e: Entry, copy = false) => {
-    const to = prompt(`${copy ? 'Copy' : 'Move'} to (full path)`, join(path, e.name));
+  const moveTo = async (e: Entry, copy = false) => {
+    menu = null;
+    const to = (await promptDialog({
+      title: `${copy ? 'Copy' : 'Move'} “${e.name}”`,
+      label: 'To (full path)',
+      value: join(path, e.name),
+      confirm: copy ? 'Copy' : 'Move'
+    }))?.trim();
     if (to && to !== join(path, e.name)) act(() => api('POST', copy ? '/api/files/copy' : '/api/files/move', { from: join(path, e.name), to }));
   };
-  const remove = (e: Entry) => {
-    if (confirm(`Delete "${e.name}"?`)) act(() => api('POST', '/api/files/delete', { paths: [join(path, e.name)] }));
+  const remove = async (e: Entry) => {
+    menu = null;
+    const ok = await confirmDialog({
+      title: `Delete “${e.name}”?`,
+      body: e.is_dir ? 'The folder and everything in it will be deleted.' : 'The file will be deleted.',
+      confirm: 'Delete',
+      danger: true
+    });
+    if (ok) act(() => api('POST', '/api/files/delete', { paths: [join(path, e.name)] }));
   };
   const share = async (e: Entry) => {
-    const password = prompt('Password for the link (leave empty for none)') ?? '';
-    const days = prompt('Expires after how many days? (empty = never)') ?? '';
+    menu = null;
+    const f = await formDialog({
+      title: `Share “${e.name}”`,
+      body: 'Anyone with the link can open it.',
+      confirm: 'Create link',
+      fields: [
+        { name: 'password', label: 'Password', type: 'password', hint: 'Optional. Leave empty for none.' },
+        { name: 'days', label: 'Expires after (days)', type: 'number', min: 1, hint: 'Optional. Leave empty to never expire.' }
+      ]
+    });
+    if (!f) return;
+    const days = Number(f.days);
+    if (f.days && !(days > 0)) return void toast('Days must be a positive number.', 'error');
     try {
       const s = await api('POST', '/api/shares', {
         path: join(path, e.name),
-        password: password || null,
-        expires_at: days ? new Date(Date.now() + Number(days) * 86400000).toISOString() : null
+        password: f.password || null,
+        expires_at: f.days ? new Date(Date.now() + days * 86400000).toISOString() : null
       });
       const url = `${location.origin}/s/${s.token}`;
-      try { await navigator.clipboard.writeText(url); } catch {}
-      prompt('Share link (copied):', url);
-    } catch (err) { alert((err as Error).message); }
-    menu = null;
+      let copied = false;
+      try { await navigator.clipboard.writeText(url); copied = true; } catch {}
+      await alertDialog({ title: 'Share link', body: copied ? 'Copied to the clipboard.' : undefined, copy: url, ok: 'Done' });
+    } catch (err) { toastError(err); }
   };
 
   let uid = 0;

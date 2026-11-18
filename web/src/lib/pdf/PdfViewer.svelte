@@ -3,6 +3,7 @@
   // print. Loaded lazily (pdf.js stays out of the startup bundle).
   import 'pdfjs-dist/web/pdf_viewer.css';
   import { onDestroy, onMount } from 'svelte';
+  import { confirmDialog, promptDialog } from '$lib/dialogs.svelte';
   import type { PDFDocumentProxy, PDFDocumentLoadingTask } from 'pdfjs-dist';
 
   let { src, download, name }: { src: string; download: string; name: string } = $props();
@@ -67,8 +68,17 @@
       });
 
       task = openPdf(src);
-      task.onPassword = (supply: (p: string) => void, reason: number) => {
-        const p = prompt(reason === pdfjs.PasswordResponses.INCORRECT_PASSWORD ? 'Wrong password. Try again:' : 'This PDF is password-protected. Password:');
+      task.onPassword = async (supply: (p: string) => void, reason: number) => {
+        const wrong = reason === pdfjs.PasswordResponses.INCORRECT_PASSWORD;
+        const p = await promptDialog({
+          title: wrong ? 'Wrong password' : 'Password-protected PDF',
+          body: wrong ? 'Try again.' : 'Enter the password to open this PDF.',
+          label: 'Password',
+          type: 'password',
+          required: false,
+          confirm: 'Open'
+        });
+        if (destroyed) return;
         if (p === null) {
           error = 'This PDF is password-protected.';
           task?.destroy();
@@ -162,7 +172,8 @@
       return;
     }
     const n = doc.numPages;
-    if (n > 100 && !confirm(`Prepare all ${n} pages for printing? This can take a while; you can cancel it.`)) return;
+    if (n > 100 && !(await confirmDialog({ title: `Print all ${n} pages?`, body: 'Preparing them can take a while; you can cancel it.', confirm: 'Print' }))) return;
+    if (destroyed || printing) return;
     cancelPrint = false;
     const urls: string[] = [];
     const root = document.createElement('div');
