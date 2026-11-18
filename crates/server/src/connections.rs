@@ -133,18 +133,27 @@ async fn probe_fresh(st: &AppState, id: i64) -> Result<(), String> {
     };
     let caps = if cfg.kind() == "local" {
         let base = st.cfg.local_base.clone();
+        let c = cfg.clone();
         let build = tokio::task::spawn_blocking(move || {
-            cfg.operator(&base)
-                .map(|op| Capabilities::detect(&cfg, &op, &base))
+            c.operator(&base)
+                .map(|op| Capabilities::detect(&c, &op, &base))
         });
         match tokio::time::timeout(Duration::from_secs(20), build).await {
             Ok(Ok(Ok(caps))) => caps,
-            Ok(Ok(Err(e))) => return Err(e.to_string()),
-            _ => return Err("timed out after 20s".into()),
+            // The cached operator just listed the folder, so the connection
+            // is healthy; only the capability refresh is skipped this time.
+            other => {
+                tracing::warn!("connection {id}: capability refresh failed: {other:?}");
+                return Ok(());
+            }
         }
     } else {
         Capabilities::detect(&cfg, &cached, &st.cfg.local_base)
     };
+    // An admin may have saved a new config meanwhile; its capabilities win.
+    if st.connection_config(id).await.ok().as_ref() != Some(&cfg) {
+        return Ok(());
+    }
     if caps.read_only == cached.info().capability().write {
         st.forget_operator(id);
     }
@@ -232,7 +241,7 @@ pub async fn update(
         .operator(&st.cfg.local_base)
         .map_err(|e| bad(format!("invalid config: {e}")))?;
     let caps = Capabilities::detect(&req.config, &op, &st.cfg.local_base);
-    if caps.read_only {
+    if caps.read_only && req.config != old {
         // Hashed volumes (and the default store, which holds every user's
         // root) must keep storing blobs.
         let needs_writes: bool = sqlx::query_scalar(

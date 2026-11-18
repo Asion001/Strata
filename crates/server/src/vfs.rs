@@ -319,7 +319,10 @@ async fn scan_dir_inner(
     let listed = match op.list(&dir).await {
         Ok(l) => l,
         Err(e) if e.kind() == ErrorKind::NotFound && rel.is_empty() => {
-            op.create_dir(&dir).await?;
+            // Read-only storage cannot get its base folder back: show it empty.
+            if op.info().capability().write {
+                op.create_dir(&dir).await?;
+            }
             Vec::new()
         }
         Err(e) => return Err(e.into()),
