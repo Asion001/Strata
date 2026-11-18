@@ -67,6 +67,9 @@ function native(r: Request) {
       return r.done(null);
     }
     const out: Record<string, string> = {};
+    const skips = r.opts.fields.some((f) => f.type === 'password');
+    if (skips && !window.confirm(`${text}\n\nPart of the app could not load, so a password can't be entered safely. Continue without one?`))
+      return r.done(null);
     for (const f of r.opts.fields) {
       if (f.type === 'password') {
         out[f.name] = '';
@@ -74,6 +77,14 @@ function native(r: Request) {
       }
       const v = window.prompt(`${text}\n\n${f.label}`, f.value ?? '');
       if (v === null) return r.done(null);
+      const n = Number(v);
+      const bad =
+        (f.required && !v.trim()) ||
+        (f.type === 'number' && v !== '' && !(Number.isFinite(n) && (f.min === undefined || n >= f.min)));
+      if (bad) {
+        window.alert(`“${v}” isn't a valid ${f.label.toLowerCase()}.`);
+        return r.done(null);
+      }
       out[f.name] = v;
     }
     r.done(out);

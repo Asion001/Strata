@@ -19,7 +19,6 @@
   // Focused before the first of a run of dialogs; each reopen would
   // otherwise hand focus back to the previous dialog's button.
   let opener: HTMLElement | null = null;
-  let selfClosing = false;
 
   // Fresh field values before the new request renders.
   $effect.pre(() => {
@@ -33,11 +32,7 @@
     const d = el;
     const r = req;
     if (!d) return;
-    if (d.open) {
-      selfClosing = true;
-      d.close();
-      selfClosing = false;
-    }
+    if (d.open) d.close();
     if (!r) {
       // The queue is empty: back to where the user was, if it's still there.
       if (opener?.isConnected) opener.focus();
@@ -95,8 +90,12 @@
   aria-labelledby={titleId}
   aria-describedby={req?.opts.body ? bodyId : undefined}
   oncancel={(e) => { e.preventDefault(); cancel(); }}
-  onkeydown={(e) => e.stopPropagation()}
-  onclose={() => { if (!selfClosing && req && el && !el.open) el.showModal(); }}
+  onkeydown={(e) => {
+    e.stopPropagation();
+    // Habit Ctrl/Cmd+S would open the browser's "Save page as".
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') e.preventDefault();
+  }}
+  onclose={() => { if (req && el && !el.open) el.showModal(); }}
   onpointerdown={(e) => (downOnBackdrop = e.target === el)}
   onclick={(e) => { if (e.target === el && downOnBackdrop) cancel(); }}
   class="m-auto w-[calc(100%-2rem)] max-w-md rounded-xl border border-border bg-popover p-0 text-popover-foreground shadow-lg backdrop:bg-black/50"
