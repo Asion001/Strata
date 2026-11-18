@@ -1343,6 +1343,8 @@ pub async fn copy_path(st: &AppState, user_id: i64, from: &str, to: &str) -> Api
         return Err(conflict("destination already exists"));
     }
     check_not_into_itself(&sm, &srel, &dm, &drel)?;
+    // Refuse before a partial copy into read-only storage.
+    ensure_writable(st, &dm).await?;
     let node = stat(st, &sm, &srel).await?;
     let (to_parent, _) = paths::split(to).unwrap();
     mkdir_p(st, user_id, to_parent).await?;

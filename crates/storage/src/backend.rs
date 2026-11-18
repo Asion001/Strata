@@ -27,24 +27,27 @@ fn is_read_only_error(e: &std::io::Error) -> bool {
     )
 }
 
-/// access(2) with W_OK: fails with EROFS on a read-only filesystem and with
-/// EACCES when we lack write permission (root passes permission bits, but not
-/// a read-only mount).
+/// Is the filesystem holding `p` mounted read-only (statvfs ST_RDONLY)?
+/// Unlike permission checks this does not depend on who we run as, so it
+/// cannot misjudge a folder we can in fact write.
 #[cfg(unix)]
-fn check_writable(p: &Path) -> std::io::Result<()> {
+fn mounted_read_only(p: &Path) -> bool {
     use std::os::unix::ffi::OsStrExt;
-    let c = std::ffi::CString::new(p.as_os_str().as_bytes())
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-    if unsafe { libc::access(c.as_ptr(), libc::W_OK) } == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
+    let Ok(c) = std::ffi::CString::new(p.as_os_str().as_bytes()) else {
+        return false;
+    };
+    let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(c.as_ptr(), &mut s) } != 0 {
+        return false;
     }
+    #[allow(clippy::unnecessary_cast)]
+    let ro = (s.f_flag as u64) & (libc::ST_RDONLY as u64) != 0;
+    ro
 }
 
 #[cfg(not(unix))]
-fn check_writable(_: &Path) -> std::io::Result<()> {
-    Ok(())
+fn mounted_read_only(_: &Path) -> bool {
+    false
 }
 
 /// Backend configuration. Serialised to JSON and encrypted at rest.
@@ -154,16 +157,14 @@ impl ConnectionConfig {
                 let tmp = dir.join(ATOMIC_TMP_DIR);
                 // `create_dir_all` succeeds without writing when `.strata-tmp`
                 // is left over from a time the folder was writable, so also
-                // ask the kernel whether we may write the folder itself.
-                let writable = std::fs::create_dir_all(&tmp).and_then(|()| check_writable(&dir));
-                if writable.is_ok()
-                    && let Err(e) = check_writable(&tmp)
-                {
-                    // The folder is writable but its temp folder is not (e.g.
-                    // left behind by another user): an admin must fix it.
-                    // Treating the whole folder as read-only would hide that.
-                    bail!("{} is not writable: {e}", tmp.display());
-                }
+                // check whether the folder's filesystem is mounted read-only.
+                let writable = std::fs::create_dir_all(&tmp).and_then(|()| {
+                    if mounted_read_only(&dir) {
+                        Err(std::io::ErrorKind::ReadOnlyFilesystem.into())
+                    } else {
+                        Ok(())
+                    }
+                });
                 match writable {
                     Ok(()) => Operator::new(
                         services::Fs::default()

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use strata_storage::{Capabilities, ConnectionConfig};
 
-use crate::error::{ApiError, ApiResult, bad};
+use crate::error::{ApiError, ApiResult, bad, conflict};
 use crate::state::AppState;
 
 pub const SESSION_COOKIE: &str = "strata_session";
@@ -261,13 +261,20 @@ pub async fn create_user(
             .fetch_optional(&mut *tx)
             .await?;
     let existing_default = default.is_some();
-    if let Some(id) = default
-        && !crate::vfs::connection_writable(st, id).await?
-    {
-        // Every private root is a hashed store on it: it must be writable.
-        return Err(ApiError::Internal(anyhow::anyhow!(
-            "the default store is read-only; mount it writable for the server user"
-        )));
+    if let Some(id) = default {
+        // Every private root is a hashed store on it, so it must be writable.
+        // Uses the capabilities stored by the last probe: no storage access.
+        let read_only: Option<bool> = sqlx::query_scalar(
+            "SELECT (capabilities->>'read_only')::bool FROM connections WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if read_only == Some(true) {
+            return Err(conflict(
+                "the server storage is read-only; make it writable before adding users",
+            ));
+        }
     }
     let conn_id: i64 = match default {
         Some(id) => id,

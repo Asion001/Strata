@@ -120,29 +120,40 @@ pub async fn probe_operator(op: &Operator) -> Result<(), String> {
     }
 }
 
-/// Probe a connection with a freshly built operator and store what it can do
-/// now. A local folder may have been remounted read-only (or writable) since
-/// its operator was cached; rebuilding picks that up, so the server's checks
-/// and the capabilities the UI shows follow the folder.
+/// Probe a connection and store what it can do now. A local folder may have
+/// been remounted read-only (or writable) since its operator was cached, so
+/// a fresh operator is built off the async workers, with a timeout (a hung
+/// network mount must not stall the server), and replaces the cached one when
+/// writability changed.
 async fn probe_fresh(st: &AppState, id: i64) -> Result<(), String> {
-    if let Ok(cfg) = st.connection_config(id).await
-        && cfg.kind() == "local"
-    {
+    let cached = st.operator(id).await.map_err(|e| e.to_string())?;
+    probe_operator(&cached).await?;
+    let Ok(cfg) = st.connection_config(id).await else {
+        return Ok(());
+    };
+    let caps = if cfg.kind() == "local" {
+        let base = st.cfg.local_base.clone();
+        let build = tokio::task::spawn_blocking(move || {
+            cfg.operator(&base)
+                .map(|op| Capabilities::detect(&cfg, &op, &base))
+        });
+        match tokio::time::timeout(Duration::from_secs(20), build).await {
+            Ok(Ok(Ok(caps))) => caps,
+            Ok(Ok(Err(e))) => return Err(e.to_string()),
+            _ => return Err("timed out after 20s".into()),
+        }
+    } else {
+        Capabilities::detect(&cfg, &cached, &st.cfg.local_base)
+    };
+    if caps.read_only == cached.info().capability().write {
         st.forget_operator(id);
     }
-    let op = st.operator(id).await.map_err(|e| e.to_string())?;
-    let res = probe_operator(&op).await;
-    if res.is_ok()
-        && let Ok(cfg) = st.connection_config(id).await
-    {
-        let caps = Capabilities::detect(&cfg, &op, &st.cfg.local_base);
-        let _ = sqlx::query("UPDATE connections SET capabilities = $2 WHERE id = $1")
-            .bind(id)
-            .bind(sqlx::types::Json(caps))
-            .execute(&st.db)
-            .await;
-    }
-    res
+    let _ = sqlx::query("UPDATE connections SET capabilities = $2 WHERE id = $1")
+        .bind(id)
+        .bind(sqlx::types::Json(caps))
+        .execute(&st.db)
+        .await;
+    Ok(())
 }
 
 async fn store_probe(st: &AppState, id: i64, res: &Result<(), String>) -> ApiResult<()> {
