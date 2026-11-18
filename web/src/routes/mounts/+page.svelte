@@ -1,5 +1,6 @@
 <script lang="ts">
   import { api } from '$lib/api';
+  import { reloadMounts } from '$lib/mounts.svelte';
 
   type Mount = { id: number; path: string; mode: string; connection_id: number; connection_name: string; connection_kind: string; base_path: string };
   let mounts = $state<Mount[]>([]);
@@ -22,13 +23,13 @@
       const m = await api('POST', '/api/mounts', form);
       if (m.overlaps?.length)
         alert(`Heads up: ${m.overlaps.map((p: string) => '/' + p).join(', ')} shows an overlapping folder of the same connection. Changes appear in both places.`);
-      form.path = ''; form.base_path = ''; await load();
+      form.path = ''; form.base_path = ''; await load(); reloadMounts();
     }
     catch (err) { alert((err as Error).message); }
   }
   async function unmount(m: Mount) {
     if (!confirm(`Unmount "${m.path}"? Files stay on the backend; remounting the same folder brings them back.`)) return;
-    try { await api('DELETE', `/api/mounts/${m.id}`); await load(); } catch (e) { alert((e as Error).message); }
+    try { await api('DELETE', `/api/mounts/${m.id}`); await load(); reloadMounts(); } catch (e) { alert((e as Error).message); }
   }
   async function scan(m: Mount) {
     await api('POST', `/api/mounts/${m.id}/scan`);

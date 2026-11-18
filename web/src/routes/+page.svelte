@@ -287,9 +287,13 @@
   .item { text-align: left; border: 0; background: none; padding: 10px; border-radius: 8px; color: var(--text); display: block; }
   .item:hover { background: var(--hover); }
   .item.danger { color: var(--danger); }
+  @media (max-width: 767px) {
+    /* Clear of the phone tab bar. */
+    .uploads { bottom: calc(72px + env(safe-area-inset-bottom)); }
+  }
   @media (max-width: 700px) {
     .date { display: none; }
-    .actions { width: 100%; }
+    .actions { width: 100%; flex-wrap: wrap; }
     .search { flex: 1; width: auto; }
     .sheet-bg { align-items: end; }
     .sheet { width: 100%; border-radius: 16px 16px 0 0; padding-bottom: max(12px, env(safe-area-inset-bottom)); }
