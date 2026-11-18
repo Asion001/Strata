@@ -865,11 +865,11 @@ async fn digest_node(st: &AppState, m: &Mount, rel: &str, node: &Node) -> ApiRes
     Ok(Hash(*h.finalize().as_bytes()))
 }
 
-/// Content check for a raw save (call *before* taking the lock): metadata,
-/// then the content against the base hash the client's edit started from.
-/// Raw metadata can be too coarse to see every change, so a raw `If-Match`
-/// without a base hash is refused (428) rather than trusted. Returns the
-/// version that was verified, to be re-checked cheaply under the lock.
+/// Cheap checks for a raw save, before taking the lock: the precondition
+/// against metadata, and that a raw `If-Match` carries a base hash (raw
+/// metadata can be too coarse to see every change, so one without is
+/// refused with 428 rather than trusted). The content itself is compared
+/// once, under the lock (`recheck_raw_base`). Returns the version seen.
 async fn verify_raw_base(
     st: &AppState,
     m: &Mount,
@@ -879,14 +879,14 @@ async fn verify_raw_base(
     let current = current_file(st, m, rel).await?;
     check_expect(expect, current.as_ref())?;
     if let (Expect::Etag { base, .. }, Some(n)) = (expect, &current) {
-        let Some(base) = base else {
+        if base.is_none() {
             return Err(ApiError::PreconditionRequired(
                 "saving over a file on this storage also needs X-Strata-Base-Hash",
             ));
-        };
+        }
         // An edit can only be based on a file the editor could save
         // (BASE_CHECK_MAX); anything bigger has changed by definition.
-        if n.size > BASE_CHECK_MAX || digest_node(st, m, rel, n).await? != *base {
+        if n.size > BASE_CHECK_MAX {
             return Err(ApiError::PreconditionFailed(Some(etag_for(n))));
         }
     }
@@ -1143,8 +1143,8 @@ pub async fn write_stream_if(
         // temp files on backends that can't abort, no parent folders).
         // Plain writes (uploads, copies) lock only around the final close.
         let early = if *expect != Expect::Any {
-            // The (up to 5 MB) content comparison runs before the lock; under
-            // the lock only a cheap re-check that nothing changed since.
+            // Metadata checks run before the lock; the (up to 5 MB) content
+            // comparison against the base runs once, under the lock.
             let verified = verify_raw_base(st, m, rel, expect).await?;
             let l = lock_overlapping_raw(st, m).await?;
             recheck_raw_base(st, m, rel, expect, &verified).await?;
