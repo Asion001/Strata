@@ -4,6 +4,7 @@
   import { api, contentUrl, previewUrl, thumbUrl, type Entry } from '$lib/api';
   import { bytes, when, join, parent, icon, isImage, isTextName } from '$lib/format';
   import { runUpload, type UploadTask } from '$lib/upload';
+  import { reloadMounts } from '$lib/mounts.svelte';
   import VirtualList from '$lib/VirtualList.svelte';
   import Viewer from '$lib/Viewer.svelte';
   import Editor from '$lib/editor/Editor.svelte';
@@ -54,7 +55,8 @@
       ws.onmessage = () => {
         if (first) { first = false; return; }
         clearTimeout(timer);
-        timer = setTimeout(() => load(), 300);
+        // Renames and moves can shift mount paths too, so the sidebar refreshes.
+        timer = setTimeout(() => { load(); reloadMounts(); }, 300);
       };
       ws.onclose = () => { if (!closed) setTimeout(connect, 3000); };
     };
@@ -74,6 +76,7 @@
     try { await fn(); } catch (e) { alert((e as Error).message); }
     menu = null;
     await load();
+    reloadMounts();
   }
 
   const newFolder = () => {

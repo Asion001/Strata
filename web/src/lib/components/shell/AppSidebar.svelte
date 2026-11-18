@@ -5,13 +5,14 @@
   import { session } from '$lib/session.svelte';
   import { mounts } from '$lib/mounts.svelte';
   import SettingsIcon from '@lucide/svelte/icons/settings';
-  import { activeMount, folderHref, isActive, kindIcon, mainNav, manageNav } from './nav';
+  import { activeMount, folderHref, isActive, kindIcon, mainNav, manageNav, sidebarMounts } from './nav';
 
   let { class: className = '' }: { class?: string } = $props();
 
   const current = $derived(page.url.pathname === '/' ? (page.url.searchParams.get('p') ?? '') : null);
-  const openMount = $derived(current === null ? undefined : activeMount(mounts.list, current));
-  const sorted = $derived([...mounts.list].sort((a, b) => a.path.localeCompare(b.path)));
+  const shown = $derived(sidebarMounts(mounts.list));
+  // The root mount is All files, so only the listed mounts can be open.
+  const openMount = $derived(current === null ? undefined : activeMount(shown, current));
 
   function active(href: string): boolean {
     if (href === '/') return current !== null && !openMount;
@@ -37,15 +38,15 @@
     {/each}
   </nav>
 
-  {#if sorted.length}
+  {#if shown.length}
     <div class="mt-4 px-2.5 pb-1 text-xs font-medium text-muted-foreground">Mounts</div>
     <nav aria-label="Mounts" class="flex min-h-0 flex-col gap-0.5 overflow-y-auto">
-      {#each sorted as m (m.id)}
+      {#each shown as m (m.id)}
         {@const Icon = kindIcon(m.connection_kind)}
         {@const here = openMount?.id === m.id}
         <a href={folderHref(m.path)} class={cn(item, here && on)} aria-current={here ? 'page' : undefined} title="/{m.path} · {m.connection_name}">
           <Icon class="size-4 shrink-0" />
-          <span class="min-w-0 flex-1 truncate">{m.path.split('/').pop()}</span>
+          <span class="min-w-0 flex-1 truncate">{m.label}</span>
           <span class="font-mono text-[11px] text-muted-foreground">{m.mode}</span>
         </a>
       {/each}

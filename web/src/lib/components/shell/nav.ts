@@ -53,3 +53,16 @@ export function activeMount<T extends { path: string }>(list: T[], current: stri
   for (const m of list) if (inMount(m.path, current) && (!best || m.path.length > best.path.length)) best = m;
   return best;
 }
+
+/**
+ * Mounts to list in the sidebar, each with a label. The root mount ('') is
+ * "All files", so it is left out. A label is the last folder name, or the
+ * whole path when two mounts end in the same name.
+ */
+export function sidebarMounts<T extends { path: string }>(list: T[]): (T & { label: string })[] {
+  const shown = list.filter((m) => m.path !== '');
+  const last = (p: string) => p.split('/').pop() ?? p;
+  const count = new Map<string, number>();
+  for (const m of shown) count.set(last(m.path), (count.get(last(m.path)) ?? 0) + 1);
+  return shown.map((m) => ({ ...m, label: count.get(last(m.path))! > 1 ? m.path : last(m.path) }));
+}

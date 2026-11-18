@@ -138,35 +138,39 @@
   html, body { height: 100%; }
 }
 
-/* Old pages: the global element styles they were built with, plus the
-   browser defaults that preflight removes and they rely on. */
+/*
+ * Old pages: preflight is undone (back to browser defaults, which they were
+ * written against), then the global element styles they were built with.
+ * Scope: inside .legacy, but not inside shadcn-svelte components. The
+ * .legacy class gives the reset enough weight to beat preflight's element
+ * rules, and the element rules below one more step to beat the reset.
+ */
 @layer base {
   .legacy { line-height: normal; }
-  a:where(.legacy *):not(:where([data-slot], [data-slot] *)) { color: var(--accent); }
-  button:where(.legacy *):not(:where([data-slot], [data-slot] *)) {
-    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
-    padding: 7px 12px; cursor: pointer; white-space: nowrap;
+  :is(.legacy *):not(:where([data-slot], [data-slot] *)) {
+    margin: revert; padding: revert; border: revert; list-style: revert;
+    font-size: revert; font-weight: revert; display: revert; vertical-align: revert;
+
+    &:is(a) { color: var(--accent); }
+    &:is(button, input, select, textarea) { font: inherit; color: inherit; }
+    &:is(button) {
+      background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+      padding: 7px 12px; cursor: pointer; white-space: nowrap;
+      &:hover { background: var(--hover); }
+      &.primary { background: var(--accent); color: var(--accent-text); border-color: transparent; }
+      &.danger { color: var(--danger); }
+      &:disabled { opacity: .5; cursor: default; }
+    }
+    &:is(input, select) {
+      background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; width: 100%;
+      &:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+    }
+    &:is(label) { display: grid; gap: 4px; font-size: .9em; color: var(--muted); }
+    &:is(h1) { font-size: 1.4em; margin: 4px 0 16px; }
+    &:is(h2) { font-size: 1.1em; margin: 20px 0 10px; }
+    &:is(table) { width: 100%; }
+    &:is(td, th) { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--border); }
   }
-  button:where(.legacy *):not(:where([data-slot], [data-slot] *)):hover { background: var(--hover); }
-  button.primary:where(.legacy *):not(:where([data-slot], [data-slot] *)) { background: var(--accent); color: var(--accent-text); border-color: transparent; }
-  button.danger:where(.legacy *):not(:where([data-slot], [data-slot] *)) { color: var(--danger); }
-  button:where(.legacy *):not(:where([data-slot], [data-slot] *)):disabled { opacity: .5; cursor: default; }
-  input:where(.legacy *):not(:where([data-slot], [data-slot] *)), select:where(.legacy *):not(:where([data-slot], [data-slot] *)) {
-    background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; width: 100%;
-  }
-  input:where(.legacy *):not(:where([data-slot], [data-slot] *)):focus, select:where(.legacy *):not(:where([data-slot], [data-slot] *)):focus { outline: 2px solid var(--accent); outline-offset: -1px; }
-  label:where(.legacy *):not(:where([data-slot], [data-slot] *)) { display: grid; gap: 4px; font-size: .9em; color: var(--muted); }
-  p:where(.legacy *):not(:where([data-slot], [data-slot] *)) { margin: 1em 0; }
-  h1:where(.legacy *):not(:where([data-slot], [data-slot] *)) { font-size: 1.4em; font-weight: bold; margin: 4px 0 16px; }
-  h2:where(.legacy *):not(:where([data-slot], [data-slot] *)) { font-size: 1.1em; font-weight: bold; margin: 20px 0 10px; }
-  table:where(.legacy *):not(:where([data-slot], [data-slot] *)) { width: 100%; }
-  td:where(.legacy *):not(:where([data-slot], [data-slot] *)), th:where(.legacy *):not(:where([data-slot], [data-slot] *)) { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--border); }
-  th:where(.legacy *):not(:where([data-slot], [data-slot] *)) { font-weight: bold; }
-  dialog:where(.legacy *):not(:where([data-slot], [data-slot] *)) {
-    margin: auto; border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel); color: var(--text);
-    padding: 20px; width: min(480px, calc(100vw - 32px));
-  }
-  dialog:where(.legacy *):not(:where([data-slot], [data-slot] *))::backdrop { background: rgb(0 0 0 / .45); }
 }
 
 /* Old pages' shared helper classes. */
