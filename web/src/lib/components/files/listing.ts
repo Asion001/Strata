@@ -10,14 +10,18 @@ const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'bas
 /** Folders (and mounts) first, then by the chosen column; ties by name. */
 export function sortEntries(list: Entry[], sort: Sort): Entry[] {
   const dir = sort.desc ? -1 : 1;
-  return [...list].sort((a, b) => {
-    if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
-    let c = 0;
-    if (sort.key === 'size') c = a.size - b.size;
-    else if (sort.key === 'mtime') c = Date.parse(a.mtime) - Date.parse(b.mtime);
-    if (c === 0 || Number.isNaN(c)) c = collator.compare(a.name, b.name);
+  // Each sort value once (big folders), unparseable dates as the oldest so
+  // the order stays consistent.
+  const keyed = list.map((e) => {
+    const t = sort.key === 'mtime' ? Date.parse(e.mtime) : 0;
+    return { e, v: sort.key === 'size' ? e.size : sort.key === 'mtime' ? (Number.isNaN(t) ? -Infinity : t) : 0 };
+  });
+  keyed.sort((a, b) => {
+    if (a.e.is_dir !== b.e.is_dir) return a.e.is_dir ? -1 : 1;
+    const c = a.v === b.v ? collator.compare(a.e.name, b.e.name) : a.v < b.v ? -1 : 1;
     return c * dir;
   });
+  return keyed.map((k) => k.e);
 }
 
 /** Clicking a column: the same one flips direction, another starts ascending

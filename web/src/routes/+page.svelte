@@ -33,6 +33,9 @@
 
   let path = $derived(page.url.searchParams.get('p') ?? '');
   let entries = $state<Entry[]>([]);
+  // The folder `entries` belong to. It lags `path` until a new listing
+  // arrives, and every action on an entry joins with it, never with `path`.
+  let listedPath = $state('');
   let mount = $state<{ id: number; mode: string; connection_name: string; path: string } | null>(null);
   let editing = $state<string | null>(null);
   let loading = $state(false);
@@ -59,11 +62,12 @@
     desc: loadPref('strata-sort-desc', ['0', '1'] as const, '0') === '1'
   });
   let view = $state(loadPref('strata-view', ['list', 'grid'] as const, 'list'));
-  function sortBy(key: SortKey) {
-    sort = nextSort(sort, key);
+  function setSort(s: Sort) {
+    sort = { ...s };
     savePref('strata-sort-key', sort.key);
     savePref('strata-sort-desc', sort.desc ? '1' : '0');
   }
+  const sortBy = (key: SortKey) => setSort(nextSort(sort, key));
   function setView(v: 'list' | 'grid') {
     view = v;
     savePref('strata-view', v);
@@ -77,7 +81,9 @@
     selection.clear();
   });
   $effect(() => selection.prune(order));
-  const picked = $derived(sorted.filter((e) => selection.has(e.name)));
+  const byName = $derived(new Map(sorted.map((e) => [e.name, e])));
+  // From the selection, not a scan of the folder: cheap in big folders.
+  const picked = $derived([...selection.names].flatMap((n) => byName.get(n) ?? []));
   const pickedMounts = $derived(picked.filter((e) => e.mount_id).length);
 
   // Grid: as many columns as fit, rendered as virtual rows.
@@ -110,18 +116,13 @@
     ['Largest first', { key: 'size', desc: true }],
     ['Smallest first', { key: 'size', desc: false }]
   ];
-  function pickSort(i: number) {
-    const [, s] = SORT_CHOICES[i];
-    sort = { ...s };
-    savePref('strata-sort-key', sort.key);
-    savePref('strata-sort-desc', sort.desc ? '1' : '0');
-  }
+  const pickSort = (i: number) => setSort(SORT_CHOICES[i][1]);
 
   function onKeys(ev: KeyboardEvent) {
-    if (viewerIndex >= 0 || editing || menu) return;
+    if (viewerIndex >= 0 || editing || menu || hits) return;
     const t = ev.target as HTMLElement | null;
     if (t?.closest('input:not([type=checkbox]), textarea, select, [contenteditable]')) return;
-    if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'a' && !hits) {
+    if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'a') {
       ev.preventDefault();
       selection.toggleAll(order);
     } else if (ev.key === 'Escape' && selection.size) selection.clear();
@@ -136,6 +137,7 @@
       const r = await api('GET', `/api/files/list?path=${encodeURIComponent(p)}`);
       if (my !== seq) return;
       entries = r.entries;
+      listedPath = p;
       mount = r.mount;
     } catch (e) {
       if (my === seq) { error = (e as Error).message; entries = []; }
@@ -167,10 +169,10 @@
   });
 
   const crumbs = $derived(path ? path.split('/').map((n, i, a) => ({ name: n, path: a.slice(0, i + 1).join('/') })) : []);
-  const viewable = $derived(entries.filter((e) => !e.is_dir));
+  const viewable = $derived(sorted.filter((e) => !e.is_dir));
 
   function open(e: Entry) {
-    if (e.is_dir) goto(`/?p=${encodeURIComponent(join(path, e.name))}`);
+    if (e.is_dir) goto(`/?p=${encodeURIComponent(join(listedPath, e.name))}`);
     else viewerIndex = viewable.indexOf(e);
   }
 
@@ -190,13 +192,13 @@
   };
   const rename = async (e: Entry) => {
     menu = null;
-    const dir = path;
+    const dir = listedPath;
     const name = await promptDialog({ title: `Rename “${e.name}”`, label: 'New name', value: e.name, confirm: 'Rename' });
     if (name && name !== e.name) act(() => api('POST', '/api/files/move', { from: join(dir, e.name), to: join(dir, name) }));
   };
   const moveTo = async (e: Entry, copy = false) => {
     menu = null;
-    const from = join(path, e.name);
+    const from = join(listedPath, e.name);
     const to = await promptDialog({
       title: `${copy ? 'Copy' : 'Move'} “${e.name}”`,
       label: 'To (full path)',
@@ -207,7 +209,7 @@
   };
   const remove = async (e: Entry) => {
     menu = null;
-    const target = join(path, e.name);
+    const target = join(listedPath, e.name);
     const ok = await confirmDialog({
       title: `Delete “${e.name}”?`,
       body: e.is_dir ? 'The folder and everything in it will be deleted.' : 'The file will be deleted.',
@@ -218,7 +220,7 @@
   };
   const share = async (e: Entry) => {
     menu = null;
-    const target = join(path, e.name);
+    const target = join(listedPath, e.name);
     const f = await formDialog({
       title: `Share “${e.name}”`,
       body: 'Anyone with the link can open it.',
@@ -243,6 +245,8 @@
     } catch (err) { toastError(err); }
   };
 
+  const names = (items: Entry[]) => items.length === 1 ? `“${items[0].name}”` : `${items.length} items`;
+
   /** Runs `fn` for each item in turn; one failure doesn't stop the rest.
    *  Says what failed, then refreshes. */
   async function each(items: Entry[], verb: string, fn: (e: Entry) => Promise<unknown>) {
@@ -253,19 +257,17 @@
     }
     if (failed.length === 1) toast(`Couldn't ${verb} “${failed[0]}”: ${lastError}`, 'error');
     else if (failed.length) toast(`Couldn't ${verb} ${failed.length} items (${failed.slice(0, 3).join(', ')}${failed.length > 3 ? ', …' : ''}). ${lastError}`, 'error');
-    else toast(`${items.length === 1 ? `“${items[0].name}”` : `${items.length} items`} ${verb === 'delete' ? 'deleted' : verb === 'move' ? 'moved' : 'copied'}.`, 'success');
+    else toast(`${names(items)} ${verb === 'delete' ? 'deleted' : verb === 'move' ? 'moved' : 'copied'}.`, 'success');
     selection.clear();
     await load();
     reloadMounts();
   }
 
-  const names = (items: Entry[]) => items.length === 1 ? `“${items[0].name}”` : `${items.length} items`;
-
   async function removePicked() {
     // Mounts are removed on the Mounts page, never through a file delete.
     const items = picked.filter((e) => !e.mount_id);
     if (!items.length) return;
-    const dir = path;
+    const dir = listedPath;
     const ok = await confirmDialog({
       title: `Delete ${names(items)}?`,
       body: items.length === 1
@@ -280,7 +282,7 @@
   async function transferPicked(copy: boolean) {
     const items = copy ? picked : picked.filter((e) => !e.mount_id);
     if (!items.length) return;
-    const dir = path;
+    const dir = listedPath;
     const dest = await promptDialog({
       title: `${copy ? 'Copy' : 'Move'} ${names(items)}`,
       label: 'To folder (full path, empty for Home)',
@@ -290,7 +292,8 @@
     });
     if (dest === null) return;
     const to = dest.replace(/^\/+|\/+$/g, '');
-    if (!copy && to === dir) return;
+    // Same folder: a move does nothing and a copy would collide with itself.
+    if (to === dir) return void toast('Pick a different folder.', 'info');
     await each(items, copy ? 'copy' : 'move', (e) =>
       api('POST', copy ? '/api/files/copy' : '/api/files/move', { from: join(dir, e.name), to: join(to, e.name) })
     );
@@ -353,6 +356,26 @@
   </div>
 {/snippet}
 
+{#snippet selectAll()}
+  <input type="checkbox" class="size-4 cursor-pointer accent-primary" aria-label="Select all"
+            checked={sorted.length > 0 && selection.size === sorted.length}
+            indeterminate={selection.size > 0 && selection.size < sorted.length}
+            disabled={!sorted.length}
+            onclick={(ev) => {
+              selection.toggleAll(order);
+              ev.currentTarget.checked = selection.size === sorted.length;
+              ev.currentTarget.indeterminate = false;
+            }} />
+{/snippet}
+
+{#snippet sortMenu(extra = '')}
+  <select aria-label="Sort by" class={cn('h-7 rounded-md border border-input bg-transparent px-1.5 text-xs text-foreground', extra)}
+    value={SORT_CHOICES.findIndex(([, c]) => c.key === sort.key && c.desc === sort.desc)}
+    onchange={(ev) => pickSort(Number(ev.currentTarget.value))}>
+    {#each SORT_CHOICES as [label], i (label)}<option value={i}>{label}</option>{/each}
+  </select>
+{/snippet}
+
 {#snippet checkbox(e: Entry, extra = '')}
   <input
     type="checkbox"
@@ -372,8 +395,7 @@
   </button>
 {/snippet}
 
-<!-- data-slot keeps the old page styles (.legacy) out of this rebuilt page. -->
-<div data-slot="files" class="relative flex h-full flex-col text-[15px]">
+<div class="relative flex h-full flex-col text-[15px]">
   <header class="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b border-border px-4 py-2.5">
     <nav aria-label="Folder path" class="flex min-w-0 flex-wrap items-center gap-1 text-sm">
       <a href="/?p=" class="rounded-md px-1.5 py-1 font-medium text-foreground hover:bg-accent">Home</a>
@@ -431,26 +453,12 @@
   {:else if view === 'list'}
     <div class="flex min-h-0 flex-1 flex-col" role="table" aria-label="Files" aria-rowcount={sorted.length + 1}>
       <div role="row" aria-rowindex={1} class="flex h-9 shrink-0 items-center gap-3 border-b border-border px-4 text-xs font-medium text-muted-foreground">
-        <div role="columnheader" class="flex w-4 justify-center">
-          <input type="checkbox" class="size-4 cursor-pointer accent-primary" aria-label="Select all"
-            checked={sorted.length > 0 && selection.size === sorted.length}
-            indeterminate={selection.size > 0 && selection.size < sorted.length}
-            disabled={!sorted.length}
-            onclick={(ev) => {
-              selection.toggleAll(order);
-              ev.currentTarget.checked = selection.size === sorted.length;
-              ev.currentTarget.indeterminate = false;
-            }} />
-        </div>
+        <div role="columnheader" class="flex w-4 justify-center">{@render selectAll()}</div>
         <div class="w-7" aria-hidden="true"></div>
         {@render sortHead('name', 'Name', 'flex-1')}
         {@render sortHead('size', 'Size', 'hidden w-20 justify-end text-right sm:flex')}
         {@render sortHead('mtime', 'Modified', 'hidden w-28 justify-end text-right md:flex')}
-        <select aria-label="Sort by" class="h-7 rounded-md border border-input bg-transparent px-1.5 text-xs text-foreground sm:hidden"
-          value={SORT_CHOICES.findIndex(([, c]) => c.key === sort.key && c.desc === sort.desc)}
-          onchange={(ev) => pickSort(Number(ev.currentTarget.value))}>
-          {#each SORT_CHOICES as [label], i (label)}<option value={i}>{label}</option>{/each}
-        </select>
+        {@render sortMenu('sm:hidden')}
         <div class="w-8 max-sm:hidden" aria-hidden="true"></div>
       </div>
       <div class="relative min-h-0 flex-1">
@@ -468,12 +476,12 @@
               <div role="cell" class="flex w-4 justify-center">{@render checkbox(e)}</div>
               <div role="cell" class="grid size-7 place-items-center">
                 {#if !e.is_dir && isImage(e.name)}
-                  <img loading="lazy" src={thumbUrl(join(path, e.name), e.etag)} alt="" class="size-7 rounded object-cover" />
+                  <img loading="lazy" src={thumbUrl(join(listedPath, e.name), e.etag)} alt="" class="size-7 rounded object-cover" />
                 {:else}<FileIcon entry={e} class="size-6" />{/if}
               </div>
               <div role="cell" class="flex min-w-0 flex-1 flex-col">
                 <button type="button" class="truncate rounded-sm text-left text-foreground hover:underline focus-visible:outline-2 focus-visible:outline-ring"
-                  onclick={(ev) => { ev.stopPropagation(); if (ev.shiftKey || ev.ctrlKey || ev.metaKey || selection.size) activate(e, ev); else open(e); }}>{e.name}</button>
+                  onclick={(ev) => { ev.stopPropagation(); activate(e, ev); }}>{e.name}</button>
                 <span class="truncate text-xs text-muted-foreground sm:hidden">
                   {e.mount_id ? 'Mount' : e.is_dir ? 'Folder' : bytes(e.size)} · {when(e.mtime)}
                 </span>
@@ -488,6 +496,11 @@
       </div>
     </div>
   {:else}
+    <div class="flex h-9 shrink-0 items-center gap-3 border-b border-border px-4 text-xs font-medium text-muted-foreground">
+      {@render selectAll()}
+      <span class="mr-auto">{sorted.length} items</span>
+      {@render sortMenu()}
+    </div>
     <div class="relative min-h-0 flex-1" bind:clientWidth={gridWidth}>
       {#if !loading && entries.length === 0}
         <p class="absolute inset-x-0 top-10 text-center text-muted-foreground">This folder is empty. Drop files here or press Upload.</p>
@@ -502,13 +515,13 @@
                 onclick={(ev) => activate(e, ev)}>
                 <div class="grid min-h-0 flex-1 place-items-center bg-muted/60">
                   {#if !e.is_dir && isImage(e.name)}
-                    <img loading="lazy" src={thumbUrl(join(path, e.name), e.etag)} alt="" class="size-full object-cover" />
+                    <img loading="lazy" src={thumbUrl(join(listedPath, e.name), e.etag)} alt="" class="size-full object-cover" />
                   {:else}<FileIcon entry={e} class="size-14" />{/if}
                 </div>
                 <div class="flex items-center gap-1 px-2.5 py-2">
                   <div class="flex min-w-0 flex-1 flex-col">
                     <button type="button" class="truncate rounded-sm text-left text-sm font-medium text-foreground focus-visible:outline-2 focus-visible:outline-ring"
-                      onclick={(ev) => { ev.stopPropagation(); if (ev.shiftKey || ev.ctrlKey || ev.metaKey || selection.size) activate(e, ev); else open(e); }}>{e.name}</button>
+                      onclick={(ev) => { ev.stopPropagation(); activate(e, ev); }}>{e.name}</button>
                     <span class="truncate text-xs text-muted-foreground">{e.mount_id ? 'Mount' : e.is_dir ? 'Folder' : bytes(e.size)}</span>
                   </div>
                   {@render moreButton(e, '-mr-1')}
@@ -544,15 +557,15 @@
 
 {#if menu}
   {@const e = menu}
-  <div data-slot="files-menu" class="fixed inset-0 z-30 grid place-items-center bg-black/35 max-sm:items-end" role="presentation" onclick={() => (menu = null)}>
+  <div class="fixed inset-0 z-30 grid place-items-center bg-black/35 max-sm:items-end" role="presentation" onclick={() => (menu = null)}>
     <div role="menu" tabindex="-1" aria-label="Actions for {e.name}"
       class="grid w-[min(320px,calc(100vw-2rem))] gap-0.5 rounded-xl border border-border bg-popover p-2 text-popover-foreground shadow-lg max-sm:w-full max-sm:rounded-b-none max-sm:pb-[max(0.75rem,env(safe-area-inset-bottom))]"
       onclick={(ev) => ev.stopPropagation()} onkeydown={(ev) => { if (ev.key === 'Escape') menu = null; }}>
       <div class="flex items-center gap-2 px-2.5 pt-1.5 pb-2.5"><FileIcon entry={e} class="size-5" /><b class="truncate text-sm">{e.name}</b></div>
-      {#if !e.is_dir}<a role="menuitem" class="item" href={contentUrl(join(path, e.name), true)}>Download</a>{/if}
+      {#if !e.is_dir}<a role="menuitem" class="item" href={contentUrl(join(listedPath, e.name), true)}>Download</a>{/if}
       {#if !e.mount_id}
         {#if !e.is_dir && isTextName(e.name)}
-          <button role="menuitem" class="item" onclick={() => { editing = join(path, e.name); menu = null; }}>Edit</button>
+          <button role="menuitem" class="item" onclick={() => { editing = join(listedPath, e.name); menu = null; }}>Edit</button>
         {/if}
         <button role="menuitem" class="item" onclick={() => rename(e)}>Rename</button>
         <button role="menuitem" class="item" onclick={() => moveTo(e)}>Move…</button>
@@ -568,18 +581,23 @@
   </div>
 {/if}
 
+<!-- The viewer and editor aren't rebuilt yet: they keep the old styles. -->
 {#if viewerIndex >= 0 && Viewer}
+  <div class="legacy contents">
   <Viewer
-    items={viewable.map((v) => ({ name: v.name, size: v.size, src: previewUrl(join(path, v.name)), download: contentUrl(join(path, v.name), true) }))}
+    items={viewable.map((v) => ({ name: v.name, size: v.size, src: previewUrl(join(listedPath, v.name)), download: contentUrl(join(listedPath, v.name), true) }))}
     bind:index={viewerIndex}
-    onedit={(i) => { editing = join(path, viewable[i].name); viewerIndex = -1; }}
+    onedit={(i) => { editing = join(listedPath, viewable[i].name); viewerIndex = -1; }}
     onclose={() => (viewerIndex = -1)} />
+  </div>
 {/if}
 
 {#if editing && session.user}
+  <div class="legacy contents">
   {#key editing}
     <Editor path={editing} userId={session.user.id} mountId={mount?.id ?? null} onclose={() => { editing = null; load(); }} />
   {/key}
+  </div>
 {/if}
 
 <style>

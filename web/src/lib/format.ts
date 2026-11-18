@@ -38,13 +38,24 @@ export const isTextName = (n: string) =>
 export const isSvg = (n: string) => /\.svg$/i.test(n);
 export const isAudio = (n: string) => /\.(mp3|m4a|flac|ogg|wav|opus)$/i.test(n);
 
+export type Kind = 'mount' | 'dir' | 'image' | 'video' | 'audio' | 'archive' | 'pdf' | 'text' | 'file';
+
+/** What an entry is, for icons. One table for every place that shows one. */
+export function kindOf(e: { name: string; is_dir: boolean; mount_id?: number | null }): Kind {
+  if (e.mount_id) return 'mount';
+  if (e.is_dir) return 'dir';
+  if (isImage(e.name)) return 'image';
+  if (isVideo(e.name)) return 'video';
+  if (isAudio(e.name)) return 'audio';
+  if (/\.(zip|tar|gz|7z|rar|zst)$/i.test(e.name)) return 'archive';
+  if (isPdf(e.name)) return 'pdf';
+  if (isTextName(e.name)) return 'text';
+  return 'file';
+}
+
+const EMOJI: Record<Kind, string> = {
+  mount: '🗄️', dir: '📁', image: '🖼️', video: '🎞️', audio: '🎵', archive: '🗜️', pdf: '📕', text: '📄', file: '📄'
+};
 export function icon(e: { name: string; is_dir: boolean; mount_id?: number | null }): string {
-  if (e.mount_id) return '🗄️';
-  if (e.is_dir) return '📁';
-  if (isImage(e.name)) return '🖼️';
-  if (isVideo(e.name)) return '🎞️';
-  if (isAudio(e.name)) return '🎵';
-  if (/\.(zip|tar|gz|7z|rar|zst)$/i.test(e.name)) return '🗜️';
-  if (/\.(pdf)$/i.test(e.name)) return '📕';
-  return '📄';
+  return EMOJI[kindOf(e)];
 }
