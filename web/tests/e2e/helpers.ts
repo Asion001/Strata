@@ -54,3 +54,37 @@ export async function typeAtEnd(page: Page, text: string) {
   await page.keyboard.press('ControlOrMeta+End');
   await page.keyboard.type(text);
 }
+
+/** A small, valid PDF with one line of Helvetica text per page (ASCII only,
+ *  so it can be sent as a string). */
+export function makePdf(pageTexts: string[]): string {
+  const objs: string[] = [];
+  const n = pageTexts.length;
+  // 1: catalog, 2: pages, 3: font, then per page: page + content stream
+  objs.push('<< /Type /Catalog /Pages 2 0 R >>');
+  const kids = pageTexts.map((_, i) => `${4 + i * 2} 0 R`).join(' ');
+  objs.push(`<< /Type /Pages /Kids [${kids}] /Count ${n} >>`);
+  objs.push('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>');
+  pageTexts.forEach((t, i) => {
+    const stream = `BT /F1 24 Tf 72 700 Td (${t.replace(/[()\\]/g, '\\$&')}) Tj ET`;
+    objs.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents ${5 + i * 2} 0 R >>`);
+    objs.push(`<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`);
+  });
+  let out = '%PDF-1.4\n';
+  const offsets: number[] = [];
+  objs.forEach((o, i) => {
+    offsets.push(out.length);
+    out += `${i + 1} 0 obj\n${o}\nendobj\n`;
+  });
+  const xref = out.length;
+  out += `xref\n0 ${objs.length + 1}\n0000000000 65535 f \n`;
+  for (const o of offsets) out += `${String(o).padStart(10, '0')} 00000 n \n`;
+  out += `trailer\n<< /Size ${objs.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+  return out;
+}
+
+/** Open a file in the preview viewer from the folder listing. */
+export async function openPreview(page: Page, dir: string, name: string) {
+  await page.goto(`/?p=${encodeURIComponent(dir)}`);
+  await page.locator('.entry', { hasText: name }).click();
+}

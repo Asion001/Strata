@@ -141,6 +141,28 @@ the trailing newline are preserved; mixed-ending files are kept verbatim.
 Files over 5 MB or not valid UTF-8 open read-only, files over 20 MB are not
 loaded, and files with NUL bytes in their first 8 KB are refused.
 
+
+## PDF viewer
+PDFs open in pdf.js (`pdfjs-dist`, pinned to an exact version) inside the
+preview viewer. Both the preview viewer and pdf.js load only when a file is
+opened, so neither is in the startup bundle (`npm run size` checks this in
+CI against `web/bundle-baseline.json`).
+* **Range loading.** The file is read from the normal content route with
+  byte ranges. Streaming and background fetching are off and chunks are
+  256 KB, so a large file shows its first page after a few small reads.
+  File content responses are never compressed on the fly, since that would
+  drop the Content-Length that range readers need.
+* **Same origin.** The worker is a build asset, and CMaps, standard fonts,
+  WASM decoders and ICC profiles are copied to `/pdfjs/<version>/` at build.
+  pdf.js 6 compiles no code at runtime, so it runs under the app's CSP with
+  no extra allowances. The worker, stylesheet and data files are fetched only
+  when a PDF opens; the service worker doesn't precache them.
+* **No document scripting.** No scripting manager is attached, forms and
+  XFA are off (annotations are links only), and links leave the viewer only
+  for http(s) URLs, in a new tab with `noopener noreferrer`.
+* **Viewer features.** Thumbnails render as they scroll into view. Find uses
+  pdf.js's find controller. Print renders the pages to images and prints
+  those.
 ## Security notes
 * Argon2id passwords; sessions are random tokens stored as BLAKE3 hashes.
 * Cookie sessions require an `X-Strata` header on mutating requests (CSRF).

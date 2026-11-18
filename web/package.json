@@ -5,11 +5,12 @@
   "type": "module",
   "license": "AGPL-3.0-only",
   "scripts": {
-    "dev": "vite dev",
-    "build": "node scripts/icons.mjs && vite build",
+    "dev": "node scripts/pdfjs-assets.mjs && vite dev",
+    "build": "node scripts/icons.mjs && node scripts/pdfjs-assets.mjs && vite build",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "test": "vitest run",
-    "e2e": "playwright test"
+    "e2e": "playwright test",
+    "size": "node scripts/bundle-size.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.65.1",
@@ -51,6 +52,7 @@
     "dompurify": "^3.4.18",
     "hash-wasm": "^4.13.0",
     "markdown-it": "^15.0.3",
+    "pdfjs-dist": "6.5.438",
     "tailwind-merge": "^3.7.0"
   }
 }
