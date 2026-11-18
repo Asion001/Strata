@@ -5,6 +5,8 @@
   import { session } from '$lib/session.svelte';
   import { mounts } from '$lib/mounts.svelte';
   import SettingsIcon from '@lucide/svelte/icons/settings';
+  import SearchIcon from '@lucide/svelte/icons/search';
+  import { openPalette } from '$lib/palette.svelte';
   import { activeMount, folderHref, isActive, kindIcon, mainNav, manageNav, sidebarMounts } from './nav';
 
   let { class: className = '' }: { class?: string } = $props();
@@ -19,6 +21,8 @@
     return isActive(href, page.url.pathname);
   }
 
+  const mac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);
+
   const item =
     'flex h-9 items-center gap-2.5 rounded-md px-2.5 text-sm text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:outline-2 focus-visible:outline-ring';
   const on = 'bg-sidebar-accent font-medium text-sidebar-accent-foreground';
@@ -29,6 +33,10 @@
     <img src="/favicon.png" alt="" width="24" height="24" class="rounded-md" />
     Strata
   </a>
+  <button type="button" onclick={openPalette} class={cn(item, 'mb-2 border border-sidebar-border')} aria-keyshortcuts="Control+K Meta+K">
+    <SearchIcon class="size-4 shrink-0" />Search
+    <kbd class="ml-auto text-xs">{mac ? '⌘' : 'Ctrl '}K</kbd>
+  </button>
 
   <nav aria-label="Files" class="flex flex-col gap-0.5">
     {#each mainNav as l (l.href)}
