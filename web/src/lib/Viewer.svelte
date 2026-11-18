@@ -1,6 +1,7 @@
 <script lang="ts">
   // Full-screen preview: image gallery (arrows, swipe, zoom), native video/audio, text.
   import { isAudio, isImage, isPdf, isSvg, isTextName, isVideo, bytes } from './format';
+  import { staleApp } from './lazy';
 
   interface Item { name: string; size: number; src: string; download: string }
   let {
@@ -19,7 +20,8 @@
   // The PDF viewer component, loaded on first use.
   let Pdf = $state<typeof import('./pdf/PdfViewer.svelte').default>();
   $effect(() => {
-    if (!Pdf && isPdf(item.name)) import('./pdf/PdfViewer.svelte').then((m) => (Pdf = m.default));
+    if (!Pdf && isPdf(item.name))
+      import('./pdf/PdfViewer.svelte').then((m) => (Pdf = m.default), staleApp);
   });
 
   $effect(() => {
@@ -74,6 +76,8 @@
     const t = e.target as HTMLElement | null;
     if (t?.closest('input, textarea, select, [contenteditable]')) return;
     if (e.key === 'Escape') onclose();
+    // In a PDF the arrow keys scroll the pages.
+    if (isPdf(item.name)) return;
     if (e.key === 'ArrowRight') step(1);
     if (e.key === 'ArrowLeft') step(-1);
   }
@@ -99,7 +103,7 @@
         ondblclick={() => (zoom = zoom === 1 ? 2.5 : 1)} />
     {:else if isPdf(item.name)}
       <!-- pdf.js loads only now, in its own chunks. -->
-      {#if Pdf}<Pdf src={item.src} download={item.download} name={item.name} />{/if}
+      {#if Pdf}{#key item.src}<Pdf src={item.src} download={item.download} name={item.name} />{/key}{/if}
     {:else if isVideo(item.name)}
       <!-- svelte-ignore a11y_media_has_caption -->
       <video src={item.src} controls autoplay playsinline></video>

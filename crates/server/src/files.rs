@@ -202,6 +202,8 @@ pub async fn serve(
     };
     let decision = safe::decide_class(class, purpose);
     let mut resp = Response::new(Body::from_stream(stream));
+    // Byte-range responses go out as stored (see `routes::Uncompressed`).
+    resp.extensions_mut().insert(crate::routes::Uncompressed);
     let h = resp.headers_mut();
     safe::protect(h);
     h.insert(

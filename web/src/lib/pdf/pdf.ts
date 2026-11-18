@@ -34,8 +34,7 @@ export function openPdf(url: string) {
     standardFontDataUrl: `${data}/standard_fonts/`,
     wasmUrl: `${data}/wasm/`,
     iccUrl: `${data}/iccs/`,
-    enableXfa: false,
-    isOffscreenCanvasSupported: true
+    enableXfa: false
   });
 }
 

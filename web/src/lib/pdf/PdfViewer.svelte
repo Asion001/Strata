@@ -22,6 +22,7 @@
   let printing = $state('');
 
   let task: PDFDocumentLoadingTask | null = null;
+  let pageBox: HTMLInputElement;
   // pdf.js viewer objects (untyped here: the component module is loaded at runtime)
   let viewer: any = null;
   let bus: any = null;
@@ -53,7 +54,8 @@
       bus.on('pagesinit', () => (viewer.currentScaleValue = 'auto'));
       bus.on('pagechanging', (e: { pageNumber: number }) => {
         page = e.pageNumber;
-        pageInput = String(e.pageNumber);
+        // Not while someone is typing a page number.
+        if (document.activeElement !== pageBox) pageInput = String(e.pageNumber);
       });
       bus.on('scalechanging', (e: { scale: number }) => (scaleLabel = `${Math.round(e.scale * 100)}%`));
       bus.on('updatefindmatchescount', (e: { matchesCount: { current: number; total: number } }) => (matches = e.matchesCount));
@@ -146,22 +148,39 @@
 
   // Print: render every page to an image in a print-only container (the
   // browser can't print the canvases pdf.js shows, and the file itself is
-  // served sandboxed, which browsers won't print from a frame).
+  // served sandboxed, which browsers won't print from a frame). Pages are
+  // JPEG at 150 dpi to keep memory in check; long documents ask first, and
+  // the preparation can be cancelled.
+  let cancelPrint = false;
   async function print() {
-    if (!doc || printing) return;
+    if (!doc) return;
+    if (printing) {
+      cancelPrint = true;
+      return;
+    }
+    const n = doc.numPages;
+    if (n > 100 && !confirm(`Prepare all ${n} pages for printing? This can take a while; you can cancel it.`)) return;
+    cancelPrint = false;
     const urls: string[] = [];
     const root = document.createElement('div');
     root.className = 'print-root';
+    const cleanup = () => {
+      root.remove();
+      urls.forEach((u) => URL.revokeObjectURL(u));
+    };
     try {
-      for (let n = 1; n <= doc.numPages; n++) {
-        printing = `Preparing ${n}/${doc.numPages}…`;
-        const p = await doc.getPage(n);
+      for (let i = 1; i <= n; i++) {
+        if (cancelPrint || destroyed) return cleanup();
+        printing = `Preparing ${i}/${n}… (cancel)`;
+        const p = await doc.getPage(i);
         const vp = p.getViewport({ scale: 150 / 72 });
         const c = document.createElement('canvas');
         c.width = vp.width;
         c.height = vp.height;
         await p.render({ canvas: c, viewport: vp, intent: 'print' }).promise;
-        const blob = await new Promise<Blob | null>((r) => c.toBlob(r));
+        p.cleanup();
+        const blob = await new Promise<Blob | null>((r) => c.toBlob(r, 'image/jpeg', 0.92));
+        c.width = c.height = 0;
         if (blob) urls.push(URL.createObjectURL(blob));
       }
       for (const u of urls) {
@@ -172,13 +191,16 @@
       }
       document.body.append(root);
       await Promise.all([...root.querySelectorAll('img')].map((i) => i.decode().catch(() => {})));
-      printing = '';
-      window.print();
+    } catch (e) {
+      cleanup();
+      throw e;
     } finally {
       printing = '';
-      root.remove();
-      urls.forEach((u) => URL.revokeObjectURL(u));
     }
+    // Some browsers (phones) return from print() before printing: clean up
+    // only once the print dialog is done.
+    addEventListener('afterprint', cleanup, { once: true });
+    window.print();
   }
 
   function onKey(e: KeyboardEvent) {
@@ -196,7 +218,7 @@
     <button onclick={() => (showThumbs = !showThumbs)} aria-pressed={showThumbs} title="Thumbnails">☰</button>
     <label class="pageno">
       <span class="sr">Page</span>
-      <input inputmode="numeric" aria-label="Page number" bind:value={pageInput}
+      <input inputmode="numeric" aria-label="Page number" bind:value={pageInput} bind:this={pageBox}
         onkeydown={(e) => e.key === 'Enter' && goTo(Number(pageInput))}
         onblur={() => goTo(Number(pageInput))} />
       <span>/ {pages || '…'}</span>
@@ -213,7 +235,7 @@
       <button type="submit" aria-label="Next match">↓</button>
     </form>
     <a class="btn" href={download}>Download</a>
-    <button onclick={print} disabled={!doc || !!printing}>{printing || 'Print'}</button>
+    <button onclick={print} disabled={!doc}>{printing || 'Print'}</button>
   </div>
   <div class="body">
     {#if showThumbs && doc}

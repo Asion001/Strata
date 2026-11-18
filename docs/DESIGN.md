@@ -155,7 +155,8 @@ CI against `web/bundle-baseline.json`).
 * **Same origin.** The worker is a build asset, and CMaps, standard fonts,
   WASM decoders and ICC profiles are copied to `/pdfjs/<version>/` at build.
   pdf.js 6 compiles no code at runtime, so it runs under the app's CSP with
-  no extra allowances. These files are not precached by the service worker.
+  no extra allowances. The worker, stylesheet and data files are fetched only
+  when a PDF opens; the service worker doesn't precache them.
 * **No document scripting.** No scripting manager is attached, forms and
   XFA are off (annotations are links only), and links leave the viewer only
   for http(s) URLs, in a new tab with `noopener noreferrer`.

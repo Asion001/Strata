@@ -6,6 +6,7 @@
   import { runUpload, type UploadTask } from '$lib/upload';
   import VirtualList from '$lib/VirtualList.svelte';
   import Editor from '$lib/editor/Editor.svelte';
+  import { staleApp } from '$lib/lazy';
   import { session } from '$lib/session.svelte';
 
   let path = $derived(page.url.searchParams.get('p') ?? '');
@@ -22,7 +23,7 @@
   // The preview viewer (and, through it, the PDF viewer) loads on first use.
   let Viewer = $state<typeof import('$lib/Viewer.svelte').default>();
   $effect(() => {
-    if (viewerIndex >= 0 && !Viewer) import('$lib/Viewer.svelte').then((m) => (Viewer = m.default));
+    if (viewerIndex >= 0 && !Viewer) import('$lib/Viewer.svelte').then((m) => (Viewer = m.default), staleApp);
   });
   let dragging = $state(false);
   let fileInput: HTMLInputElement;
