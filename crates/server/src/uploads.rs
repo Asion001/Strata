@@ -129,6 +129,8 @@ pub async fn create(
     if rel.is_empty() {
         return Err(bad("cannot upload onto a mount point"));
     }
+    // Refuse before the client sends any data, not at commit.
+    vfs::ensure_writable(&st, &m).await?;
     if req.chunks.is_empty() || req.chunks.len() > 1_000_000 {
         return Err(bad("bad chunk list"));
     }

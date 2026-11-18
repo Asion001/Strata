@@ -9,12 +9,22 @@ use opendal::layers::{RetryLayer, TimeoutLayer};
 use opendal::{Operator, services};
 use serde::{Deserialize, Serialize};
 
+use crate::readonly::ReadOnlyLayer;
+
 /// Folder inside each local connection used for atomic writes; never listed.
 pub const ATOMIC_TMP_DIR: &str = ".strata-tmp";
 
 /// Does a `/`-separated path contain the reserved atomic-write folder?
 pub fn has_reserved_component(path: &str) -> bool {
     path.split('/').any(|c| c == ATOMIC_TMP_DIR)
+}
+
+/// Errors that mean "this folder exists but we may not write to it".
+fn is_read_only_error(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::ReadOnlyFilesystem | std::io::ErrorKind::PermissionDenied
+    )
 }
 
 /// Backend configuration. Serialised to JSON and encrypted at rest.
@@ -122,12 +132,22 @@ impl ConnectionConfig {
                 // Inside the connection's own folder: same filesystem, so the
                 // final rename never crosses devices.
                 let tmp = dir.join(ATOMIC_TMP_DIR);
-                std::fs::create_dir_all(&tmp)?;
-                Operator::new(
-                    services::Fs::default()
-                        .root(&dir.to_string_lossy())
-                        .atomic_write_dir(&tmp.to_string_lossy()),
-                )?
+                match std::fs::create_dir_all(&tmp) {
+                    Ok(()) => Operator::new(
+                        services::Fs::default()
+                            .root(&dir.to_string_lossy())
+                            .atomic_write_dir(&tmp.to_string_lossy()),
+                    )?,
+                    // A folder we may read but not write (e.g. bind-mounted
+                    // read-only): offer it for browsing and downloads only.
+                    // Without an atomic write folder a write would go straight
+                    // to the target, so the read-only layer refuses them all.
+                    Err(e) if is_read_only_error(&e) && dir.is_dir() => {
+                        Operator::new(services::Fs::default().root(&dir.to_string_lossy()))?
+                            .layer(ReadOnlyLayer)
+                    }
+                    Err(e) => return Err(e.into()),
+                }
             }
             Self::S3 {
                 bucket,
@@ -194,6 +214,10 @@ pub struct Capabilities {
     pub snapshots_create: bool,
     pub rename: bool,
     pub range_read: bool,
+    /// Files can be listed and read but nothing can be written (e.g. a local
+    /// folder mounted read-only on the server).
+    #[serde(default)]
+    pub read_only: bool,
     /// Filesystem type name for local connections (e.g. "ext4", "btrfs").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fs_type: Option<String>,
@@ -207,6 +231,7 @@ impl Capabilities {
         let mut c = Capabilities {
             rename: cap.rename,
             range_read: cap.read,
+            read_only: !cap.write,
             ..Default::default()
         };
         if let Ok(Some(dir)) = cfg.local_dir(local_base) {

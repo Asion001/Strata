@@ -12,6 +12,7 @@ pub mod chunker;
 pub mod crypto;
 pub mod hashed;
 pub mod paths;
+pub mod readonly;
 
 pub use backend::{Capabilities, ConnectionConfig, SnapshotKind};
 pub use hashed::{Hash, HashedStore};

@@ -1135,3 +1135,139 @@ fn state_dir_inside_storage_base_is_refused() {
     cfg.data_dir = "/var/lib/strata".into();
     assert!(cfg.checked().is_ok());
 }
+
+/// A local folder Strata may read but not write (e.g. bind-mounted read-only)
+/// can be added and browsed; every change is refused and nothing on disk moves.
+#[tokio::test]
+async fn read_only_local_folder_can_be_browsed_but_not_changed() {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(t) = app().await else { return };
+    let disk = t.dir.path().join("local/media");
+    std::fs::create_dir_all(disk.join("films")).unwrap();
+    std::fs::write(disk.join("films/a.txt"), b"keep me").unwrap();
+    let lock = |mode| {
+        for d in [disk.join("films"), disk.clone()] {
+            std::fs::set_permissions(&d, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+    };
+    lock(0o555);
+    // root ignores permission bits, so this needs an ordinary user (as in CI)
+    if std::fs::create_dir(disk.join("probe")).is_ok() {
+        eprintln!("skipping: permission bits are not enforced (running as root?)");
+        return;
+    }
+
+    let v = t
+        .ok(
+            "POST",
+            "/api/connections",
+            json!({"name": "Media", "config": {"kind": "local", "path": "media"}}),
+        )
+        .await;
+    assert_eq!(v["health"], "ok", "{v}");
+    assert_eq!(v["capabilities"]["read_only"], true, "{v}");
+    let cid = v["id"].as_i64().unwrap();
+    assert!(!disk.join(".strata-tmp").exists());
+
+    // hashed mode needs to write blobs: refused with a clear message
+    let (s, v) = t
+        .json(
+            "POST",
+            "/api/mounts",
+            json!({"path": "Media", "connection_id": cid, "mode": "hashed"}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
+    assert!(v["error"].as_str().unwrap().contains("read-only"), "{v}");
+
+    t.ok(
+        "POST",
+        "/api/mounts",
+        json!({"path": "Media", "connection_id": cid, "mode": "raw"}),
+    )
+    .await;
+    assert_eq!(t.names("Media").await, vec!["films"]);
+    assert_eq!(t.names("Media/films").await, vec!["a.txt"]);
+    assert_eq!(t.download("Media/films/a.txt").await, b"keep me");
+
+    let refused = |(s, v): (StatusCode, serde_json::Value)| {
+        assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
+        assert_eq!(v["error"], "this folder is read-only", "{v}");
+    };
+    refused(
+        t.json("POST", "/api/files/mkdir", json!({"path": "Media/new"}))
+            .await,
+    );
+    refused(
+        t.json(
+            "POST",
+            "/api/files/delete",
+            json!({"paths": ["Media/films/a.txt"]}),
+        )
+        .await,
+    );
+    refused(
+        t.json(
+            "POST",
+            "/api/files/move",
+            json!({"from": "Media/films/a.txt", "to": "Media/films/b.txt"}),
+        )
+        .await,
+    );
+    // moving out would copy and then fail to delete: refused before copying
+    refused(
+        t.json(
+            "POST",
+            "/api/files/move",
+            json!({"from": "Media/films", "to": "Elsewhere"}),
+        )
+        .await,
+    );
+    assert!(!t.names("").await.contains(&"Elsewhere".to_string()));
+    refused(
+        t.json(
+            "POST",
+            "/api/files/copy",
+            json!({"from": "Media/films/a.txt", "to": "Media/c.txt"}),
+        )
+        .await,
+    );
+    refused(
+        t.json(
+            "POST",
+            "/api/uploads",
+            json!({"path": "Media/up.txt", "size": 1, "chunks": [
+                {"hash": blake3::hash(b"x").to_hex().to_string(), "size": 1}
+            ]}),
+        )
+        .await,
+    );
+
+    // copying out is fine: the source is only read
+    t.ok(
+        "POST",
+        "/api/files/copy",
+        json!({"from": "Media/films/a.txt", "to": "Copy.txt"}),
+    )
+    .await;
+    assert_eq!(t.download("Copy.txt").await, b"keep me");
+
+    lock(0o755);
+    let mut on_disk: Vec<_> = walk(&disk);
+    on_disk.sort();
+    assert_eq!(on_disk, vec!["films", "films/a.txt"]);
+    assert_eq!(std::fs::read(disk.join("films/a.txt")).unwrap(), b"keep me");
+}
+
+fn walk(dir: &std::path::Path) -> Vec<String> {
+    let mut out = Vec::new();
+    for e in std::fs::read_dir(dir).unwrap() {
+        let e = e.unwrap();
+        let name = e.file_name().to_string_lossy().into_owned();
+        if e.file_type().unwrap().is_dir() {
+            out.extend(walk(&e.path()).into_iter().map(|n| format!("{name}/{n}")));
+        }
+        out.push(name);
+    }
+    out
+}

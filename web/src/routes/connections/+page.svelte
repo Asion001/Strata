@@ -74,6 +74,7 @@
           <b>{c.name}</b> <span class="badge">{c.kind}</span>
           {#if c.is_default}<span class="badge">server default</span>{/if}
           <span class="badge {c.health === 'ok' ? 'ok' : c.health === 'error' ? 'err' : ''}">{c.health}</span>
+          {#if c.capabilities?.read_only}<span class="badge">read-only</span>{/if}
           {#if c.capabilities?.snapshots && c.capabilities.snapshots !== 'none'}<span class="badge">snapshots: {c.capabilities.snapshots}</span>{/if}
           <div class="muted small">
             {c.kind === 'local' ? `/${c.config.path}` : c.kind === 's3' ? `${c.config.endpoint ?? 'aws'} · ${c.config.bucket}${c.config.root ?? ''}` : c.config.endpoint}

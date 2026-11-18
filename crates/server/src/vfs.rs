@@ -124,6 +124,16 @@ async fn op(st: &AppState, m: &Mount) -> ApiResult<Operator> {
     st.operator(m.connection_id).await
 }
 
+/// Refuse up front when a mount's storage cannot be written (a read-only
+/// local folder), before a multi-step operation leaves half its work behind.
+pub async fn ensure_writable(st: &AppState, m: &Mount) -> ApiResult<()> {
+    if op(st, m).await?.info().capability().write {
+        Ok(())
+    } else {
+        Err(ApiError::ReadOnly)
+    }
+}
+
 // ---------------------------------------------------------------- lookups
 
 /// Metadata of one entry of a volume (no scanning).
@@ -983,6 +993,10 @@ pub async fn move_path(st: &AppState, user_id: i64, from: &str, to: &str) -> Api
         let (sm, srel) = mounts::resolve(st, user_id, from).await?;
         let node = stat(st, &sm, &srel).await?;
         check_not_into_itself(&sm, &srel, &dm, &drel)?;
+        // A move out of a read-only folder would copy everything and then
+        // fail to remove the source, leaving a full duplicate behind.
+        ensure_writable(st, &sm).await?;
+        ensure_writable(st, &dm).await?;
         Some((sm, srel, node))
     };
     // Only now, with every check passed, create the destination's parents.

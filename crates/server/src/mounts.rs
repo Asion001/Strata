@@ -119,6 +119,18 @@ pub async fn create(
     {
         return Err(bad("that folder is reserved"));
     }
+    if req.mode == "hashed"
+        && !st
+            .operator(req.connection_id)
+            .await?
+            .info()
+            .capability()
+            .write
+    {
+        return Err(bad(
+            "this connection is read-only; mount it in raw mode to browse its files",
+        ));
+    }
     check_storage_overlap(&st, req.connection_id, &base, &req.mode).await?;
     let (parent, name) = paths::split(&path).unwrap();
     // The mount point's parent must be a folder (create it if missing).
