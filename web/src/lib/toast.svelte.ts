@@ -14,12 +14,11 @@ function loadToaster() {
   loading ??= import('$lib/components/ui/Toaster.svelte').then(
     (m) => void (toaster.component = m.default),
     (err) => {
-      // Can't load (offline after an update): errors still need saying.
+      // Can't load (offline after an update): say what was pending anyway.
       console.error('could not load the toast component', err);
       loading = null;
-      const errors = toasts.list.filter((t) => t.kind === 'error');
-      for (const t of errors) dismissToast(t.id);
-      if (errors.length) window.alert(errors.map((t) => t.text).join('\n\n'));
+      const pending = toasts.list.splice(0);
+      if (pending.length) window.alert(pending.map((t) => t.text).join('\n\n'));
     }
   );
 }

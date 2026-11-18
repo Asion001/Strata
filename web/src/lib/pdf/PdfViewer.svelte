@@ -30,6 +30,8 @@
   let viewer: any = null;
   let bus: any = null;
   let destroyed = false;
+  // Questions this viewer asked go away with it.
+  const asks = new AbortController();
 
   onMount(async () => {
     try {
@@ -71,6 +73,7 @@
       task.onPassword = async (supply: (p: string) => void, reason: number) => {
         const wrong = reason === pdfjs.PasswordResponses.INCORRECT_PASSWORD;
         const p = await promptDialog({
+          signal: asks.signal,
           title: wrong ? 'Wrong password' : 'Password-protected PDF',
           body: wrong ? 'Try again.' : 'Enter the password to open this PDF.',
           label: 'Password',
@@ -97,6 +100,7 @@
 
   onDestroy(() => {
     destroyed = true;
+    asks.abort();
     thumbObserver?.disconnect();
     viewer?.cleanup?.();
     task?.destroy();
@@ -172,7 +176,7 @@
       return;
     }
     const n = doc.numPages;
-    if (n > 100 && !(await confirmDialog({ title: `Print all ${n} pages?`, body: 'Preparing them can take a while; you can cancel it.', confirm: 'Print' }))) return;
+    if (n > 100 && !(await confirmDialog({ signal: asks.signal, title: `Print all ${n} pages?`, body: 'Preparing them can take a while; you can cancel it.', confirm: 'Print' }))) return;
     if (destroyed || printing) return;
     cancelPrint = false;
     const urls: string[] = [];

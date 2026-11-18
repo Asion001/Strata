@@ -88,21 +88,21 @@
 
   const newFolder = async () => {
     const name = await promptDialog({ title: 'New folder', label: 'Name', confirm: 'Create' });
-    if (name?.trim()) act(() => api('POST', '/api/files/mkdir', { path: join(path, name.trim()) }));
+    if (name) act(() => api('POST', '/api/files/mkdir', { path: join(path, name) }));
   };
   const rename = async (e: Entry) => {
     menu = null;
-    const name = (await promptDialog({ title: `Rename “${e.name}”`, label: 'New name', value: e.name, confirm: 'Rename' }))?.trim();
+    const name = await promptDialog({ title: `Rename “${e.name}”`, label: 'New name', value: e.name, confirm: 'Rename' });
     if (name && name !== e.name) act(() => api('POST', '/api/files/move', { from: join(path, e.name), to: join(path, name) }));
   };
   const moveTo = async (e: Entry, copy = false) => {
     menu = null;
-    const to = (await promptDialog({
+    const to = await promptDialog({
       title: `${copy ? 'Copy' : 'Move'} “${e.name}”`,
       label: 'To (full path)',
       value: join(path, e.name),
       confirm: copy ? 'Copy' : 'Move'
-    }))?.trim();
+    });
     if (to && to !== join(path, e.name)) act(() => api('POST', copy ? '/api/files/copy' : '/api/files/move', { from: join(path, e.name), to }));
   };
   const remove = async (e: Entry) => {

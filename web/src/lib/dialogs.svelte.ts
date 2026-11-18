@@ -2,7 +2,6 @@
 // promise; requests queue up and DialogHost (in the root layout) shows them
 // one at a time.
 import type { Component } from 'svelte';
-import { staleApp } from '$lib/lazy';
 
 export type Field = {
   name: string;
@@ -16,7 +15,12 @@ export type Field = {
   min?: number;
 };
 
-type Common = { title: string; body?: string };
+type Common = {
+  title: string;
+  body?: string;
+  /** Withdraws the dialog (answered as a cancel), e.g. when its owner unmounts. */
+  signal?: AbortSignal;
+};
 export type ConfirmOpts = Common & { confirm?: string; cancel?: string; danger?: boolean };
 export type FormOpts = Common & { fields: Field[]; confirm?: string; cancel?: string };
 export type AlertOpts = Common & { ok?: string; /** Shown read-only with a Copy button. */ copy?: string };
@@ -43,8 +47,6 @@ function loadHost() {
       console.error('could not load the dialog component', err);
       loading = null;
       for (const r of dialogs.queue.splice(0)) native(r);
-      // Maybe the app was updated and its old chunks are gone: reload then.
-      void staleApp(err);
     }
   );
 }
@@ -56,6 +58,11 @@ function native(r: Request) {
     window.alert(r.opts.copy ? `${text}\n\n${r.opts.copy}` : text);
     r.done();
   } else {
+    // A password typed into window.prompt would show in clear text.
+    if (r.opts.fields.some((f) => f.type === 'password')) {
+      window.alert('This part of the app could not load. Reload the page and try again.');
+      return r.done(null);
+    }
     const out: Record<string, string> = {};
     for (const f of r.opts.fields) {
       const v = window.prompt(`${text}\n\n${f.label}`, f.value ?? '');
@@ -80,6 +87,17 @@ function push<T>(make: (done: (v: T) => void) => Omit<Request, 'id'>): Promise<T
       resolve(v);
     });
     dialogs.queue.push({ ...req, id } as Request);
+    const signal = req.opts.signal;
+    if (signal) {
+      const withdraw = () => {
+        const r = dialogs.queue.find((q) => q.id === id);
+        if (r?.kind === 'confirm') r.done(false);
+        else if (r?.kind === 'form') r.done(null);
+        else r?.done();
+      };
+      if (signal.aborted) withdraw();
+      else signal.addEventListener('abort', withdraw, { once: true });
+    }
     if (!dialogHost.component) loadHost();
   });
 }
@@ -101,6 +119,7 @@ export async function promptDialog(
   const r = await formDialog({
     title: opts.title,
     body: opts.body,
+    signal: opts.signal,
     confirm: opts.confirm,
     fields: [{ name: 'v', label: opts.label, value: opts.value, type: opts.type, required: opts.required ?? true }]
   });

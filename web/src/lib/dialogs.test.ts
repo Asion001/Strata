@@ -44,6 +44,16 @@ describe('dialogs', () => {
     ar.done();
     await expect(al).resolves.toBeUndefined();
   });
+  it('withdraws a dialog when its signal aborts', async () => {
+    const ac = new AbortController();
+    const c = confirmDialog({ title: 'C', signal: ac.signal });
+    const p = promptDialog({ title: 'P', label: 'L', signal: ac.signal });
+    ac.abort();
+    expect(await c).toBe(false);
+    expect(await p).toBeNull();
+    expect(dialogs.queue).toHaveLength(0);
+    expect(await confirmDialog({ title: 'late', signal: ac.signal })).toBe(false);
+  });
 });
 
 describe('toasts', () => {

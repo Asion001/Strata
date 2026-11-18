@@ -6,7 +6,7 @@
   // - Ctrl/Cmd+S saves; leaving with unsaved changes asks first.
   import { onDestroy, onMount, untrack } from 'svelte';
   import { beforeNavigate, goto } from '$app/navigation';
-  import { confirmDialog } from '$lib/dialogs.svelte';
+  import { confirmDialog, dialogs } from '$lib/dialogs.svelte';
   import { toast } from '$lib/toast.svelte';
   import { contentUrl } from '$lib/api';
   import { join, parent } from '$lib/format';
@@ -213,8 +213,11 @@
     }
   });
 
+  // Questions this editor asked go away with it.
+  const asks = new AbortController();
   onDestroy(() => {
     destroyed = true;
+    asks.abort();
     clearInterval(draftTimer);
     clearTimeout(previewTimer);
     editor?.destroy();
@@ -315,6 +318,7 @@
     if (!d || !editor) return;
     if (dirty) {
       const ok = await confirmDialog({
+        signal: asks.signal,
         title: 'Restore the draft?',
         body: 'This replaces what you typed since opening with the recovered draft.',
         confirm: 'Restore'
@@ -492,12 +496,14 @@
   async function close() {
     if (dirty && !isSignedIn(userId)) {
       // Drafts aren't kept for a signed-out user.
-      if (await confirmDialog({ title: 'Close and lose the unsaved changes?', body: 'You are signed out, so no draft is kept.', confirm: 'Close', danger: true })) onclose();
+      if (await confirmDialog({
+        signal: asks.signal, title: 'Close and lose the unsaved changes?', body: 'You are signed out, so no draft is kept.', confirm: 'Close', danger: true })) onclose();
       return;
     }
     if (
       dirty &&
       !(await confirmDialog({
+        signal: asks.signal,
         title: 'Close with unsaved changes?',
         body: 'A draft stays in this browser for up to 30 days, until you sign out, or until someone else signs in here.',
         confirm: 'Close'
@@ -515,7 +521,8 @@
         signedOut: 'You were signed out, so no draft is kept.'
       };
       const msg = (r && why[r]) ?? 'The draft could not be stored in this browser.';
-      if (!(await confirmDialog({ title: 'Close and lose the unsaved changes?', body: msg, confirm: 'Close anyway', danger: true }))) return;
+      if (!(await confirmDialog({
+        signal: asks.signal, title: 'Close and lose the unsaved changes?', body: msg, confirm: 'Close anyway', danger: true }))) return;
     }
     onclose();
   }
@@ -536,6 +543,7 @@
       const delta = nav.delta;
       const kept = isSignedIn(userId);
       void confirmDialog({
+        signal: asks.signal,
         title: 'Leave with unsaved changes?',
         body: kept
           ? 'A draft stays in this browser, so you can restore it when you open the file again.'
@@ -553,7 +561,9 @@
       });
       return;
     }
-    leaveAgreed = false;
+    // SvelteKit's own 'leave' check runs before our beforeunload handler,
+    // which still needs to see the agreement.
+    if (nav.type !== 'leave') leaveAgreed = false;
     void autosave(true);
   });
 
@@ -561,6 +571,8 @@
   function onKey(e: KeyboardEvent) {
     if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 's') {
       e.preventDefault();
+      // Not underneath an open question (restore, close, leave).
+      if (dialogs.queue.length) return;
       void save();
     }
   }
