@@ -2,6 +2,7 @@
 // promise; requests queue up and DialogHost (in the root layout) shows them
 // one at a time.
 import type { Component } from 'svelte';
+import { staleApp } from '$lib/lazy';
 
 export type Field = {
   name: string;
@@ -42,6 +43,8 @@ function loadHost() {
       console.error('could not load the dialog component', err);
       loading = null;
       for (const r of dialogs.queue.splice(0)) native(r);
+      // Maybe the app was updated and its old chunks are gone: reload then.
+      void staleApp(err);
     }
   );
 }

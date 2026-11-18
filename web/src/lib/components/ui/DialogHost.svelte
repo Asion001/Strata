@@ -13,6 +13,16 @@
   let req = $derived<Request | undefined>(dialogs.queue[0]);
   let values = $state<Record<string, string>>({});
   let copied = $state(false);
+  // A click only cancels when it also started on the backdrop, not when a
+  // text selection inside the dialog ends outside it.
+  let downOnBackdrop = false;
+
+  // Fresh field values before the new request renders.
+  $effect.pre(() => {
+    const r = req;
+    values = r?.kind === 'form' ? Object.fromEntries(r.opts.fields.map((f) => [f.name, f.value ?? ''])) : {};
+    copied = false;
+  });
 
   // Each new request reopens the dialog so autofocus lands in it.
   $effect(() => {
@@ -21,8 +31,6 @@
     if (!d) return;
     if (d.open) d.close();
     if (!r) return;
-    values = r.kind === 'form' ? Object.fromEntries(r.opts.fields.map((f) => [f.name, f.value ?? ''])) : {};
-    copied = false;
     d.showModal();
     // The first field, else the request's default button (data-autofocus).
     const f = d.querySelector<HTMLElement>('[data-autofocus]');
@@ -76,7 +84,8 @@
   aria-describedby={req?.opts.body ? bodyId : undefined}
   oncancel={(e) => { e.preventDefault(); cancel(); }}
   onkeydown={(e) => { if (e.key === 'Escape') e.stopPropagation(); }}
-  onclick={(e) => { if (e.target === el) cancel(); }}
+  onpointerdown={(e) => (downOnBackdrop = e.target === el)}
+  onclick={(e) => { if (e.target === el && downOnBackdrop) cancel(); }}
   class="m-auto w-[calc(100%-2rem)] max-w-md rounded-xl border border-border bg-popover p-0 text-popover-foreground shadow-lg backdrop:bg-black/50"
 >
   {#if req}
@@ -93,7 +102,8 @@
               {f.label}
               <Input
                 type={f.type ?? 'text'}
-                bind:value={values[f.name]}
+                value={values[f.name]}
+                oninput={(e) => (values[f.name] = (e.currentTarget as HTMLInputElement).value)}
                 placeholder={f.placeholder}
                 min={f.min}
                 autocomplete={f.type === 'password' ? 'new-password' : 'off'}

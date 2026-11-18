@@ -10,14 +10,16 @@ export const toasts = $state<{ list: Toast[] }>({ list: [] });
 export const toaster = $state<{ component: Component | null }>({ component: null });
 let loading: Promise<void> | null = null;
 
-function loadToaster(first: Toast) {
+function loadToaster() {
   loading ??= import('$lib/components/ui/Toaster.svelte').then(
     (m) => void (toaster.component = m.default),
     (err) => {
       // Can't load (offline after an update): errors still need saying.
       console.error('could not load the toast component', err);
       loading = null;
-      if (first.kind === 'error') window.alert(first.text);
+      const errors = toasts.list.filter((t) => t.kind === 'error');
+      for (const t of errors) dismissToast(t.id);
+      if (errors.length) window.alert(errors.map((t) => t.text).join('\n\n'));
     }
   );
 }
@@ -35,7 +37,7 @@ export function toast(text: string, kind: Toast['kind'] = 'info', ms = kind === 
   const id = ++next;
   const t: Toast = { id, kind, text };
   toasts.list.push(t);
-  if (!toaster.component) loadToaster(t);
+  if (!toaster.component) loadToaster();
   if (toasts.list.length > MAX) toasts.list.splice(0, toasts.list.length - MAX);
   if (ms > 0) setTimeout(() => dismissToast(id), ms);
   return id;

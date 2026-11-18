@@ -522,12 +522,16 @@
 
   // Set once the user agrees to leave; the navigation we then start passes.
   let leaveAgreed = false;
+  // One question at a time: more attempts while it's open (Back pressed
+  // again) are dropped, so agreeing can't go further than the user meant.
+  let leaveAsking = false;
   beforeNavigate((nav) => {
     if (dirty && !leaveAgreed) {
       // Closing or reloading the tab: only the browser's own prompt can
       // ask, and cancelling is what shows it.
       nav.cancel();
-      if (nav.type === 'leave') return;
+      if (nav.type === 'leave' || leaveAsking) return;
+      leaveAsking = true;
       const to = nav.to?.url;
       const delta = nav.delta;
       const kept = isSignedIn(userId);
@@ -539,6 +543,7 @@
         confirm: 'Leave',
         danger: !kept
       }).then((ok) => {
+        leaveAsking = false;
         if (!ok) return;
         leaveAgreed = true;
         if (nav.type === 'popstate' && delta) history.go(delta);
@@ -561,7 +566,8 @@
   }
 
   function beforeUnload(e: BeforeUnloadEvent) {
-    if (dirty) {
+    // Already agreed to in the app's dialog (an external link): don't ask twice.
+    if (dirty && !leaveAgreed) {
       e.preventDefault();
       e.returnValue = '';
     }

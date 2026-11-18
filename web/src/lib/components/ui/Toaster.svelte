@@ -1,6 +1,7 @@
 <script lang="ts">
   // Shows the toasts from $lib/toast: bottom right on wide screens, above the
   // tab bar on phones. Screen readers hear them through the live regions.
+  import { onMount } from 'svelte';
   import { fly } from 'svelte/transition';
   import { toasts, dismissToast } from '$lib/toast.svelte';
   import XIcon from '@lucide/svelte/icons/x';
@@ -9,6 +10,11 @@
   import CircleAlertIcon from '@lucide/svelte/icons/circle-alert';
 
   const icons = { info: InfoIcon, success: CircleCheckIcon, error: CircleAlertIcon };
+  // The live region must exist before its content changes, or the toast
+  // that loaded this component isn't announced: render empty first.
+  let mounted = $state(false);
+  onMount(() => (mounted = true));
+
   const tone = { info: 'text-primary', success: 'text-success', error: 'text-destructive' };
 </script>
 
@@ -18,7 +24,7 @@
     aria-live="polite"
     class="pointer-events-none fixed inset-x-0 bottom-[calc(72px+env(safe-area-inset-bottom))] z-[70] flex flex-col items-center gap-2 px-4 md:right-[max(1.5rem,env(safe-area-inset-right))] md:bottom-[max(1.5rem,env(safe-area-inset-bottom))] md:left-auto md:items-end md:px-0"
   >
-    {#each toasts.list as t (t.id)}
+    {#each mounted ? toasts.list : [] as t (t.id)}
       {@const Icon = icons[t.kind]}
       <div
         transition:fly={{ y: 16, duration: 150 }}
