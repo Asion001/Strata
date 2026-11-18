@@ -123,6 +123,33 @@ async fn unwritable_local_folder_opens_read_only() {
 }
 
 #[tokio::test]
+async fn leftover_tmp_folder_does_not_hide_read_only() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipping: running as root");
+        return;
+    }
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("ro");
+    fill(&dir);
+    let cfg = ConnectionConfig::Local { path: "ro".into() };
+    // used writable once: `.strata-tmp` exists from then on
+    cfg.operator(base.path()).unwrap();
+    let tmp = dir.join(".strata-tmp");
+    assert!(tmp.is_dir());
+    for d in [&tmp, &dir] {
+        std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o555)).unwrap();
+    }
+    let op = cfg.operator(base.path()).unwrap();
+    assert!(Capabilities::detect(&cfg, &op, base.path()).read_only);
+    assert!(is_read_only_refusal(
+        &op.write("x.txt", vec![1u8]).await.unwrap_err()
+    ));
+    for d in [&tmp, &dir] {
+        std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+#[tokio::test]
 async fn missing_folder_under_unwritable_base_is_an_error() {
     if unsafe { libc::geteuid() } == 0 {
         eprintln!("skipping: running as root");

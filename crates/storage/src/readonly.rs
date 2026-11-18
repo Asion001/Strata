@@ -19,9 +19,23 @@ fn denied(op: &'static str) -> Error {
     Error::new(ErrorKind::PermissionDenied, READ_ONLY_MESSAGE).with_operation(op)
 }
 
-/// Did this error come from [`ReadOnlyLayer`]?
+/// Is this a refused change to read-only storage? Either [`ReadOnlyLayer`]
+/// refused it, or the filesystem itself answered EROFS (a folder that became
+/// read-only while its operator was cached).
 pub fn is_read_only_refusal(e: &Error) -> bool {
-    e.kind() == ErrorKind::PermissionDenied && e.message() == READ_ONLY_MESSAGE
+    if e.kind() == ErrorKind::PermissionDenied && e.message() == READ_ONLY_MESSAGE {
+        return true;
+    }
+    let mut src = std::error::Error::source(e);
+    while let Some(s) = src {
+        if let Some(io) = s.downcast_ref::<std::io::Error>()
+            && io.kind() == std::io::ErrorKind::ReadOnlyFilesystem
+        {
+            return true;
+        }
+        src = s.source();
+    }
+    false
 }
 
 #[derive(Debug, Default, Clone, Copy)]

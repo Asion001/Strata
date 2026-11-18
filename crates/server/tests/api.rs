@@ -1180,6 +1180,16 @@ async fn read_only_local_folder_can_be_browsed_but_not_changed() {
     assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
     assert!(v["error"].as_str().unwrap().contains("read-only"), "{v}");
 
+    // a missing base folder cannot be created on read-only storage
+    let (s, v) = t
+        .json(
+            "POST",
+            "/api/mounts",
+            json!({"path": "Typo", "connection_id": cid, "mode": "raw", "base_path": "flims"}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
+
     t.ok(
         "POST",
         "/api/mounts",
@@ -1187,7 +1197,40 @@ async fn read_only_local_folder_can_be_browsed_but_not_changed() {
     )
     .await;
     assert_eq!(t.names("Media").await, vec!["films"]);
-    assert_eq!(t.names("Media/films").await, vec!["a.txt"]);
+    // a mount below an existing read-only folder only walks it
+    let w = local_conn(&t, "Scratch", "scratch").await;
+    t.ok(
+        "POST",
+        "/api/mounts",
+        json!({"path": "Media/films/extra", "connection_id": w, "mode": "raw"}),
+    )
+    .await;
+    t.ok(
+        "POST",
+        "/api/files/mkdir",
+        json!({"path": "Media/films/extra/ok"}),
+    )
+    .await;
+    assert!(t.dir.path().join("local/scratch/ok").is_dir());
+    // a connection holding hashed storage cannot be pointed at it
+    let vault = local_conn(&t, "Vault", "vault").await;
+    t.ok(
+        "POST",
+        "/api/mounts",
+        json!({"path": "Vault", "connection_id": vault, "mode": "hashed"}),
+    )
+    .await;
+    t.upload("Vault/v.txt", b"blob").await;
+    let (s, v) = t
+        .json(
+            "PUT",
+            &format!("/api/connections/{vault}"),
+            json!({"name": "Vault", "config": {"kind": "local", "path": "media"}}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    assert_eq!(t.download("Vault/v.txt").await, b"blob");
+    assert_eq!(t.names("Media/films").await, vec!["extra", "a.txt"]);
     assert_eq!(t.download("Media/films/a.txt").await, b"keep me");
 
     let refused = |(s, v): (StatusCode, serde_json::Value)| {
@@ -1256,6 +1299,7 @@ async fn read_only_local_folder_can_be_browsed_but_not_changed() {
     let mut on_disk: Vec<_> = walk(&disk);
     on_disk.sort();
     assert_eq!(on_disk, vec!["films", "films/a.txt"]);
+    assert!(!disk.join("films/extra").exists());
     assert_eq!(std::fs::read(disk.join("films/a.txt")).unwrap(), b"keep me");
 }
 

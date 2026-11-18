@@ -324,6 +324,12 @@ async fn insert_local_connection(
     };
     let op = cfg.operator(&st.cfg.local_base)?;
     let caps = Capabilities::detect(&cfg, &op, &st.cfg.local_base);
+    if is_default && caps.read_only {
+        // Every user's private root is a hashed store here: it must be writable.
+        return Err(ApiError::Internal(anyhow::anyhow!(
+            "the default store folder {path:?} is read-only; mount it writable for the server user"
+        )));
+    }
     let enc = st.secrets.encrypt(&serde_json::to_vec(&cfg).unwrap())?;
     Ok(sqlx::query_scalar(
         "INSERT INTO connections (owner_id, name, kind, config_enc, capabilities, is_default)

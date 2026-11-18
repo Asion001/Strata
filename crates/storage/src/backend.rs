@@ -27,6 +27,26 @@ fn is_read_only_error(e: &std::io::Error) -> bool {
     )
 }
 
+/// access(2) with W_OK: fails with EROFS on a read-only filesystem and with
+/// EACCES when we lack write permission (root passes permission bits, but not
+/// a read-only mount).
+#[cfg(unix)]
+fn check_writable(p: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(p.as_os_str().as_bytes())
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+    if unsafe { libc::access(c.as_ptr(), libc::W_OK) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(unix))]
+fn check_writable(_: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
 /// Backend configuration. Serialised to JSON and encrypted at rest.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "lowercase")]
@@ -132,7 +152,13 @@ impl ConnectionConfig {
                 // Inside the connection's own folder: same filesystem, so the
                 // final rename never crosses devices.
                 let tmp = dir.join(ATOMIC_TMP_DIR);
-                match std::fs::create_dir_all(&tmp) {
+                // `create_dir_all` succeeds without writing when `.strata-tmp`
+                // is left over from a time the folder was writable, so also
+                // ask the kernel whether we may write both folders.
+                let writable = std::fs::create_dir_all(&tmp)
+                    .and_then(|()| check_writable(&dir))
+                    .and_then(|()| check_writable(&tmp));
+                match writable {
                     Ok(()) => Operator::new(
                         services::Fs::default()
                             .root(&dir.to_string_lossy())

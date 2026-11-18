@@ -3,7 +3,9 @@
 
   type Mount = { id: number; path: string; mode: string; connection_id: number; connection_name: string; connection_kind: string; base_path: string };
   let mounts = $state<Mount[]>([]);
-  let conns = $state<{ id: number; name: string; kind: string }[]>([]);
+  let conns = $state<{ id: number; name: string; kind: string; capabilities?: { read_only?: boolean } }[]>([]);
+  let readOnly = $derived(!!conns.find((c) => c.id === form.connection_id)?.capabilities?.read_only);
+  $effect(() => { if (readOnly && form.mode === 'hashed') form.mode = 'raw'; });
   let form = $state({ path: '', connection_id: 0, base_path: '', mode: 'raw' });
   let error = $state('');
   let msg = $state('');
@@ -65,14 +67,14 @@
     <label>Folder in your tree <input bind:value={form.path} placeholder="e.g. Photos/NAS" required /></label>
     <label>Connection
       <select bind:value={form.connection_id}>
-        {#each conns as c}<option value={c.id}>{c.name} ({c.kind})</option>{/each}
+        {#each conns as c}<option value={c.id}>{c.name} ({c.kind}{c.capabilities?.read_only ? ', read-only' : ''})</option>{/each}
       </select>
     </label>
     <label>Folder inside the connection <input bind:value={form.base_path} placeholder="(top level)" /></label>
     <label>Mode
       <select bind:value={form.mode}>
         <option value="raw">raw: plain files and folders</option>
-        <option value="hashed">hashed: deduplicated blob store</option>
+        <option value="hashed" disabled={readOnly}>hashed: deduplicated blob store{readOnly ? " (needs a writable connection)" : ""}</option>
       </select>
     </label>
     <div><button class="primary">Mount</button></div>

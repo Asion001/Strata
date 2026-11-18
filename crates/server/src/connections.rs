@@ -196,6 +196,22 @@ pub async fn update(
         .operator(&st.cfg.local_base)
         .map_err(|e| bad(format!("invalid config: {e}")))?;
     let caps = Capabilities::detect(&req.config, &op, &st.cfg.local_base);
+    if caps.read_only {
+        // Hashed volumes (and the default store, which holds every user's
+        // root) must keep storing blobs.
+        let needs_writes: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM volumes WHERE connection_id = $1 AND mode = 'hashed')
+             OR EXISTS (SELECT 1 FROM connections WHERE id = $1 AND is_default)",
+        )
+        .bind(id)
+        .fetch_one(&st.db)
+        .await?;
+        if needs_writes {
+            return Err(conflict(
+                "that folder is read-only, but this connection holds hashed storage that needs writing",
+            ));
+        }
+    }
     let enc = st
         .secrets
         .encrypt(&serde_json::to_vec(&req.config).unwrap())?;

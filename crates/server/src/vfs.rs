@@ -127,11 +127,16 @@ async fn op(st: &AppState, m: &Mount) -> ApiResult<Operator> {
 /// Refuse up front when a mount's storage cannot be written (a read-only
 /// local folder), before a multi-step operation leaves half its work behind.
 pub async fn ensure_writable(st: &AppState, m: &Mount) -> ApiResult<()> {
-    if op(st, m).await?.info().capability().write {
+    if connection_writable(st, m.connection_id).await? {
         Ok(())
     } else {
         Err(ApiError::ReadOnly)
     }
+}
+
+/// Can Strata write to this connection? False for read-only local folders.
+pub async fn connection_writable(st: &AppState, connection_id: i64) -> ApiResult<bool> {
+    Ok(st.operator(connection_id).await?.info().capability().write)
 }
 
 // ---------------------------------------------------------------- lookups
@@ -600,10 +605,15 @@ pub async fn mkdir_in(st: &AppState, m: &Mount, rel: &str) -> ApiResult<()> {
         return Err(conflict("a file with that name already exists"));
     }
     if !m.is_hashed() {
-        op(st, m)
-            .await?
-            .create_dir(&backend_path(m, rel, true))
-            .await?;
+        let op = op(st, m).await?;
+        let dir = backend_path(m, rel, true);
+        if op.info().capability().write {
+            op.create_dir(&dir).await?;
+        } else if !op.stat(&dir).await.is_ok_and(|md| md.is_dir()) {
+            // Walking existing folders (e.g. to place a mount below one) is
+            // fine; creating one is not.
+            return Err(ApiError::ReadOnly);
+        }
     }
     let created: Vec<(String, String)> = sqlx::query_as(
         "INSERT INTO nodes (volume_id, parent, name, is_dir)
