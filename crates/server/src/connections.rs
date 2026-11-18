@@ -318,6 +318,10 @@ pub async fn update(
         "UPDATE connections SET name = $2, config_enc = $3, storage_id = $4, storage_folder = $5,
                 health_failures = CASE WHEN $6 THEN 0 ELSE health_failures END,
                 health = CASE WHEN $6 THEN 'unknown' ELSE health END,
+                health_reason = CASE WHEN $6 THEN NULL ELSE health_reason END,
+                health_error = CASE WHEN $6 THEN NULL ELSE health_error END,
+                health_latency_ms = CASE WHEN $6 THEN NULL ELSE health_latency_ms END,
+                health_checked_at = CASE WHEN $6 THEN NULL ELSE health_checked_at END,
                 root_marker = CASE WHEN $6 THEN FALSE ELSE root_marker END,
                 capabilities = CASE WHEN $6 THEN '{}'::jsonb ELSE capabilities END
          WHERE id = $1",
@@ -390,7 +394,7 @@ pub async fn delete(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
-    st.forget_operator(id);
+    st.forget_connection(id);
     Ok(Json(json!({})))
 }
 

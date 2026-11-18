@@ -88,7 +88,11 @@ impl Capabilities {
                 c.clean_deletes = true;
                 if let Ok(Some(dir)) = cfg.local_dir(local_base) {
                     let fs = fs_type_bounded(&dir).await;
-                    let known = prev.filter(|p| p.fs_type.is_some() && p.fs_type == fs);
+                    // A test that worked isn't repeated on the same
+                    // filesystem; one that failed (maybe transiently: tools
+                    // not installed yet, a timeout) is tried again.
+                    let known = prev
+                        .filter(|p| p.fs_type.is_some() && p.fs_type == fs && p.snapshots.create);
                     c.snapshots = match fs.as_deref() {
                         // Same filesystem as last time: no new test snapshot.
                         Some("btrfs" | "zfs") if known.is_some() => known.unwrap().snapshots,
@@ -301,7 +305,7 @@ async fn zfs_can_snapshot(dir: &Path) -> bool {
     let Some(allow) = run("zfs", &["allow".as_ref(), ds.as_ref()]).await else {
         return false;
     };
-    zfs_allows_snapshot(&allow, &effective_user().unwrap_or_default())
+    zfs_allows_snapshot(&allow, ds, &effective_user().unwrap_or_default())
 }
 
 /// The name of the effective user (not `$USER`, which may be unset or
@@ -329,17 +333,39 @@ fn effective_user() -> Option<String> {
     )
 }
 
-/// Does `zfs allow` output grant `snapshot` to `user` (or everyone)? ZFS
-/// also needs `mount` to create a snapshot, so both must be granted (on any
-/// of the user's or everyone's lines). Group grants aren't resolved: they
-/// count as no.
-pub fn zfs_allows_snapshot(output: &str, user: &str) -> bool {
+/// Does `zfs allow` output grant `snapshot` and `mount` (ZFS needs both to
+/// create a snapshot) to `user` (or everyone) on dataset `ds`? Only grants
+/// that apply to `ds` count: its own "Local" and "Local+Descendent"
+/// sections, and an ancestor's "Descendent" and "Local+Descendent" ones.
+/// Group grants aren't resolved: they count as no.
+pub fn zfs_allows_snapshot(output: &str, ds: &str, user: &str) -> bool {
     let mut perms: Vec<&str> = Vec::new();
+    let mut on: Option<&str> = None; // dataset of the current block
+    let mut applies = false;
     for l in output.lines() {
-        let l = l.trim_start();
-        let rest = if let Some(r) = l.strip_prefix("everyone") {
+        let t = l.trim();
+        if let Some(rest) = t.strip_prefix("---- Permissions on ") {
+            on = rest.split_whitespace().next();
+            applies = false;
+            continue;
+        }
+        if t.ends_with("permissions:") {
+            let own = on == Some(ds);
+            let ancestor = on.is_some_and(|o| ds.starts_with(&format!("{o}/")));
+            applies = match t {
+                "Local permissions:" => own,
+                "Descendent permissions:" => ancestor,
+                "Local+Descendent permissions:" => own || ancestor,
+                _ => false,
+            };
+            continue;
+        }
+        if !applies {
+            continue;
+        }
+        let rest = if let Some(r) = t.strip_prefix("everyone") {
             r
-        } else if let Some(r) = l.strip_prefix("user ") {
+        } else if let Some(r) = t.strip_prefix("user ") {
             let mut parts = r.trim_start().splitn(2, char::is_whitespace);
             match (parts.next(), parts.next()) {
                 (Some(u), Some(p)) if !user.is_empty() && u == user => p,
@@ -431,30 +457,53 @@ mod tests {
 
     #[test]
     fn zfs_allow_parsing() {
-        let out = "---- Permissions on tank/data ---------------------------------------\n\
+        let own = "---- Permissions on tank/data ---------------------------------------\n\
                    Local+Descendent permissions:\n\
                    \tuser strata create,mount,snapshot\n\
                    \tuser other destroy\n";
-        assert!(zfs_allows_snapshot(out, "strata"));
-        assert!(!zfs_allows_snapshot(out, "other"));
-        assert!(!zfs_allows_snapshot(out, ""));
+        assert!(zfs_allows_snapshot(own, "tank/data", "strata"));
+        assert!(!zfs_allows_snapshot(own, "tank/data", "other"));
+        assert!(!zfs_allows_snapshot(own, "tank/data", ""));
         // snapshot without mount isn't enough
+        let p =
+            |body: &str| format!("---- Permissions on tank/data ----\nLocal permissions:\n{body}");
         assert!(!zfs_allows_snapshot(
-            "Local permissions:\n\teveryone snapshot,send\n",
+            &p("\teveryone snapshot,send\n"),
+            "tank/data",
             "x"
         ));
         assert!(zfs_allows_snapshot(
-            "Local permissions:\n\teveryone snapshot,send\n\tuser x mount\n",
+            &p("\teveryone snapshot,send\n\tuser x mount\n"),
+            "tank/data",
             "x"
         ));
         assert!(!zfs_allows_snapshot(
-            "Local permissions:\n\tgroup staff snapshot,mount\n",
+            &p("\tgroup staff snapshot,mount\n"),
+            "tank/data",
             "x"
         ));
         assert!(!zfs_allows_snapshot(
-            "\tuser strata snapshotx,mount\n",
+            &p("\tuser strata snapshotx,mount\n"),
+            "tank/data",
             "strata"
         ));
+        // an ancestor's grants: only the descendent ones reach the child
+        let anc = |kind: &str| {
+            format!("---- Permissions on tank ----\n{kind} permissions:\n\tuser x snapshot,mount\n")
+        };
+        assert!(!zfs_allows_snapshot(&anc("Local"), "tank/data", "x"));
+        assert!(zfs_allows_snapshot(&anc("Descendent"), "tank/data", "x"));
+        assert!(zfs_allows_snapshot(
+            &anc("Local+Descendent"),
+            "tank/data",
+            "x"
+        ));
+        // the dataset's own descendent-only grants don't apply to it
+        let own_desc = "---- Permissions on tank/data ----\nDescendent permissions:\n\tuser x snapshot,mount\n";
+        assert!(!zfs_allows_snapshot(own_desc, "tank/data", "x"));
+        // a sibling with a shared prefix isn't an ancestor
+        let sib = "---- Permissions on tank/da ----\nLocal+Descendent permissions:\n\tuser x snapshot,mount\n";
+        assert!(!zfs_allows_snapshot(sib, "tank/data", "x"));
     }
 
     #[test]

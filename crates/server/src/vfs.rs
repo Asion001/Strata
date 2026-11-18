@@ -1007,7 +1007,6 @@ pub async fn put_hashed_file(
     sizes: &[i64],
     mtime: Option<DateTime<Utc>>,
 ) -> ApiResult<bool> {
-    ensure_writable(st, m)?;
     Ok(
         put_hashed_file_if(st, m, rel, chunks, sizes, mtime, &Expect::Any)
             .await?
@@ -1095,7 +1094,6 @@ pub async fn write_stream(
     rel: &str,
     input: ByteStream,
 ) -> ApiResult<Hash> {
-    ensure_writable(st, m)?;
     Ok(write_stream_if(st, m, rel, input, &Expect::Any).await?.0)
 }
 
@@ -1599,7 +1597,6 @@ pub async fn copy_tree(
     drel: &str,
     is_dir: bool,
 ) -> ApiResult<()> {
-    ensure_writable(st, dm)?;
     if !is_dir {
         let node = stat(st, sm, srel).await?;
         let input = read_stream(st, sm, srel, &node, 0, node.size as u64).await?;

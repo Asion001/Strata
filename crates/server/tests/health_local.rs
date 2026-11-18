@@ -213,7 +213,7 @@ async fn busy_folders_repoints_and_nested_markers() {
     t.upload("disk/f.txt", b"one").await;
 
     // Many requests at once on one folder: none is refused.
-    let reqs = (0..40).map(|_| async {
+    let reqs = (0..150).map(|_| async {
         t.raw(
             "GET",
             &format!("/api/files/content?path={}", enc("disk/f.txt")),

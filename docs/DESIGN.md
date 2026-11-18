@@ -30,8 +30,9 @@ every health probe:
 
 * **Local:** the filesystem comes from `statfs(2)` (btrfs `0x9123683E`, ZFS
   `0x2FC12FC1`; the type name on macOS). `snapshots.create` is set only when
-  a real test works: a scratch subvolume and a read-only snapshot of it on
-  btrfs (both removed again), or the `snapshot` permission in `zfs allow`.
+  a real test works: a scratch subvolume and a (writable, so rmdir can remove
+  it) snapshot of it on btrfs, both removed again; or the `snapshot` and
+  `mount` permissions for the dataset in `zfs allow`.
 * **S3:** `GetBucketVersioning` (a SigV4-signed request) turns on
   `s3_versioning`.
 
@@ -56,6 +57,10 @@ at a time.
   which is a folder, but not this one. The folder and marker are checked
   before every use, off the async threads and with a time limit, and a
   missing one gets 503 at once rather than only after three probes.
+  Requests that arrive together share one fresh check.
+* **Cost.** A healthy connection's capability detection and write test
+  run every ten minutes; the probes in between only read the root (every
+  request is billed on paid object storage).
 * **No junk files.** The probe file is deleted whatever happened (the
   marker is the only file ever left there). Files an
   interrupted probe left behind are swept by later probes once they are ten

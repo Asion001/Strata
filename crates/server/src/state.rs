@@ -46,7 +46,9 @@ pub struct Inner {
     /// One health probe per connection at a time.
     pub probe_locks: DashMap<i64, Arc<tokio::sync::Mutex<()>>>,
     /// A local connection's folder check still running (see `health`).
-    pub root_checks: DashMap<i64, Arc<std::sync::atomic::AtomicUsize>>,
+    pub root_gates: DashMap<i64, Arc<RootGate>>,
+    /// When each connection last had a full health check (see `health`).
+    pub full_checks: DashMap<i64, std::time::Instant>,
     /// user id -> that user's mounts, longest path first
     pub mounts: DashMap<i64, Arc<Vec<Mount>>>,
     pub events: broadcast::Sender<ChangeEvent>,
@@ -102,7 +104,8 @@ impl AppState {
             op_gens: DashMap::new(),
             offline: DashMap::new(),
             probe_locks: DashMap::new(),
-            root_checks: DashMap::new(),
+            root_gates: DashMap::new(),
+            full_checks: DashMap::new(),
             mounts: DashMap::new(),
             events,
             decisions: quick_cache::sync::Cache::new(100_000),
@@ -204,10 +207,25 @@ impl AppState {
         Ok((op, root, true))
     }
 
+    /// Drop everything kept in memory about a deleted connection.
+    pub fn forget_connection(&self, connection_id: i64) {
+        self.forget_operator(connection_id);
+        self.offline.remove(&connection_id);
+        self.probe_locks.remove(&connection_id);
+        self.root_gates.remove(&connection_id);
+        self.full_checks.remove(&connection_id);
+    }
+
     pub fn forget_operator(&self, connection_id: i64) {
         let mut g = self.op_gens.entry(connection_id).or_insert(0);
         *g += 1;
         self.ops.remove(&connection_id);
+        // A remembered check result is about the old folder or marker.
+        if let Some(g) = self.root_gates.get(&connection_id)
+            && let Ok(mut last) = g.last.try_lock()
+        {
+            *last = None;
+        }
     }
 }
 
@@ -215,6 +233,15 @@ fn missing_folder() -> ApiError {
     ApiError::Unavailable(
         "this storage's folder is missing (disk not mounted?); try again later".into(),
     )
+}
+
+/// Serialises one connection's folder checks (see `AppState::check_root`).
+#[derive(Default)]
+pub struct RootGate {
+    /// The last check: when it started, and what it found.
+    last: tokio::sync::Mutex<Option<(std::time::Instant, Result<(), String>)>>,
+    /// Checks still running in the blocking pool (a hung mount).
+    blocked: std::sync::atomic::AtomicUsize,
 }
 
 /// A local connection's folder, and the marker file that proves it is the
@@ -317,28 +344,41 @@ impl AppState {
         wait: Duration,
     ) -> Result<(), String> {
         use std::sync::atomic::Ordering;
-        const ROOT_CHECKS: usize = 64;
-        let running = self
-            .root_checks
-            .entry(connection_id)
-            .or_insert_with(|| Arc::new(std::sync::atomic::AtomicUsize::new(0)))
-            .clone();
-        let stuck = "the connection's folder doesn't answer".to_string();
-        if running.fetch_add(1, Ordering::AcqRel) >= ROOT_CHECKS {
-            running.fetch_sub(1, Ordering::AcqRel);
-            return Err(stuck);
+        use std::time::Instant;
+        // Blocked checks (a hung mount) allowed per connection before
+        // requests are refused outright.
+        const BLOCKED_MAX: usize = 4;
+        let arrived = Instant::now();
+        let gate = self.root_gates.entry(connection_id).or_default().clone();
+        let stuck = || "the connection's folder doesn't answer".to_string();
+        // One check at a time per connection; requests that arrived before a
+        // check started share its result (a burst on one folder costs a
+        // couple of stats), so every answer is fresh for the request.
+        let mut last = tokio::time::timeout(wait, gate.last.lock())
+            .await
+            .map_err(|_| stuck())?;
+        if let Some((started, r)) = &*last
+            && *started >= arrived
+        {
+            return r.clone();
         }
-        let done = running.clone();
+        if gate.blocked.load(Ordering::Acquire) >= BLOCKED_MAX {
+            return Err(stuck());
+        }
+        let started = Instant::now();
+        gate.blocked.fetch_add(1, Ordering::AcqRel);
+        let g = gate.clone();
         let task = tokio::task::spawn_blocking(move || {
             let r = root.check();
-            done.fetch_sub(1, Ordering::AcqRel);
+            g.blocked.fetch_sub(1, Ordering::AcqRel);
             r
         });
-        match tokio::time::timeout(wait, task).await {
-            Err(_) => Err(stuck),
-            Ok(Ok(Ok(()))) => Ok(()),
-            Ok(Ok(Err(e))) => Err(e.to_string()),
+        let r = match tokio::time::timeout(wait, task).await {
+            Err(_) => Err(stuck()),
+            Ok(Ok(r)) => r.map_err(str::to_string),
             Ok(Err(e)) => Err(e.to_string()),
-        }
+        };
+        *last = Some((started, r.clone()));
+        r
     }
 }

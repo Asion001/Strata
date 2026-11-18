@@ -142,6 +142,9 @@ pub async fn probe_soon(st: &AppState, id: i64) {
     let _ = tokio::time::timeout(Duration::from_secs(25), task).await;
 }
 
+/// How often a healthy connection gets its full check (see `probe_inner`).
+const FULL_CHECK_EVERY: Duration = Duration::from_secs(600);
+
 /// Longest a probe may take before it counts as failed (each step has its
 /// own shorter limit; this bounds them all, so the probe lock is released).
 const PROBE_LIMIT: Duration = Duration::from_secs(120);
@@ -166,6 +169,15 @@ async fn probe_inner(st: &AppState, id: i64, counted: bool) -> anyhow::Result<Op
         .and_then(|_| serde_json::from_value(prev_caps.0.clone()).ok());
 
     let mut caps: Option<Capabilities> = None;
+    // The full check runs on the first probe, after ten minutes, whenever
+    // the last state wasn't ok, and for manual checks.
+    let full = !counted
+        || prev != State::Ok
+        || prev_caps.is_none()
+        || st
+            .full_checks
+            .get(&id)
+            .is_none_or(|t| t.elapsed() >= FULL_CHECK_EVERY);
     let mut marker: Option<PathBuf> = None;
     let probed = tokio::time::timeout(PROBE_LIMIT, async {
         match st.decrypt_config(&enc) {
@@ -215,6 +227,10 @@ async fn probe_inner(st: &AppState, id: i64, counted: bool) -> anyhow::Result<Op
                         Outcome::Down(f) | Outcome::ReadOnly(f) => {
                             (Found::Down, Some(p.latency), Some(f))
                         }
+                        // A healthy connection that had its full check
+                        // (capabilities, write test) recently is only read:
+                        // on paid object storage every request is billed.
+                        Outcome::Ok if !full => (Found::Ok, Some(p.latency), None),
                         Outcome::Ok => {
                             let c = Capabilities::detect(
                                 &cfg,
@@ -291,6 +307,9 @@ async fn probe_inner(st: &AppState, id: i64, counted: bool) -> anyhow::Result<Op
         // The connection was edited (or deleted) while we probed: this
         // result is about the old config, so it is dropped.
         return Ok(None);
+    }
+    if full && found != Found::Down {
+        st.full_checks.insert(id, Instant::now());
     }
 
     // A folder from before markers existed (new and re-pointed folders get
