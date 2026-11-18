@@ -73,9 +73,9 @@
   }
   function key(e: KeyboardEvent) {
     // Typing in a field (e.g. the PDF viewer's find box) isn't navigation.
+    if (e.key === 'Escape') return onclose();
     const t = e.target as HTMLElement | null;
     if (t?.closest('input, textarea, select, [contenteditable]')) return;
-    if (e.key === 'Escape') onclose();
     // In a PDF the arrow keys scroll the pages.
     if (isPdf(item.name)) return;
     if (e.key === 'ArrowRight') step(1);

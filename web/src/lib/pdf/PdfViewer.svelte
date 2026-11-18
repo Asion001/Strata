@@ -23,6 +23,8 @@
 
   let task: PDFDocumentLoadingTask | null = null;
   let pageBox: HTMLInputElement;
+  /** The page box's value when it got focus: leaving it unchanged goes nowhere. */
+  let typedFrom = '';
   // pdf.js viewer objects (untyped here: the component module is loaded at runtime)
   let viewer: any = null;
   let bus: any = null;
@@ -143,6 +145,7 @@
       canvas.width = v2.width;
       canvas.height = v2.height;
       await p.render({ canvas, viewport: v2 }).promise;
+      p.cleanup();
     } catch {}
   }
 
@@ -164,7 +167,9 @@
     const urls: string[] = [];
     const root = document.createElement('div');
     root.className = 'print-root';
+    const html = document.documentElement;
     const cleanup = () => {
+      html.classList.remove('printing-pdf');
       root.remove();
       urls.forEach((u) => URL.revokeObjectURL(u));
     };
@@ -190,6 +195,7 @@
         root.append(img);
       }
       document.body.append(root);
+      html.classList.add('printing-pdf');
       await Promise.all([...root.querySelectorAll('img')].map((i) => i.decode().catch(() => {})));
     } catch (e) {
       cleanup();
@@ -220,7 +226,8 @@
       <span class="sr">Page</span>
       <input inputmode="numeric" aria-label="Page number" bind:value={pageInput} bind:this={pageBox}
         onkeydown={(e) => e.key === 'Enter' && goTo(Number(pageInput))}
-        onblur={() => goTo(Number(pageInput))} />
+        onfocus={() => (typedFrom = pageInput)}
+        onblur={() => (pageInput !== typedFrom ? goTo(Number(pageInput)) : (pageInput = String(page)))} />
       <span>/ {pages || '…'}</span>
     </label>
     <button onclick={() => zoom(1 / 1.2)} aria-label="Zoom out">−</button>
@@ -278,10 +285,12 @@
   .main { flex: 1; min-width: 0; position: relative; }
   .scroller { position: absolute; inset: 0; overflow: auto; }
   .error { position: absolute; z-index: 2; inset: 20px auto auto 20px; color: #fca5a5; }
+  /* Only while a PDF print is prepared (the class is set on <html>), so the
+     app's own printing is unaffected after the viewer closes. */
   :global(.print-root) { display: none; }
   @media print {
-    :global(body > *:not(.print-root)) { display: none !important; }
-    :global(.print-root) { display: block; }
+    :global(html.printing-pdf body > *:not(.print-root)) { display: none !important; }
+    :global(html.printing-pdf .print-root) { display: block; }
     :global(.print-root img) { display: block; width: 100%; break-after: page; }
   }
 </style>

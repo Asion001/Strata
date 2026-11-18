@@ -51,7 +51,10 @@ export async function viewerKit() {
       const safe = safeExternalUrl(url);
       if (safe) {
         link.href = safe;
-        link.title = safe;
+        // The tooltip never shows user:password@ (it can fake the host).
+        const shown = new URL(safe);
+        shown.username = shown.password = '';
+        link.title = shown.href;
         link.target = '_blank';
         link.rel = 'noopener noreferrer';
       } else {
