@@ -119,6 +119,30 @@ pub async fn create(
     {
         return Err(bad("that folder is reserved"));
     }
+    if !vfs::connection_writable(&st, req.connection_id).await? {
+        if req.mode == "hashed" {
+            return Err(bad(
+                "this connection is read-only; mount it in raw mode to browse its files",
+            ));
+        }
+        // Strata cannot create a missing base folder here.
+        let dir = if base.is_empty() {
+            "/".to_string()
+        } else {
+            format!("{base}/")
+        };
+        let exists = st
+            .operator(req.connection_id)
+            .await?
+            .stat(&dir)
+            .await
+            .is_ok_and(|md| md.is_dir());
+        if !exists {
+            return Err(bad(
+                "that folder does not exist in this read-only connection",
+            ));
+        }
+    }
     // Refuse an overlap before making any folder; the parent folder is made
     // outside the layout lock (it may be slow remote storage).
     check_storage_overlap(&st, req.connection_id, &base, &req.mode).await?;

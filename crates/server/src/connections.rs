@@ -191,6 +191,51 @@ pub async fn probe_operator(op: &Operator) -> Result<(), String> {
     }
 }
 
+/// Probe a connection and store what it can do now. A local folder may have
+/// been remounted read-only (or writable) since its operator was cached, so
+/// a fresh operator is built off the async workers, with a timeout (a hung
+/// network mount must not stall the server), and replaces the cached one when
+/// writability changed.
+async fn probe_fresh(st: &AppState, id: i64) -> Result<(), String> {
+    let cached = st.operator(id).await.map_err(|e| e.to_string())?;
+    probe_operator(&cached).await?;
+    let Ok(cfg) = st.connection_config(id).await else {
+        return Ok(());
+    };
+    let caps = if cfg.kind() == "local" {
+        let base = st.cfg.local_base.clone();
+        let c = cfg.clone();
+        let build = tokio::task::spawn_blocking(move || {
+            c.operator(&base)
+                .map(|op| Capabilities::detect(&c, &op, &base))
+        });
+        match tokio::time::timeout(Duration::from_secs(20), build).await {
+            Ok(Ok(Ok(caps))) => caps,
+            // The cached operator just listed the folder, so the connection
+            // is healthy; only the capability refresh is skipped this time.
+            other => {
+                tracing::warn!("connection {id}: capability refresh failed: {other:?}");
+                return Ok(());
+            }
+        }
+    } else {
+        Capabilities::detect(&cfg, &cached, &st.cfg.local_base)
+    };
+    // An admin may have saved a new config meanwhile; its capabilities win.
+    if st.connection_config(id).await.ok().as_ref() != Some(&cfg) {
+        return Ok(());
+    }
+    if caps.read_only == cached.info().capability().write {
+        st.forget_operator(id);
+    }
+    let _ = sqlx::query("UPDATE connections SET capabilities = $2 WHERE id = $1")
+        .bind(id)
+        .bind(sqlx::types::Json(caps))
+        .execute(&st.db)
+        .await;
+    Ok(())
+}
+
 async fn store_probe(st: &AppState, id: i64, res: &Result<(), String>) -> ApiResult<()> {
     sqlx::query(
         "UPDATE connections SET health = $2, health_error = $3, health_checked_at = now() WHERE id = $1",
@@ -281,6 +326,22 @@ pub async fn update(
         .operator(&st.cfg.local_base)
         .map_err(|e| bad(format!("invalid config: {e}")))?;
     let caps = Capabilities::detect(&req.config, &op, &st.cfg.local_base);
+    if caps.read_only && req.config != old {
+        // Hashed volumes (and the default store, which holds every user's
+        // root) must keep storing blobs.
+        let needs_writes: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM volumes WHERE connection_id = $1 AND mode = 'hashed')
+             OR EXISTS (SELECT 1 FROM connections WHERE id = $1 AND is_default)",
+        )
+        .bind(id)
+        .fetch_one(&st.db)
+        .await?;
+        if needs_writes {
+            return Err(conflict(
+                "that folder is read-only, but this connection holds hashed storage that needs writing",
+            ));
+        }
+    }
     let (sid, sfolder) = req
         .config
         .location(&st.cfg.local_base)
@@ -384,10 +445,7 @@ pub async fn probe(
     Path(id): Path<i64>,
 ) -> ApiResult<Json<ConnectionView>> {
     check_access(&st, &u, id).await?;
-    let res = match st.operator(id).await {
-        Ok(op) => probe_operator(&op).await,
-        Err(e) => Err(e.to_string()),
-    };
+    let res = probe_fresh(&st, id).await;
     store_probe(&st, id, &res).await?;
     get_view(&st, id).await.map(Json)
 }
@@ -427,10 +485,7 @@ pub async fn probe_all(st: &AppState) {
         Err(e) => return tracing::warn!("probe: {e}"),
     };
     for id in ids {
-        let res = match st.operator(id).await {
-            Ok(op) => probe_operator(&op).await,
-            Err(e) => Err(e.to_string()),
-        };
+        let res = probe_fresh(st, id).await;
         if let Err(e) = &res {
             tracing::warn!("connection {id} unhealthy: {e}");
         }

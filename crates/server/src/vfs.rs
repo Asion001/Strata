@@ -17,7 +17,7 @@ use strata_storage::chunker::StreamChunker;
 use strata_storage::hashed::manifest_hash;
 use strata_storage::{Hash, HashedStore, paths};
 
-use crate::error::{ApiError, ApiResult, bad, conflict};
+use crate::error::{ApiError, ApiResult, bad, conflict, io_error};
 use crate::journal::{self, Change};
 use crate::mounts::{self, Mount};
 use crate::state::AppState;
@@ -137,6 +137,21 @@ pub async fn hashed_store(st: &AppState, m: &Mount) -> ApiResult<HashedStore> {
 
 async fn op(st: &AppState, m: &Mount) -> ApiResult<Operator> {
     st.operator(m.connection_id).await
+}
+
+/// Refuse up front when a mount's storage cannot be written (a read-only
+/// local folder), before a multi-step operation leaves half its work behind.
+pub async fn ensure_writable(st: &AppState, m: &Mount) -> ApiResult<()> {
+    if connection_writable(st, m.connection_id).await? {
+        Ok(())
+    } else {
+        Err(ApiError::ReadOnly)
+    }
+}
+
+/// Can Strata write to this connection? False for read-only local folders.
+pub async fn connection_writable(st: &AppState, connection_id: i64) -> ApiResult<bool> {
+    Ok(st.operator(connection_id).await?.info().capability().write)
 }
 
 // ---------------------------------------------------------------- lookups
@@ -320,7 +335,15 @@ async fn scan_dir_inner(
     let dir = backend_path(m, rel, true);
     let listed = match op.list(&dir).await {
         Ok(l) => l,
-        Err(e) if e.kind() == ErrorKind::NotFound && rel.is_empty() => {
+        // Read-only storage cannot recreate a missing base folder. Report it
+        // (falls through to the error below) and leave the cache untouched:
+        // listing it as empty would drop every cached entry and the shares
+        // pointing at them while, say, a device behind it is not mounted yet.
+        Err(e)
+            if e.kind() == ErrorKind::NotFound
+                && rel.is_empty()
+                && op.info().capability().write =>
+        {
             op.create_dir(&dir).await?;
             Vec::new()
         }
@@ -607,10 +630,15 @@ pub async fn mkdir_in(st: &AppState, m: &Mount, rel: &str) -> ApiResult<()> {
         return Err(conflict("a file with that name already exists"));
     }
     if !m.is_hashed() {
-        op(st, m)
-            .await?
-            .create_dir(&backend_path(m, rel, true))
-            .await?;
+        let op = op(st, m).await?;
+        let dir = backend_path(m, rel, true);
+        if op.info().capability().write {
+            op.create_dir(&dir).await?;
+        } else if !op.stat(&dir).await.is_ok_and(|md| md.is_dir()) {
+            // Walking existing folders (e.g. to place a mount below one) is
+            // fine; creating one is not.
+            return Err(ApiError::ReadOnly);
+        }
     }
     let created: Vec<(String, String)> = sqlx::query_as(
         "INSERT INTO nodes (volume_id, parent, name, is_dir)
@@ -1282,6 +1310,10 @@ pub async fn move_path(st: &AppState, user_id: i64, from: &str, to: &str) -> Api
         let (sm, srel) = mounts::resolve(st, user_id, from).await?;
         let node = stat(st, &sm, &srel).await?;
         check_not_into_itself(&sm, &srel, &dm, &drel)?;
+        // A move out of a read-only folder would copy everything and then
+        // fail to remove the source, leaving a full duplicate behind.
+        ensure_writable(st, &sm).await?;
+        ensure_writable(st, &dm).await?;
         Some((sm, srel, node))
     };
     // Only now, with every check passed, create the destination's parents.
@@ -1505,13 +1537,9 @@ async fn move_within(
             let a = root.join(paths::join(&m.base_path, from));
             let b = root.join(paths::join(&m.base_path, to));
             if let Some(p) = b.parent() {
-                tokio::fs::create_dir_all(p)
-                    .await
-                    .map_err(|e| ApiError::Internal(e.into()))?;
+                tokio::fs::create_dir_all(p).await.map_err(io_error)?;
             }
-            tokio::fs::rename(&a, &b)
-                .await
-                .map_err(|e| ApiError::Internal(e.into()))?;
+            tokio::fs::rename(&a, &b).await.map_err(io_error)?;
         } else if let Some(op) = &op {
             op.rename(&backend_path(m, from, false), &backend_path(m, to, false))
                 .await?;
@@ -1622,6 +1650,8 @@ pub async fn copy_path(st: &AppState, user_id: i64, from: &str, to: &str) -> Api
         return Err(conflict("destination already exists"));
     }
     check_not_into_itself(&sm, &srel, &dm, &drel)?;
+    // Refuse before a partial copy into read-only storage.
+    ensure_writable(st, &dm).await?;
     let node = stat(st, &sm, &srel).await?;
     let (to_parent, _) = paths::split(to).unwrap();
     mkdir_p(st, user_id, to_parent).await?;

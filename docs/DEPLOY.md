@@ -30,6 +30,14 @@ Other folders can be bind mounted below `/data` and added as local
 connections by an admin. `.strata-tmp` folders inside local connections hold
 in-progress atomic writes; they are hidden and cannot be mounted.
 
+A folder Strata cannot write to (bind mounted with `:ro`, or not writable by
+uid 10001) is added as a **read-only** connection: it can be mounted in raw
+mode to browse, preview, download and copy files out, while uploads, new
+folders, renames, moves and deletes are refused. Hashed mode needs to write
+blobs, so it is not offered for read-only connections. To make such a folder
+writable, mount it without `:ro`, fix its ownership, and save the connection
+again.
+
 `STRATA_DEFAULT_STORE` and `STRATA_FILES_DIR` are used once, when the first
 account is created; after that the connections live in the database.
 

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use strata_storage::{Capabilities, ConnectionConfig};
 
-use crate::error::{ApiError, ApiResult, bad};
+use crate::error::{ApiError, ApiResult, bad, conflict};
 use crate::state::AppState;
 
 pub const SESSION_COOKIE: &str = "strata_session";
@@ -263,6 +263,21 @@ pub async fn create_user(
             .fetch_optional(&mut *tx)
             .await?;
     let existing_default = default.is_some();
+    if let Some(id) = default {
+        // Every private root is a hashed store on it, so it must be writable.
+        // Uses the capabilities stored by the last probe: no storage access.
+        let read_only: Option<bool> = sqlx::query_scalar(
+            "SELECT (capabilities->>'read_only')::bool FROM connections WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if read_only == Some(true) {
+            return Err(conflict(
+                "the server storage is read-only; make it writable before adding users",
+            ));
+        }
+    }
     let conn_id: i64 = match default {
         Some(id) => id,
         None => {
@@ -326,6 +341,12 @@ async fn insert_local_connection(
     };
     let op = cfg.operator(&st.cfg.local_base)?;
     let caps = Capabilities::detect(&cfg, &op, &st.cfg.local_base);
+    if is_default && caps.read_only {
+        // Every user's private root is a hashed store here: it must be writable.
+        return Err(ApiError::Internal(anyhow::anyhow!(
+            "the default store folder {path:?} is read-only; mount it writable for the server user"
+        )));
+    }
     let enc = st.encrypt_config(&cfg)?;
     let (storage_id, storage_folder) = cfg.location(&st.cfg.local_base)?;
     Ok(sqlx::query_scalar(
