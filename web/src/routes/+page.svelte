@@ -90,7 +90,7 @@
   });
   // While a bulk action runs, the selection bar and Delete key wait.
   let busy = $state(false);
-  const byName = $derived(new Map(sorted.map((e) => [e.name, e])));
+  const byName = $derived(new Map(entries.map((e) => [e.name, e])));
   // From the selection, not a scan of the folder: cheap in big folders.
   const picked = $derived([...selection.names].flatMap((n) => byName.get(n) ?? []));
   const pickedMounts = $derived(picked.filter((e) => e.mount_id).length);
@@ -101,10 +101,11 @@
   const gridRows = $derived(Array.from({ length: Math.ceil(sorted.length / cols) }, (_, i) => sorted.slice(i * cols, i * cols + cols)));
 
   /** Row/card clicks: modifier keys select, and while anything is selected
-   *  a plain click selects too (no keyboard modifiers on phones). */
+   *  a plain click selects too (no keyboard modifiers on phones). Enter on
+   *  a name (a click with detail 0) always opens. */
   function activate(e: Entry, ev: MouseEvent) {
     if (ev.shiftKey) selection.range(e.name, order);
-    else if (ev.ctrlKey || ev.metaKey || selection.size) selection.toggle(e.name);
+    else if (ev.ctrlKey || ev.metaKey || (selection.size && ev.detail !== 0)) selection.toggle(e.name);
     else open(e);
   }
   function check(e: Entry, ev: MouseEvent) {
@@ -128,6 +129,8 @@
   const pickSort = (i: number) => setSort(SORT_CHOICES[i][1]);
 
   function onKeys(ev: KeyboardEvent) {
+    // Focus stays on the ⋯ button, outside the menu, so Escape lands here.
+    if (menu && ev.key === 'Escape') return void (menu = null);
     if (viewerIndex >= 0 || editing || menu || hits) return;
     const t = ev.target as HTMLElement | null;
     if (t?.closest('input:not([type=checkbox]), textarea, select, [contenteditable]')) return;
@@ -289,9 +292,10 @@
 
   /** Mounts are moved and removed on the Mounts page, never as files. */
   function withoutMounts(items: Entry[], verb: string) {
-    const skipped = items.length - items.filter((e) => !e.mount_id).length;
+    const kept = items.filter((e) => !e.mount_id);
+    const skipped = items.length - kept.length;
     if (skipped) toast(`${skipped === 1 ? 'A mount is' : `${skipped} mounts are`} skipped: ${verb} ${skipped === 1 ? 'it' : 'them'} on the Mounts page.`, 'info', 6000);
-    return items.filter((e) => !e.mount_id);
+    return kept;
   }
 
   const removePicked = () => removeItems(picked);
@@ -566,7 +570,7 @@
                   </div>
                   {@render moreButton(e, '-mr-1')}
                 </div>
-                {@render checkbox(e, cn('absolute top-2 left-2 size-5 rounded opacity-0 group-hover:opacity-100 focus-visible:opacity-100 max-md:opacity-100', on && 'opacity-100'))}
+                {@render checkbox(e, cn('absolute top-2 left-2 size-5 rounded opacity-0 group-hover:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100', on && 'opacity-100'))}
               </div>
             {/each}
           </div>
@@ -615,7 +619,7 @@
       {#if e.mount_id}
         <a role="menuitem" class="item" href="/mounts">Manage mount…</a>
       {:else}
-        <button role="menuitem" class="item text-destructive" onclick={() => remove(e)}>Delete</button>
+        <button role="menuitem" class="item danger" onclick={() => remove(e)}>Delete</button>
       {/if}
     </div>
   </div>
@@ -650,5 +654,7 @@
     display: block; width: 100%; padding: 0.625rem; border-radius: calc(var(--radius) - 4px);
     text-align: left; font-size: 0.875rem; color: inherit;
   }
+  /* Scoped styles beat utilities, so the colour lives here. */
+  .item.danger { color: var(--destructive); }
   .item:hover, .item:focus-visible { background: var(--hover); outline: none; }
 </style>

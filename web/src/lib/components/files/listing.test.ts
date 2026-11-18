@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import type { Entry } from '$lib/api';
 import { Selection, loadPref, nextSort, savePref, sortEntries } from './listing';
 
@@ -84,6 +84,11 @@ describe('Selection', () => {
 });
 
 describe('prefs', () => {
+  const real = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  afterEach(() => {
+    if (real) Object.defineProperty(globalThis, 'localStorage', real);
+    else delete (globalThis as { localStorage?: Storage }).localStorage;
+  });
   it('reads allowed values and falls back otherwise', () => {
     const m = new Map<string, string>();
     Object.defineProperty(globalThis, 'localStorage', {
@@ -96,10 +101,8 @@ describe('prefs', () => {
     expect(loadPref('t-view', ['list', 'grid'] as const, 'list')).toBe('list');
   });
   it('survives blocked storage', () => {
-    const orig = globalThis.localStorage;
     Object.defineProperty(globalThis, 'localStorage', { configurable: true, get: () => { throw new Error('blocked'); } });
     expect(loadPref('x', ['a'] as const, 'a')).toBe('a');
     expect(() => savePref('x', 'a')).not.toThrow();
-    Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: orig });
   });
 });
