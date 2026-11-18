@@ -518,7 +518,7 @@ pub fn spawn_listener(st: AppState) {
                     let _ = st.events.send(ChangeEvent {
                         volume_id: vid,
                         user_id: uid,
-                        connection_id: v["c"].as_i64(),
+                        connection_id: None,
                         audience: None,
                     });
                 }

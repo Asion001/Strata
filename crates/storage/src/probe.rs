@@ -438,13 +438,18 @@ mod tests {
             "probe folder left behind"
         );
         assert_eq!(std::fs::read(dir.path().join("keep.txt")).unwrap(), b"mine");
-        // read-only probe of a missing root
-        let gone = crate::ConnectionConfig::Local {
+        // a root that goes missing after its operator was built
+        let cfg = crate::ConnectionConfig::Local {
             path: "nope/deeper".into(),
-        }
-        .operator(dir.path())
-        .unwrap();
-        std::fs::remove_dir_all(dir.path().join("nope")).ok();
+        };
+        assert!(
+            cfg.operator(dir.path()).is_err(),
+            "no operator for a missing folder"
+        );
+        assert!(!dir.path().join("nope").exists(), "building recreated it");
+        cfg.create_local_root(dir.path()).unwrap();
+        let gone = cfg.operator(dir.path()).unwrap();
+        std::fs::remove_dir_all(dir.path().join("nope")).unwrap();
         let p = probe(&gone, Some(&dir.path().join("nope/deeper")), true, &[]).await;
         assert!(matches!(p.outcome, Outcome::Down(_)), "{:?}", p.outcome);
         assert!(

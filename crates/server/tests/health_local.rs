@@ -33,8 +33,27 @@ async fn missing_local_folder_goes_offline_and_is_never_recreated() {
     // "Unmount" it.
     let parked = t.st.cfg.local_base.join("parked");
     std::fs::rename(&dir, &parked).unwrap();
-    // A fresh operator would be built from scratch (as after a restart).
+    // Before any probe noticed: a write is refused at once and doesn't
+    // create the folder again (a cached operator).
+    let put = |p: &'static str| {
+        let t = &t;
+        async move {
+            t.raw(
+                "PUT",
+                &format!("/api/files/content?path={}", enc(p)),
+                axum::body::Body::from("x"),
+                &[("if-none-match", "*")],
+            )
+            .await
+            .0
+        }
+    };
+    assert_eq!(put("disk/c.txt").await, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(!dir.exists(), "a write recreated the missing folder");
+    // ... nor with a fresh operator (as after a restart).
     t.st.forget_operator(id);
+    assert_eq!(put("disk/d.txt").await, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(!dir.exists(), "a write recreated the missing folder");
     for _ in 0..health::OFFLINE_AFTER {
         health::probe_one(&t.st, id, true).await;
     }
@@ -45,6 +64,16 @@ async fn missing_local_folder_goes_offline_and_is_never_recreated() {
     let (s, _) = t.get("/api/files/list?path=disk").await;
     assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
     assert!(!dir.exists(), "a listing recreated the missing folder");
+    // Renaming the connection doesn't touch its storage either.
+    let renamed = t
+        .ok(
+            "PUT",
+            &format!("/api/connections/{id}"),
+            json!({"name": "disk2", "config": {"kind": "local", "path": "disk"}}),
+        )
+        .await;
+    assert!(!dir.exists(), "an edit recreated the missing folder");
+    assert_eq!(renamed["health"], "offline", "{renamed}");
 
     // Back.
     std::fs::rename(&parked, &dir).unwrap();

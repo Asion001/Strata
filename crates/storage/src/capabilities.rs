@@ -64,7 +64,16 @@ pub enum Versioning {
 }
 
 impl Capabilities {
-    pub async fn detect(cfg: &ConnectionConfig, op: &Operator, local_base: &Path) -> Self {
+    /// Detect what a connection supports. `prev` is the last detection for
+    /// the same config: a snapshot test that already ran on the same
+    /// filesystem isn't repeated, and an S3 versioning state that can't be
+    /// read this time (throttled, timed out) keeps its last known value.
+    pub async fn detect(
+        cfg: &ConnectionConfig,
+        op: &Operator,
+        local_base: &Path,
+        prev: Option<&Capabilities>,
+    ) -> Self {
         let cap = op.info().capability();
         let mut c = Capabilities {
             rename: cap.rename,
@@ -79,7 +88,10 @@ impl Capabilities {
                 c.clean_deletes = true;
                 if let Ok(Some(dir)) = cfg.local_dir(local_base) {
                     let fs = fs_type_bounded(&dir).await;
+                    let known = prev.filter(|p| p.fs_type.is_some() && p.fs_type == fs);
                     c.snapshots = match fs.as_deref() {
+                        // Same filesystem as last time: no new test snapshot.
+                        Some("btrfs" | "zfs") if known.is_some() => known.unwrap().snapshots,
                         Some("btrfs") => Snapshots {
                             kind: SnapshotKind::Btrfs,
                             create: btrfs_can_snapshot(&dir).await,
@@ -98,9 +110,11 @@ impl Capabilities {
                 c.atomic_write = true;
                 c.list_fast = true;
                 let v = s3_versioning(cfg).await;
-                if v == Versioning::Enabled {
-                    c.snapshots.kind = SnapshotKind::S3Versioning;
-                }
+                c.snapshots.kind = match v {
+                    Versioning::Enabled => SnapshotKind::S3Versioning,
+                    Versioning::Unknown => prev.map(|p| p.snapshots.kind).unwrap_or_default(),
+                    Versioning::Off | Versioning::Suspended => SnapshotKind::None,
+                };
                 c.clean_deletes = v == Versioning::Off;
             }
             ConnectionConfig::Ftp { .. } => c.clean_deletes = true,
@@ -458,7 +472,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = ConnectionConfig::Local { path: "".into() };
         let op = cfg.operator(dir.path()).unwrap();
-        let c = Capabilities::detect(&cfg, &op, dir.path()).await;
+        let c = Capabilities::detect(&cfg, &op, dir.path(), None).await;
         assert!(c.rename && c.range_read && c.atomic_write && c.list_fast && c.clean_deletes);
         let fs = c.fs_type.clone().unwrap();
         #[cfg(target_os = "macos")]
@@ -483,7 +497,7 @@ mod tests {
         let dir = PathBuf::from(dir);
         let cfg = ConnectionConfig::Local { path: "".into() };
         let op = cfg.operator(&dir).unwrap();
-        let c = Capabilities::detect(&cfg, &op, &dir).await;
+        let c = Capabilities::detect(&cfg, &op, &dir, None).await;
         assert_eq!(c.fs_type.as_deref(), Some("btrfs"));
         assert_eq!(c.snapshots.kind, SnapshotKind::Btrfs);
         assert!(c.snapshots.create, "the test snapshot should succeed");

@@ -221,7 +221,7 @@ pub async fn create(
     .bind(sfolder)
     .fetch_one(&st.db)
     .await?;
-    crate::health::probe_one(&st, id, true).await;
+    crate::health::probe_soon(&st, id).await;
     get_view(&st, &u, id).await.map(Json)
 }
 
@@ -264,12 +264,18 @@ pub async fn update(
         bad("the stored settings of this connection can't be read (wrong server key, or an unknown format)")
     })?;
     req.config.merge_secrets(&old);
-    req.config
-        .create_local_root(&st.cfg.local_base)
-        .map_err(|e| bad(format!("invalid config: {e}")))?;
-    req.config
-        .operator(&st.cfg.local_base)
-        .map_err(|e| bad(format!("invalid config: {e}")))?;
+    // Only a re-pointed connection gets its folder made, a fresh failure
+    // count and capabilities to detect: a rename never touches the storage
+    // (an unmounted disk's folder must not be created again).
+    let repointed = req.config != old;
+    if repointed {
+        req.config
+            .create_local_root(&st.cfg.local_base)
+            .map_err(|e| bad(format!("invalid config: {e}")))?;
+        req.config
+            .operator(&st.cfg.local_base)
+            .map_err(|e| bad(format!("invalid config: {e}")))?;
+    }
     let (sid, sfolder) = req
         .config
         .location(&st.cfg.local_base)
@@ -302,16 +308,19 @@ pub async fn update(
     let enc = st.encrypt_config(&req.config)?;
     // Config and location change together, in one statement.
     sqlx::query(
-        // A new config starts a fresh failure count; capabilities come from
-        // the probe below.
-        "UPDATE connections SET name = $2, config_enc = $3, health_failures = 0,
-                storage_id = $4, storage_folder = $5 WHERE id = $1",
+        // A re-pointed connection starts a fresh failure count, and its
+        // capabilities come from the probe below.
+        "UPDATE connections SET name = $2, config_enc = $3, storage_id = $4, storage_folder = $5,
+                health_failures = CASE WHEN $6 THEN 0 ELSE health_failures END,
+                capabilities = CASE WHEN $6 THEN '{}'::jsonb ELSE capabilities END
+         WHERE id = $1",
     )
     .bind(id)
     .bind(req.name.trim())
     .bind(enc)
     .bind(&sid)
     .bind(&sfolder)
+    .bind(repointed)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -319,7 +328,7 @@ pub async fn update(
     st.forget_operator(id);
     // A re-pointed connection is probed again at once: it may come back
     // online, and goes offline only after three failed probes as usual.
-    crate::health::probe_one(&st, id, true).await;
+    crate::health::probe_soon(&st, id).await;
     get_view(&st, &u, id).await.map(Json)
 }
 
@@ -375,7 +384,7 @@ pub async fn probe(
     Path(id): Path<i64>,
 ) -> ApiResult<Json<ConnectionView>> {
     check_access(&st, &u, id).await?;
-    crate::health::probe_one(&st, id, true).await;
+    crate::health::probe_soon(&st, id).await;
     get_view(&st, &u, id).await.map(Json)
 }
 

@@ -134,6 +134,15 @@ pub async fn probe_one(st: &AppState, id: i64, wait: bool) -> Option<i32> {
     }
 }
 
+/// Probe now for a request (add, edit, "Check"): wait up to 25 seconds,
+/// then answer anyway (the probe finishes in the background and its
+/// result shows on the next load or arrives over the websocket).
+pub async fn probe_soon(st: &AppState, id: i64) {
+    let s = st.clone();
+    let task = tokio::spawn(async move { probe_one(&s, id, true).await });
+    let _ = tokio::time::timeout(Duration::from_secs(25), task).await;
+}
+
 /// Does a local connection's folder exist? Checked off the async threads
 /// with a time limit; while an earlier check is still stuck (a hung network
 /// mount), no new one is started, so stuck threads can't pile up.
@@ -171,21 +180,29 @@ async fn local_root(st: &AppState, id: i64, dir: PathBuf) -> Result<(), probe::F
 }
 
 async fn probe_inner(st: &AppState, id: i64) -> anyhow::Result<Option<i32>> {
-    let row: Option<(Vec<u8>, String, i32)> =
-        sqlx::query_as("SELECT config_enc, health, health_failures FROM connections WHERE id = $1")
-            .bind(id)
-            .fetch_optional(&st.db)
-            .await?;
-    let Some((enc, prev, failures)) = row else {
+    type Row = (Vec<u8>, String, i32, sqlx::types::Json<serde_json::Value>);
+    let row: Option<Row> = sqlx::query_as(
+        "SELECT config_enc, health, health_failures, capabilities FROM connections WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(&st.db)
+    .await?;
+    let Some((enc, prev, failures, prev_caps)) = row else {
         return Ok(None); // deleted meanwhile
     };
     let prev = State::parse(&prev);
+    // An empty column (new or re-pointed connection) has no detection yet.
+    let prev_caps: Option<Capabilities> = prev_caps
+        .0
+        .as_object()
+        .filter(|o| !o.is_empty())
+        .and_then(|_| serde_json::from_value(prev_caps.0.clone()).ok());
 
     let mut caps: Option<Capabilities> = None;
     let (found, latency, failure) = match st.decrypt_config(&enc) {
         Err(_) => (
             Found::Down,
-            Duration::ZERO,
+            None,
             Some(probe::Failure {
                 reason: Reason::Misconfigured,
                 detail: "the stored settings can't be read (server key?)".into(),
@@ -200,10 +217,10 @@ async fn probe_inner(st: &AppState, id: i64) -> anyhow::Result<Option<i32>> {
         }
         .await
         {
-            Err(Err(f)) => (Found::Down, Duration::ZERO, Some(f)),
+            Err(Err(f)) => (Found::Down, None, Some(f)),
             Err(Ok(e)) => (
                 Found::Down,
-                Duration::ZERO,
+                None,
                 Some(probe::Failure {
                     reason: Reason::Misconfigured,
                     detail: probe::sanitize(&e.to_string(), &[]),
@@ -215,20 +232,24 @@ async fn probe_inner(st: &AppState, id: i64) -> anyhow::Result<Option<i32>> {
                 // (A local folder was checked above.)
                 let p = probe::probe(&op, None, false, &secrets).await;
                 match p.outcome {
-                    Outcome::Down(f) | Outcome::ReadOnly(f) => (Found::Down, p.latency, Some(f)),
+                    Outcome::Down(f) | Outcome::ReadOnly(f) => {
+                        (Found::Down, Some(p.latency), Some(f))
+                    }
                     Outcome::Ok => {
-                        let c = Capabilities::detect(&cfg, &op, &st.cfg.local_base).await;
+                        let c =
+                            Capabilities::detect(&cfg, &op, &st.cfg.local_base, prev_caps.as_ref())
+                                .await;
                         // A write test only where a delete leaves nothing
                         // behind (not on a versioned bucket, nor where that
                         // can't be confirmed).
                         let write = c.clean_deletes;
                         caps = Some(c);
                         if !write {
-                            (Found::Ok, p.latency, None)
+                            (Found::Ok, Some(p.latency), None)
                         } else {
                             match probe::write_check(&op, &secrets).await {
-                                Ok(()) => (Found::Ok, p.latency, None),
-                                Err(f) => (Found::ReadOnly, p.latency, Some(f)),
+                                Ok(()) => (Found::Ok, Some(p.latency), None),
+                                Err(f) => (Found::ReadOnly, Some(p.latency), Some(f)),
                             }
                         }
                     }
@@ -238,7 +259,8 @@ async fn probe_inner(st: &AppState, id: i64) -> anyhow::Result<Option<i32>> {
     };
 
     let (state, failures) = next(failures, found);
-    let latency_ms = i32::try_from(latency.as_millis()).unwrap_or(i32::MAX);
+    // None when no request reached the backend (shown as no latency).
+    let latency_ms = latency.map(|l| i32::try_from(l.as_millis()).unwrap_or(i32::MAX));
     sqlx::query(
         "UPDATE connections SET health = $2, health_failures = $3, health_latency_ms = $4,
                 health_reason = $5, health_error = $6, health_checked_at = now(),

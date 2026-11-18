@@ -44,6 +44,8 @@ pub struct Inner {
     pub probe_locks: DashMap<i64, Arc<tokio::sync::Mutex<()>>>,
     /// A local connection's folder check still running (see `health`).
     pub root_checks: DashMap<i64, Arc<std::sync::atomic::AtomicBool>>,
+    /// Local connections' folders, checked before every use (see `operator`).
+    pub local_roots: DashMap<i64, std::path::PathBuf>,
     /// user id -> that user's mounts, longest path first
     pub mounts: DashMap<i64, Arc<Vec<Mount>>>,
     pub events: broadcast::Sender<ChangeEvent>,
@@ -100,6 +102,7 @@ impl AppState {
             offline: DashMap::new(),
             probe_locks: DashMap::new(),
             root_checks: DashMap::new(),
+            local_roots: DashMap::new(),
             mounts: DashMap::new(),
             events,
             decisions: quick_cache::sync::Cache::new(100_000),
@@ -137,7 +140,16 @@ impl AppState {
     /// connection is offline. Health probes use `operator_unchecked`.
     pub async fn operator(&self, connection_id: i64) -> ApiResult<Operator> {
         self.ensure_online(connection_id)?;
-        self.operator_unchecked(connection_id).await
+        let op = self.operator_unchecked(connection_id).await?;
+        // A local folder that is gone (an unmounted disk) is refused at once,
+        // not only after three failed probes: a write would otherwise create
+        // the folder again on the disk underneath.
+        if let Some(root) = self.local_roots.get(&connection_id).map(|r| r.clone())
+            && !root.is_dir()
+        {
+            return Err(missing_folder());
+        }
+        Ok(op)
     }
 
     /// 503 while a connection is offline.
@@ -161,7 +173,16 @@ impl AppState {
         }
         let seen = self.op_gens.get(&connection_id).map(|g| *g).unwrap_or(0);
         let cfg = self.connection_config(connection_id).await?;
+        if let Some(root) = cfg.local_dir(&self.cfg.local_base).ok().flatten()
+            && !root.is_dir()
+        {
+            return Err(missing_folder());
+        }
         let op = cfg.operator(&self.cfg.local_base)?;
+        match cfg.local_dir(&self.cfg.local_base).ok().flatten() {
+            Some(root) => self.local_roots.insert(connection_id, root),
+            None => self.local_roots.remove(&connection_id).map(|(_, r)| r),
+        };
         // Cached only if no config change landed meanwhile (the entry is
         // held across the insert, so a concurrent forget waits for it).
         let g = self.op_gens.entry(connection_id).or_insert(0);
@@ -177,4 +198,10 @@ impl AppState {
         *g += 1;
         self.ops.remove(&connection_id);
     }
+}
+
+fn missing_folder() -> ApiError {
+    ApiError::Unavailable(
+        "this storage's folder is missing (disk not mounted?); try again later".into(),
+    )
 }

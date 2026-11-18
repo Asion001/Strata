@@ -184,10 +184,13 @@ impl ConnectionConfig {
                 // Never (re)create the connection's folder here: if it is
                 // missing (an unmounted disk), creating it would put files on
                 // the wrong disk. `create_local_root` makes it, once, when the
-                // connection is set up; the health probes see it go missing.
-                if dir.is_dir() {
-                    std::fs::create_dir_all(&tmp)?;
+                // connection is set up; the health probes see it go missing,
+                // and until it is back no operator can be built for it.
+                // (OpenDAL's Fs backend would create a missing root itself.)
+                if !dir.is_dir() {
+                    bail!("the connection's folder is missing");
                 }
+                std::fs::create_dir_all(&tmp)?;
                 Operator::new(
                     services::Fs::default()
                         .root(&dir.to_string_lossy())
