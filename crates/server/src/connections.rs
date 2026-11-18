@@ -5,7 +5,7 @@ use axum::extract::{Path, State};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use strata_storage::{Capabilities, ConnectionConfig, paths};
+use strata_storage::{ConnectionConfig, paths};
 
 use crate::auth::{AuthUser, User};
 use crate::error::{ApiError, ApiResult, bad, conflict};
@@ -201,8 +201,9 @@ pub async fn create(
     req.config
         .operator(&st.cfg.local_base)
         .map_err(|e| bad(format!("invalid config: {e}")))?;
-    // Capabilities come from the first probe, right after the insert.
-    let caps = Capabilities::default();
+    // Capabilities come from the first probe, right after the insert
+    // ('{}': not detected yet).
+    let caps = serde_json::json!({});
     let enc = st.encrypt_config(&req.config)?;
     let (sid, sfolder) = req
         .config
@@ -216,7 +217,7 @@ pub async fn create(
     .bind(req.name.trim())
     .bind(req.config.kind())
     .bind(enc)
-    .bind(sqlx::types::Json(caps))
+    .bind(caps)
     .bind(sid)
     .bind(sfolder)
     .fetch_one(&st.db)
@@ -404,6 +405,18 @@ pub async fn test(
     if let Some(id) = req.id {
         check_access(&st, &u, id).await?;
         req.config.merge_secrets(&st.connection_config(id).await?);
+    }
+    // A new local folder is made when the connection is saved; testing
+    // must not make it (or fail because it isn't there yet).
+    if let Some(dir) = req
+        .config
+        .local_dir(&st.cfg.local_base)
+        .map_err(|e| bad(format!("invalid config: {e}")))?
+        && !dir.exists()
+    {
+        return Ok(Json(
+            json!({ "ok": true, "error": null, "reason": null, "note": "the folder will be created" }),
+        ));
     }
     let op = req
         .config

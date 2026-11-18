@@ -11,7 +11,7 @@ use axum::response::{IntoResponse, Response};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use strata_storage::{Capabilities, ConnectionConfig};
+use strata_storage::ConnectionConfig;
 
 use crate::error::{ApiError, ApiResult, bad};
 use crate::state::AppState;
@@ -325,8 +325,10 @@ async fn insert_local_connection(
         path: path.to_string(),
     };
     cfg.create_local_root(&st.cfg.local_base)?;
-    let op = cfg.operator(&st.cfg.local_base)?;
-    let caps = Capabilities::detect(&cfg, &op, &st.cfg.local_base, None).await;
+    cfg.operator(&st.cfg.local_base)?; // validates the config
+    // Capabilities come from the first probe ('{}': not detected yet); no
+    // detection inside this transaction.
+    let caps = serde_json::json!({});
     let enc = st.encrypt_config(&cfg)?;
     let (storage_id, storage_folder) = cfg.location(&st.cfg.local_base)?;
     Ok(sqlx::query_scalar(

@@ -42,11 +42,21 @@ create them.
 Each connection is probed every `STRATA_PROBE_SECS` (default 60, up to 10%
 less as jitter; half that while reads are failing), one probe per connection
 at a time.
-* **What a probe does.** It reads the root (for a local folder, the folder
-  must exist, so an unmounted disk isn't mistaken for an empty one). It then
-  writes, reads back and deletes one small file, `probe-<random>.tmp`, under
-  `.strata-probe/` at the connection's root.
-* **No junk files.** The probe file is deleted whatever happened. Files an
+* **What a probe does.** It reads the root, then writes, reads back and
+  deletes one small file, `probe-<random>.tmp`, under `.strata-probe/` at the
+  connection's root. Manual checks (adding, editing, "Check") never count
+  towards offline. A probe that started before an edit has its result
+  dropped.
+* **Local folders.** A local connection's folder is never created again
+  once it exists (OpenDAL would, so no operator is built for a missing
+  one). The first probe that finds the folder healthy writes a marker,
+  `.strata-probe/conn-<id>`; from then on a folder without the marker
+  counts as missing. An unmounted disk leaves its empty mount point behind,
+  which is a folder, but not this one. The folder and marker are checked
+  before every use, off the async threads and with a time limit, and a
+  missing one gets 503 at once rather than only after three probes.
+* **No junk files.** The probe file is deleted whatever happened (the
+  marker is the only file ever left there). Files an
   interrupted probe left behind are swept by later probes once they are ten
   minutes old. Versioned buckets get no write test, since a delete there
   would leave versions behind.

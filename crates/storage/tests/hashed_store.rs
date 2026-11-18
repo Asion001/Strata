@@ -34,6 +34,7 @@ async fn local_hashed_store() {
     let cfg = ConnectionConfig::Local {
         path: "conn".into(),
     };
+    cfg.create_local_root(dir.path()).unwrap();
     let op = cfg.operator(dir.path()).unwrap();
     exercise(HashedStore::new(op, "store")).await;
 }
@@ -60,9 +61,9 @@ async fn s3_hashed_store() {
 #[tokio::test]
 async fn keyed_names_hide_content_hashes() {
     let dir = tempfile::tempdir().unwrap();
-    let op = ConnectionConfig::Local { path: "k".into() }
-        .operator(dir.path())
-        .unwrap();
+    let cfg = ConnectionConfig::Local { path: "k".into() };
+    cfg.create_local_root(dir.path()).unwrap();
+    let op = cfg.operator(dir.path()).unwrap();
     let plain = HashedStore::new(op.clone(), "s");
     let keyed = HashedStore::new(op, "s").with_naming_key([7u8; 32]);
     let h = Hash::of(b"x");

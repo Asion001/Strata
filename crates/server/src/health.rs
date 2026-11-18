@@ -14,7 +14,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use rand::Rng;
@@ -111,7 +110,7 @@ pub fn secrets(cfg: &ConnectionConfig) -> Vec<String> {
 /// Probe one connection now and record the result; returns the failed
 /// reads in a row afterwards (None if skipped or it failed to record). One
 /// probe per connection at a time: `wait` false skips if one is running.
-pub async fn probe_one(st: &AppState, id: i64, wait: bool) -> Option<i32> {
+pub async fn probe_one(st: &AppState, id: i64, wait: bool, counted: bool) -> Option<i32> {
     let lock = st
         .probe_locks
         .entry(id)
@@ -125,7 +124,7 @@ pub async fn probe_one(st: &AppState, id: i64, wait: bool) -> Option<i32> {
             Err(_) => return None,
         }
     };
-    match probe_inner(st, id).await {
+    match probe_inner(st, id, counted).await {
         Ok(f) => f,
         Err(e) => {
             tracing::warn!("probe of connection {id}: {e:#}");
@@ -139,47 +138,15 @@ pub async fn probe_one(st: &AppState, id: i64, wait: bool) -> Option<i32> {
 /// result shows on the next load or arrives over the websocket).
 pub async fn probe_soon(st: &AppState, id: i64) {
     let s = st.clone();
-    let task = tokio::spawn(async move { probe_one(&s, id, true).await });
+    let task = tokio::spawn(async move { probe_one(&s, id, true, false).await });
     let _ = tokio::time::timeout(Duration::from_secs(25), task).await;
 }
 
-/// Does a local connection's folder exist? Checked off the async threads
-/// with a time limit; while an earlier check is still stuck (a hung network
-/// mount), no new one is started, so stuck threads can't pile up.
-async fn local_root(st: &AppState, id: i64, dir: PathBuf) -> Result<(), probe::Failure> {
-    let busy = st
-        .root_checks
-        .entry(id)
-        .or_insert_with(|| Arc::new(AtomicBool::new(false)))
-        .clone();
-    let stuck = || probe::Failure {
-        reason: Reason::TimedOut,
-        detail: "the connection's folder doesn't answer".into(),
-    };
-    if busy.swap(true, Ordering::AcqRel) {
-        return Err(stuck());
-    }
-    let flag = busy.clone();
-    let check = tokio::task::spawn_blocking(move || {
-        let r = std::fs::metadata(&dir).map(|m| m.is_dir());
-        flag.store(false, Ordering::Release);
-        r
-    });
-    match tokio::time::timeout(Duration::from_secs(20), check).await {
-        Err(_) => Err(stuck()),
-        Ok(Ok(Ok(true))) => Ok(()),
-        Ok(Ok(Ok(false))) => Err(probe::Failure {
-            reason: Reason::NotFound,
-            detail: "the connection's folder is not a folder".into(),
-        }),
-        Ok(_) => Err(probe::Failure {
-            reason: Reason::NotFound,
-            detail: "the connection's folder is missing".into(),
-        }),
-    }
-}
+/// Longest a probe may take before it counts as failed (each step has its
+/// own shorter limit; this bounds them all, so the probe lock is released).
+const PROBE_LIMIT: Duration = Duration::from_secs(120);
 
-async fn probe_inner(st: &AppState, id: i64) -> anyhow::Result<Option<i32>> {
+async fn probe_inner(st: &AppState, id: i64, counted: bool) -> anyhow::Result<Option<i32>> {
     type Row = (Vec<u8>, String, i32, sqlx::types::Json<serde_json::Value>);
     let row: Option<Row> = sqlx::query_as(
         "SELECT config_enc, health, health_failures, capabilities FROM connections WHERE id = $1",
@@ -199,73 +166,139 @@ async fn probe_inner(st: &AppState, id: i64) -> anyhow::Result<Option<i32>> {
         .and_then(|_| serde_json::from_value(prev_caps.0.clone()).ok());
 
     let mut caps: Option<Capabilities> = None;
-    let (found, latency, failure) = match st.decrypt_config(&enc) {
-        Err(_) => (
-            Found::Down,
-            None,
-            Some(probe::Failure {
-                reason: Reason::Misconfigured,
-                detail: "the stored settings can't be read (server key?)".into(),
-            }),
-        ),
-        Ok(cfg) => match async {
-            // A local folder must exist before its operator is even built.
-            if let Ok(Some(dir)) = cfg.local_dir(&st.cfg.local_base) {
-                local_root(st, id, dir).await.map_err(Err)?;
-            }
-            st.operator_unchecked(id).await.map_err(Ok)
-        }
-        .await
-        {
-            Err(Err(f)) => (Found::Down, None, Some(f)),
-            Err(Ok(e)) => (
+    let mut marker: Option<PathBuf> = None;
+    let probed = tokio::time::timeout(PROBE_LIMIT, async {
+        match st.decrypt_config(&enc) {
+            Err(_) => (
                 Found::Down,
                 None,
                 Some(probe::Failure {
                     reason: Reason::Misconfigured,
-                    detail: probe::sanitize(&e.to_string(), &[]),
+                    detail: "the stored settings can't be read (server key?)".into(),
                 }),
             ),
-            Ok(op) => {
-                let secrets = secrets(&cfg);
-                let secrets: Vec<&str> = secrets.iter().map(String::as_str).collect();
-                // (A local folder was checked above.)
-                let p = probe::probe(&op, None, false, &secrets).await;
-                match p.outcome {
-                    Outcome::Down(f) | Outcome::ReadOnly(f) => {
-                        (Found::Down, Some(p.latency), Some(f))
+            Ok(cfg) => match async {
+                // A local folder must exist (and be the right one) before its
+                // operator is even built.
+                if let Some(root) = st.local_root(id, &cfg).await.map_err(Ok)? {
+                    st.check_root(id, root.clone(), Duration::from_secs(20))
+                        .await
+                        .map_err(|detail| {
+                            Err(probe::Failure {
+                                reason: Reason::NotFound,
+                                detail,
+                            })
+                        })?;
+                    if root.marker.is_none() {
+                        marker = Some(crate::state::LocalRoot::marker_path(&root.dir, id));
                     }
-                    Outcome::Ok => {
-                        let c =
-                            Capabilities::detect(&cfg, &op, &st.cfg.local_base, prev_caps.as_ref())
-                                .await;
-                        // A write test only where a delete leaves nothing
-                        // behind (not on a versioned bucket, nor where that
-                        // can't be confirmed).
-                        let write = c.clean_deletes;
-                        caps = Some(c);
-                        if !write {
-                            (Found::Ok, Some(p.latency), None)
-                        } else {
-                            match probe::write_check(&op, &secrets).await {
-                                Ok(()) => (Found::Ok, Some(p.latency), None),
-                                Err(f) => (Found::ReadOnly, Some(p.latency), Some(f)),
+                }
+                st.operator_unchecked(id).await.map_err(Ok)
+            }
+            .await
+            {
+                Err(Err(f)) => (Found::Down, None, Some(f)),
+                Err(Ok(e)) => (
+                    Found::Down,
+                    None,
+                    Some(probe::Failure {
+                        reason: Reason::Misconfigured,
+                        detail: probe::sanitize(&e.to_string(), &[]),
+                    }),
+                ),
+                Ok(op) => {
+                    let secrets = secrets(&cfg);
+                    let secrets: Vec<&str> = secrets.iter().map(String::as_str).collect();
+                    // (A local folder was checked above.)
+                    let p = probe::probe(&op, None, false, &secrets).await;
+                    match p.outcome {
+                        Outcome::Down(f) | Outcome::ReadOnly(f) => {
+                            (Found::Down, Some(p.latency), Some(f))
+                        }
+                        Outcome::Ok => {
+                            let c = Capabilities::detect(
+                                &cfg,
+                                &op,
+                                &st.cfg.local_base,
+                                prev_caps.as_ref(),
+                            )
+                            .await;
+                            // A write test only where a delete leaves nothing
+                            // behind (not on a versioned bucket, nor where that
+                            // can't be confirmed).
+                            let write = c.clean_deletes;
+                            caps = Some(c);
+                            if !write {
+                                (Found::Ok, Some(p.latency), None)
+                            } else {
+                                match probe::write_check(&op, &secrets).await {
+                                    Ok(()) => (Found::Ok, Some(p.latency), None),
+                                    Err(f) => (Found::ReadOnly, Some(p.latency), Some(f)),
+                                }
                             }
                         }
                     }
                 }
-            }
-        },
-    };
+            },
+        }
+    })
+    .await;
+    let (found, latency, failure) = probed.unwrap_or_else(|_| {
+        (
+            Found::Down,
+            None,
+            Some(probe::Failure {
+                reason: Reason::TimedOut,
+                detail: format!("the probe took over {}s", PROBE_LIMIT.as_secs()),
+            }),
+        )
+    });
 
-    let (state, failures) = next(failures, found);
+    // A local folder seen healthy for the first time gets its marker (see
+    // `LocalRoot`): from now on a folder without it counts as missing.
+    if found == Found::Ok
+        && let Some(m) = marker
+    {
+        let written = tokio::task::spawn_blocking(move || {
+            std::fs::create_dir_all(m.parent().unwrap())?;
+            std::fs::write(&m, b"strata connection folder marker\n")
+        })
+        .await;
+        if matches!(written, Ok(Ok(()))) {
+            sqlx::query(
+                "UPDATE connections SET root_marker = TRUE WHERE id = $1 AND config_enc = $2",
+            )
+            .bind(id)
+            .bind(&enc)
+            .execute(&st.db)
+            .await?;
+            st.local_roots.remove(&id);
+            st.forget_operator(id);
+        }
+    }
+
+    // A manual check ("Check", adding or editing) never counts towards
+    // offline: clicking it during a blip mustn't take the storage away from
+    // everyone. A success still counts (it ends offline).
+    let (state, failures) = if !counted && found == Found::Down {
+        (
+            if prev == State::Offline {
+                State::Offline
+            } else {
+                State::Degraded
+            },
+            failures,
+        )
+    } else {
+        next(failures, found)
+    };
     // None when no request reached the backend (shown as no latency).
     let latency_ms = latency.map(|l| i32::try_from(l.as_millis()).unwrap_or(i32::MAX));
-    sqlx::query(
+    let written = sqlx::query(
         "UPDATE connections SET health = $2, health_failures = $3, health_latency_ms = $4,
                 health_reason = $5, health_error = $6, health_checked_at = now(),
                 capabilities = COALESCE($7, capabilities)
-         WHERE id = $1",
+         WHERE id = $1 AND config_enc = $8",
     )
     .bind(id)
     .bind(state.as_str())
@@ -274,8 +307,14 @@ async fn probe_inner(st: &AppState, id: i64) -> anyhow::Result<Option<i32>> {
     .bind(failure.as_ref().map(|f| f.reason.as_str()))
     .bind(failure.as_ref().map(|f| f.detail.as_str()))
     .bind(caps.map(sqlx::types::Json))
+    .bind(&enc)
     .execute(&st.db)
     .await?;
+    if written.rows_affected() == 0 {
+        // The connection was edited (or deleted) while we probed: this
+        // result is about the old config, so it is dropped.
+        return Ok(None);
+    }
 
     if state == State::Offline {
         st.offline.insert(id, ());
@@ -336,7 +375,7 @@ pub fn delay(every: Duration, failures: i32, jitter: f64) -> Duration {
 pub async fn run(st: AppState) {
     let every = Duration::from_secs(st.cfg.probe_secs);
     let due: Arc<std::sync::Mutex<HashMap<i64, Instant>>> = Default::default();
-    let mut tick = tokio::time::interval(Duration::from_secs(2));
+    let mut tick = tokio::time::interval(Duration::from_secs(5));
     loop {
         tick.tick().await;
         let ids: Vec<i64> = match sqlx::query_scalar("SELECT id FROM connections")
@@ -353,7 +392,8 @@ pub async fn run(st: AppState) {
         let mut start = Vec::new();
         {
             let mut due = due.lock().unwrap();
-            due.retain(|id, _| ids.contains(id));
+            let live: std::collections::HashSet<i64> = ids.iter().copied().collect();
+            due.retain(|id, _| live.contains(id));
             for id in ids {
                 // New connections (and all at start-up) spread over a few seconds.
                 let at = due.entry(id).or_insert_with(|| {
@@ -369,7 +409,7 @@ pub async fn run(st: AppState) {
         for id in start {
             let (s, due) = (st.clone(), due.clone());
             tokio::spawn(async move {
-                let next = match probe_one(&s, id, false).await {
+                let next = match probe_one(&s, id, false, true).await {
                     Some(failures) => {
                         delay(every, failures, rand::thread_rng().gen_range(0.0..1.0))
                     }

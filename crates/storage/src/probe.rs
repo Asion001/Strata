@@ -194,9 +194,9 @@ async fn sweep(op: &Operator, dir: &str) {
         }
         let modified = match e.metadata().last_modified() {
             Some(t) => Some(SystemTime::from(t)),
-            None => match op.stat(e.path()).await {
-                Ok(m) => m.last_modified().map(SystemTime::from),
-                Err(_) => None,
+            None => match tokio::time::timeout(STEP_TIMEOUT, op.stat(e.path())).await {
+                Ok(Ok(m)) => m.last_modified().map(SystemTime::from),
+                _ => None,
             },
         };
         let old = modified.is_some_and(|t| now.duration_since(t).unwrap_or_default() > STALE);

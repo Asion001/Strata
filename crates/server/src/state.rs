@@ -1,4 +1,6 @@
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use dashmap::DashMap;
@@ -45,7 +47,7 @@ pub struct Inner {
     /// A local connection's folder check still running (see `health`).
     pub root_checks: DashMap<i64, Arc<std::sync::atomic::AtomicBool>>,
     /// Local connections' folders, checked before every use (see `operator`).
-    pub local_roots: DashMap<i64, std::path::PathBuf>,
+    pub local_roots: DashMap<i64, LocalRoot>,
     /// user id -> that user's mounts, longest path first
     pub mounts: DashMap<i64, Arc<Vec<Mount>>>,
     pub events: broadcast::Sender<ChangeEvent>,
@@ -144,10 +146,10 @@ impl AppState {
         // A local folder that is gone (an unmounted disk) is refused at once,
         // not only after three failed probes: a write would otherwise create
         // the folder again on the disk underneath.
-        if let Some(root) = self.local_roots.get(&connection_id).map(|r| r.clone())
-            && !root.is_dir()
-        {
-            return Err(missing_folder());
+        if let Some(root) = self.local_roots.get(&connection_id).map(|r| r.clone()) {
+            self.check_root(connection_id, root, Duration::from_secs(5))
+                .await
+                .map_err(|_| missing_folder())?;
         }
         Ok(op)
     }
@@ -173,14 +175,17 @@ impl AppState {
         }
         let seen = self.op_gens.get(&connection_id).map(|g| *g).unwrap_or(0);
         let cfg = self.connection_config(connection_id).await?;
-        if let Some(root) = cfg.local_dir(&self.cfg.local_base).ok().flatten()
-            && !root.is_dir()
-        {
-            return Err(missing_folder());
+        // A local folder is checked before its operator is built (building
+        // one would create a missing folder).
+        let root = self.local_root(connection_id, &cfg).await?;
+        if let Some(r) = &root {
+            self.check_root(connection_id, r.clone(), Duration::from_secs(5))
+                .await
+                .map_err(|_| missing_folder())?;
         }
         let op = cfg.operator(&self.cfg.local_base)?;
-        match cfg.local_dir(&self.cfg.local_base).ok().flatten() {
-            Some(root) => self.local_roots.insert(connection_id, root),
+        match root {
+            Some(r) => self.local_roots.insert(connection_id, r),
             None => self.local_roots.remove(&connection_id).map(|(_, r)| r),
         };
         // Cached only if no config change landed meanwhile (the entry is
@@ -204,4 +209,91 @@ fn missing_folder() -> ApiError {
     ApiError::Unavailable(
         "this storage's folder is missing (disk not mounted?); try again later".into(),
     )
+}
+
+/// A local connection's folder, and the marker file that proves it is the
+/// right one (see `LocalRoot::marker`).
+#[derive(Clone, Debug)]
+pub struct LocalRoot {
+    pub dir: PathBuf,
+    /// `<folder>/.strata-probe/conn-<id>`, written by the first probe that
+    /// found the folder. Once it exists, a folder without it is treated as
+    /// missing: an unmounted disk leaves its (empty) mount point behind,
+    /// which is a folder, but not this one. None until it was written.
+    pub marker: Option<PathBuf>,
+}
+
+impl LocalRoot {
+    pub fn marker_path(dir: &std::path::Path, connection_id: i64) -> PathBuf {
+        dir.join(strata_storage::backend::PROBE_DIR)
+            .join(format!("conn-{connection_id}"))
+    }
+
+    /// Blocking check (see `AppState::check_root`).
+    fn check(&self) -> Result<(), &'static str> {
+        match std::fs::metadata(&self.dir) {
+            Ok(m) if m.is_dir() => {}
+            Ok(_) => return Err("the connection's folder is not a folder"),
+            Err(_) => return Err("the connection's folder is missing"),
+        }
+        match &self.marker {
+            Some(m) if !m.exists() => {
+                Err("the connection's folder isn't the one it was (disk not mounted?)")
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+impl AppState {
+    /// A local connection's folder and marker, if it is local.
+    pub async fn local_root(
+        &self,
+        connection_id: i64,
+        cfg: &ConnectionConfig,
+    ) -> ApiResult<Option<LocalRoot>> {
+        let Some(dir) = cfg.local_dir(&self.cfg.local_base).ok().flatten() else {
+            return Ok(None);
+        };
+        let marked: bool = sqlx::query_scalar("SELECT root_marker FROM connections WHERE id = $1")
+            .bind(connection_id)
+            .fetch_optional(&self.db)
+            .await?
+            .unwrap_or(false);
+        let marker = marked.then(|| LocalRoot::marker_path(&dir, connection_id));
+        Ok(Some(LocalRoot { dir, marker }))
+    }
+
+    /// Is a local connection's folder there (and the right one)? Checked off
+    /// the async threads within `wait`; while an earlier check of the same
+    /// connection is still stuck (a hung network mount), no new one starts,
+    /// so stuck threads can't pile up.
+    pub async fn check_root(
+        &self,
+        connection_id: i64,
+        root: LocalRoot,
+        wait: Duration,
+    ) -> Result<(), String> {
+        let busy = self
+            .root_checks
+            .entry(connection_id)
+            .or_insert_with(|| Arc::new(std::sync::atomic::AtomicBool::new(false)))
+            .clone();
+        let stuck = "the connection's folder doesn't answer".to_string();
+        if busy.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            return Err(stuck);
+        }
+        let flag = busy.clone();
+        let task = tokio::task::spawn_blocking(move || {
+            let r = root.check();
+            flag.store(false, std::sync::atomic::Ordering::Release);
+            r
+        });
+        match tokio::time::timeout(wait, task).await {
+            Err(_) => Err(stuck),
+            Ok(Ok(Ok(()))) => Ok(()),
+            Ok(Ok(Err(e))) => Err(e.to_string()),
+            Ok(Err(e)) => Err(e.to_string()),
+        }
+    }
 }

@@ -133,8 +133,8 @@ async fn minio_offline_and_back() {
     t.upload("local.txt", b"private root").await;
 
     // Probes leave nothing behind, in either bucket.
-    health::probe_one(&t.st, id, true).await;
-    health::probe_one(&t.st, vid, true).await;
+    health::probe_one(&t.st, id, true, true).await;
+    health::probe_one(&t.st, vid, true, true).await;
     let objects = mc(&minio, "ls --recursive --versions l/plain l/versioned").await;
     assert!(!objects.contains(".strata-probe"), "probe junk: {objects}");
     // ... and the probe folder never shows in a raw listing.
@@ -143,8 +143,8 @@ async fn minio_offline_and_back() {
     // Stop the server: three failed probes make it offline.
     minio.stop().await.unwrap();
     for i in 1..=3 {
-        health::probe_one(&t.st, id, true).await;
-        health::probe_one(&t.st, vid, true).await;
+        health::probe_one(&t.st, id, true, true).await;
+        health::probe_one(&t.st, vid, true, true).await;
         assert_eq!(view(&t, vid).await["health"], view(&t, id).await["health"]);
         let v = view(&t, id).await;
         let want = if i < health::OFFLINE_AFTER {
@@ -257,8 +257,8 @@ async fn minio_offline_and_back() {
     minio.start().await.unwrap();
     let mut back = false;
     for _ in 0..30 {
-        health::probe_one(&t.st, id, true).await;
-        health::probe_one(&t.st, vid, true).await;
+        health::probe_one(&t.st, id, true, true).await;
+        health::probe_one(&t.st, vid, true, true).await;
         if view(&t, id).await["health"] == "ok" && view(&t, vid).await["health"] == "ok" {
             back = true;
             break;
