@@ -86,6 +86,10 @@ async fn head_bytes(st: &AppState, m: &Mount, rel: &str, node: &Node) -> ApiResu
 
 /// Cache key for a file version's classification.
 fn class_key(m: &Mount, rel: &str, node: &Node) -> Option<String> {
+    // A coarse version may not change when the content does: don't cache by it.
+    if vfs::is_coarse(node) {
+        return None;
+    }
     node.etag
         .as_ref()
         .map(|e| format!("{}|{rel}|{e}", m.volume_id))
@@ -125,18 +129,18 @@ pub async fn serve(
         return Err(bad("this is a folder"));
     }
     let size = node.size as u64;
-    // The validator covers the decision too, so a cached response matches.
-    // `s2`: version of the serving rules (bump when they change), so responses cached under older
-    // rules are not revalidated into place.
-    let etag = node
-        .etag
-        .as_deref()
-        .map(safe::header_safe_tag)
-        .map(|e| match purpose {
-            safe::Purpose::ImagePreview => format!("\"s2i-{e}\""),
-            safe::Purpose::Content { .. } => format!("\"s2-{e}\""),
-        });
+    // Content responses carry the file version's ETag, the same value a
+    // write's If-Match must present (`vfs::etag_for`, which also carries the
+    // serving-rules version, so responses cached under older rules are not
+    // revalidated into place).
+    let etag = Some(match purpose {
+        // A different validator for the image route's different headers.
+        safe::Purpose::ImagePreview => format!("\"r3i-{}\"", vfs::version(node)),
+        safe::Purpose::Content { .. } => vfs::etag_for(node),
+    });
+    // Coarse raw versions can stay the same across a change: never 304 them.
     if let (Some(et), Some(inm)) = (&etag, headers.get(header::IF_NONE_MATCH))
+        && !vfs::is_coarse(node)
         && inm.as_bytes() == et.as_bytes()
     {
         let mut resp = StatusCode::NOT_MODIFIED.into_response();
@@ -198,6 +202,8 @@ pub async fn serve(
     };
     let decision = safe::decide_class(class, purpose);
     let mut resp = Response::new(Body::from_stream(stream));
+    // Byte-range responses go out as stored (see `routes::Uncompressed`).
+    resp.extensions_mut().insert(crate::routes::Uncompressed);
     let h = resp.headers_mut();
     safe::protect(h);
     h.insert(
@@ -349,4 +355,89 @@ pub async fn search(
     }
     let hits = vfs::search(&st, u.id, term, q.limit.unwrap_or(100).clamp(1, 500)).await?;
     Ok(Json(json!({ "hits": hits })))
+}
+
+/// Largest file the in-browser editor may save.
+pub const MAX_EDIT_BYTES: usize = 5 * 1024 * 1024;
+
+/// One ETag from an If-Match / If-None-Match value (`W/` and lists are not
+/// meaningful for our strong, single-version tags).
+fn single_etag(v: &HeaderValue) -> ApiResult<String> {
+    let s = v
+        .to_str()
+        .map_err(|_| bad("invalid precondition header"))?
+        .trim();
+    if s.contains(',') {
+        return Err(bad("If-Match takes exactly one ETag"));
+    }
+    // Our tags are strong; a proxy may have weakened one in transit (e.g.
+    // when compressing). The opaque part still names the same version.
+    Ok(s.trim_start_matches("W/").to_string())
+}
+
+/// `PUT /api/files/content?path=`: save a whole file (the text editor).
+///
+/// * existing file: `If-Match: <ETag from GET>`, 412 if it changed, 428
+///   if the header is missing (no blind overwrites);
+/// * new file: `If-None-Match: *`, 412 if it exists meanwhile.
+///
+/// Optional `X-Strata-Base-Hash`: BLAKE3 (hex) of the bytes the edit is based
+/// on; on raw storage it is compared with the current content as well.
+///
+/// The precondition is checked under the volume lock in the same critical
+/// section as the write, and the write takes the normal store paths, so
+/// the journal and websocket push fire as for uploads.
+pub async fn put_content(
+    State(st): State<AppState>,
+    AuthUser(u): AuthUser,
+    Query(q): Query<PathQuery>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> ApiResult<Response> {
+    let path = paths::normalize(&q.path)?;
+    let (m, rel) = mounts::resolve(&st, u.id, &path).await?;
+    if rel.is_empty() {
+        return Err(bad("cannot write to a mount point"));
+    }
+    if body.len() > MAX_EDIT_BYTES {
+        return Err(bad("file too large to save from the editor"));
+    }
+    let expect = match (
+        headers.get(header::IF_MATCH),
+        headers.get(header::IF_NONE_MATCH),
+    ) {
+        (Some(v), None) => vfs::Expect::Etag {
+            etag: single_etag(v)?,
+            // BLAKE3 of the bytes the client's edit is based on: lets raw
+            // storage with coarse metadata still detect any outside change.
+            base: match headers.get("x-strata-base-hash") {
+                Some(h) => Some(
+                    h.to_str()
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .ok_or_else(|| bad("invalid X-Strata-Base-Hash"))?,
+                ),
+                None => None,
+            },
+        },
+        (None, Some(v)) if single_etag(v)? == "*" => vfs::Expect::Absent,
+        (None, None) => {
+            return Err(ApiError::PreconditionRequired(
+                "this write needs If-Match (or If-None-Match: * to create a file)",
+            ));
+        }
+        _ => return Err(bad("use either If-Match: <etag> or If-None-Match: *")),
+    };
+    let input: vfs::ByteStream = Box::pin(futures::stream::once(async move { Ok(body) }));
+    // The version comes from inside the write's lock: never a later one.
+    let (_, node) = vfs::write_stream_if(&st, &m, &rel, input, &expect).await?;
+    let etag = vfs::etag_for(&node);
+    let mut resp = Json(json!({
+        "path": path, "size": node.size, "mtime": node.mtime, "etag": etag,
+    }))
+    .into_response();
+    if let Ok(v) = HeaderValue::from_str(&etag) {
+        resp.headers_mut().insert(header::ETAG, v);
+    }
+    Ok(resp)
 }

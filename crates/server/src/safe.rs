@@ -350,16 +350,6 @@ pub fn decide(name: &str, head: &[u8], purpose: Purpose) -> Decision {
     decide_class(classify(name, head), purpose)
 }
 
-/// An ETag value safe to put in a header (backends may return anything).
-pub fn header_safe_tag(tag: &str) -> String {
-    if !tag.is_empty() && tag.len() <= 128 && tag.bytes().all(|b| b.is_ascii_graphic() && b != b'"')
-    {
-        tag.to_string()
-    } else {
-        blake3::hash(tag.as_bytes()).to_hex()[..32].to_string()
-    }
-}
-
 /// Unicode format characters that can disguise a file name (e.g. U+202E
 /// RIGHT-TO-LEFT OVERRIDE making "fdp.exe" read as "exe.pdf").
 fn is_bidi_or_invisible(c: char) -> bool {
@@ -607,8 +597,6 @@ mod tests {
         let mut t = vec![0xCF, 0xF0, 0xE8, 0xE2, 0xE5, 0xF2, b'\n'];
         t.push(0x1A);
         assert_eq!(decide("r.txt", &t, C).content_type, "text/plain");
-        assert_eq!(header_safe_tag("abc-1"), "abc-1");
-        assert_eq!(header_safe_tag("a\"b\u{e9}").len(), 32);
     }
 
     #[test]

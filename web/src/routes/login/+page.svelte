@@ -16,6 +16,10 @@
       const r = await api('POST', '/api/auth/login', { username, password });
       session.user = r.user;
       session.checked = true;
+      // Unsaved drafts of anyone else who used this browser go away.
+      const { markSignedIn, keepOnlyUser } = await import('$lib/editor/drafts');
+      markSignedIn(r.user.id);
+      await keepOnlyUser(r.user.id).catch(() => {});
       const next = page.url.searchParams.get('next');
       location.href = next && next.startsWith('/') && !next.startsWith('//') ? next : '/';
     } catch (err) {

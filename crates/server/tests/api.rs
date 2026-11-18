@@ -63,6 +63,24 @@ async fn hashed_root_file_lifecycle() {
         .await;
     assert_eq!(s, StatusCode::RANGE_NOT_SATISFIABLE);
 
+    // File contents are never compressed on the fly, even when the client
+    // accepts gzip: range readers (the PDF viewer) need the real length.
+    let big = vec![b'a'; 64 * 1024];
+    t.upload("Docs/big.txt", &big).await;
+    let (s, b, h) = t
+        .raw(
+            "GET",
+            "/api/files/content?path=Docs/big.txt",
+            Body::empty(),
+            &[("accept-encoding", "gzip")],
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(h.get("content-encoding").is_none());
+    assert_eq!(h["accept-ranges"], "bytes");
+    assert_eq!(h["content-length"], "65536");
+    assert_eq!(b.len(), big.len());
+
     // rename, move folder, overwrite
     t.ok(
         "POST",

@@ -21,6 +21,13 @@ pub enum ApiError {
     Conflict(String),
     #[error("range not satisfiable")]
     RangeNotSatisfiable,
+    /// The file changed since the client read it (If-Match / If-None-Match).
+    /// Carries the current version's ETag, if the file exists.
+    #[error("the file was changed by someone else")]
+    PreconditionFailed(Option<String>),
+    /// A precondition (header) the write needs is missing; says which.
+    #[error("{0}")]
+    PreconditionRequired(&'static str),
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
 }
@@ -83,15 +90,28 @@ impl IntoResponse for ApiError {
             ApiError::NotFound => StatusCode::NOT_FOUND,
             ApiError::Conflict(_) => StatusCode::CONFLICT,
             ApiError::RangeNotSatisfiable => StatusCode::RANGE_NOT_SATISFIABLE,
+            ApiError::PreconditionFailed(_) => StatusCode::PRECONDITION_FAILED,
+            ApiError::PreconditionRequired(_) => StatusCode::PRECONDITION_REQUIRED,
             ApiError::Internal(e) => {
                 tracing::error!("internal error: {e:#}");
                 StatusCode::INTERNAL_SERVER_ERROR
             }
         };
+        // Never leak internal details (paths, SQL) to clients: they are logged.
         let msg = match &self {
-            ApiError::Internal(e) => format!("internal error: {e}"),
+            ApiError::Internal(_) => "internal error".to_string(),
             other => other.to_string(),
         };
+        if let ApiError::PreconditionFailed(current) = &self {
+            let mut resp = (status, Json(json!({ "error": msg, "etag": current }))).into_response();
+            if let Some(et) = current
+                .as_deref()
+                .and_then(|e| axum::http::HeaderValue::from_str(e).ok())
+            {
+                resp.headers_mut().insert(axum::http::header::ETAG, et);
+            }
+            return resp;
+        }
         (status, Json(json!({ "error": msg }))).into_response()
     }
 }

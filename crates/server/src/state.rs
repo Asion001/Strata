@@ -30,6 +30,9 @@ pub struct Inner {
     pub secrets: SecretBox,
     /// connection id -> operator
     pub ops: DashMap<i64, Operator>,
+    /// connection id -> times its operator was forgotten (a config change),
+    /// so an operator built from the old config isn't cached afterwards
+    pub op_gens: DashMap<i64, u64>,
     /// user id -> that user's mounts, longest path first
     pub mounts: DashMap<i64, Arc<Vec<Mount>>>,
     pub events: broadcast::Sender<ChangeEvent>,
@@ -37,6 +40,8 @@ pub struct Inner {
     pub decisions: quick_cache::sync::Cache<String, crate::safe::Class>,
     /// volume id -> in-process queue in front of the volume's advisory lock
     pub volume_locks: DashMap<i64, Arc<tokio::sync::Mutex<()>>>,
+    /// In-process queue in front of the layout lock (`mounts::lock_layout`).
+    pub layout_lock: Arc<tokio::sync::Mutex<()>>,
     /// Max concurrent volume-lock holders (each pins one pool connection).
     pub lock_permits: Arc<tokio::sync::Semaphore>,
     /// Server-local folder for chunks of uploads into raw volumes
@@ -80,10 +85,12 @@ impl AppState {
             db,
             cfg,
             ops: DashMap::new(),
+            op_gens: DashMap::new(),
             mounts: DashMap::new(),
             events,
             decisions: quick_cache::sync::Cache::new(100_000),
             volume_locks: DashMap::new(),
+            layout_lock: Arc::new(tokio::sync::Mutex::new(())),
             lock_permits: Arc::new(tokio::sync::Semaphore::new(8)),
             staging,
         })))
@@ -95,8 +102,19 @@ impl AppState {
             .bind(connection_id)
             .fetch_one(&self.db)
             .await?;
-        let plain = self.secrets.decrypt(&enc)?;
+        self.decrypt_config(&enc)
+    }
+
+    /// Decrypt and parse a stored `config_enc`.
+    pub fn decrypt_config(&self, enc: &[u8]) -> ApiResult<ConnectionConfig> {
+        let plain = self.secrets.decrypt(enc)?;
         serde_json::from_slice(&plain).map_err(|e| ApiError::Internal(e.into()))
+    }
+
+    /// Serialise and encrypt a config for `config_enc`.
+    pub fn encrypt_config(&self, cfg: &ConnectionConfig) -> ApiResult<Vec<u8>> {
+        let plain = serde_json::to_vec(cfg).map_err(|e| ApiError::Internal(e.into()))?;
+        Ok(self.secrets.encrypt(&plain)?)
     }
 
     /// Cached OpenDAL operator for a connection.
@@ -104,13 +122,22 @@ impl AppState {
         if let Some(op) = self.ops.get(&connection_id) {
             return Ok(op.clone());
         }
+        let seen = self.op_gens.get(&connection_id).map(|g| *g).unwrap_or(0);
         let cfg = self.connection_config(connection_id).await?;
         let op = cfg.operator(&self.cfg.local_base)?;
-        self.ops.insert(connection_id, op.clone());
+        // Cached only if no config change landed meanwhile (the entry is
+        // held across the insert, so a concurrent forget waits for it).
+        let g = self.op_gens.entry(connection_id).or_insert(0);
+        if *g == seen {
+            self.ops.insert(connection_id, op.clone());
+        }
+        drop(g);
         Ok(op)
     }
 
     pub fn forget_operator(&self, connection_id: i64) {
+        let mut g = self.op_gens.entry(connection_id).or_insert(0);
+        *g += 1;
         self.ops.remove(&connection_id);
     }
 }

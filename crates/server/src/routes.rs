@@ -1,5 +1,5 @@
 use axum::extract::DefaultBodyLimit;
-use axum::http::{HeaderValue, header};
+use axum::http::{Extensions, HeaderMap, HeaderValue, StatusCode, Version, header};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde_json::json;
@@ -11,6 +11,12 @@ use tower_http::trace::TraceLayer;
 use crate::state::AppState;
 use crate::{auth, connections, files, journal, mounts, shares, thumbs, uploads};
 
+/// Marks a response that must not be compressed on the fly: file contents,
+/// which are read in byte ranges (compressing would drop the Content-Length
+/// that clients such as the PDF viewer need to fetch parts of a file).
+#[derive(Clone, Copy)]
+pub struct Uncompressed;
+
 /// Liveness and readiness: 200 only when the database answers.
 async fn healthz(
     axum::extract::State(st): axum::extract::State<AppState>,
@@ -21,7 +27,7 @@ async fn healthz(
         Err(e) => {
             tracing::warn!("health check: database unavailable: {e}");
             (
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                StatusCode::SERVICE_UNAVAILABLE,
                 Json(json!({ "ok": false })),
             )
                 .into_response()
@@ -62,7 +68,12 @@ pub fn router(st: AppState) -> Router {
         .route("/mounts/{id}/scan", post(mounts::scan))
         .route("/files/list", get(files::list))
         .route("/files/stat", get(files::stat))
-        .route("/files/content", get(files::content))
+        .route(
+            "/files/content",
+            get(files::content)
+                .put(files::put_content)
+                .layer(DefaultBodyLimit::max(files::MAX_EDIT_BYTES + 1)),
+        )
         .route("/files/thumb", get(thumbs::get))
         .route("/files/image", get(files::image))
         .route("/files/mkdir", post(files::mkdir))
@@ -124,7 +135,10 @@ pub fn router(st: AppState) -> Router {
                     ))
                     .and(tower_http::compression::predicate::NotForContentType::new(
                         "application/octet-stream",
-                    )),
+                    ))
+                    .and(|_: StatusCode, _: Version, _: &HeaderMap, x: &Extensions| {
+                        x.get::<Uncompressed>().is_none()
+                    }),
             ),
         )
         .layer(SetResponseHeaderLayer::if_not_present(

@@ -107,6 +107,62 @@ Blob names are the plain BLAKE3 hash today. The store's naming function
 already accepts a per-connection key (BLAKE3 keyed mode) for when encryption
 at rest arrives, so the backend will not learn content hashes.
 
+## Text editor
+Text, Markdown and code open in a CodeMirror 6 editor that loads lazily,
+with language modes loaded per file extension. Markdown gets a live preview
+(markdown-it with raw HTML off, then DOMPurify).
+
+Saves never overwrite silently:
+- `PUT /api/files/content?path=` takes `If-Match` with the ETag from the
+  GET. A changed file gets 412 with its current ETag. A missing precondition
+  on a write gets 428, and creating a file takes `If-None-Match: *`.
+- GET and PUT share one version function: hashed volumes use the content
+  hash; raw volumes hash the size and the backend etag (or the nanosecond
+  mtime where the backend has no etag).
+- Raw metadata can be coarse (whole-second mtimes), so on raw volumes an
+  `If-Match` save must also send `X-Strata-Base-Hash`, the BLAKE3 of the bytes
+  the edit is based on (428 without it). The server compares that hash with
+  the current content. Coarse raw files are never answered with 304, and
+  their type isn't cached.
+- Hashed volumes check under the volume lock in the same critical section as
+  the node write. Raw volumes take the volume lock, check, then write and
+  close atomically while still holding it. A refused save therefore writes
+  nothing at all (no temp files, no folders). Saves are at most 5 MB.
+- Writes take the normal store paths, so the journal and websocket push fire.
+
+On a 412, the editor offers three choices: keep mine (a copy named
+`name (conflict YYYY-MM-DD HH-MM).ext`), reload theirs, or view a side-by-side
+diff. Unsaved drafts autosave to IndexedDB every 2 s, keyed by user, mount and
+path with their base ETag and hash, and are offered back on reopen. They
+expire after 30 days, are cleared on sign-out, and other users' drafts are
+dropped when someone signs in. Autosave only writes while the draft's user is
+still the one signed in (a shared marker every tab sees). Line endings and
+the trailing newline are preserved; mixed-ending files are kept verbatim.
+Files over 5 MB or not valid UTF-8 open read-only, files over 20 MB are not
+loaded, and files with NUL bytes in their first 8 KB are refused.
+
+
+## PDF viewer
+PDFs open in pdf.js (`pdfjs-dist`, pinned to an exact version) inside the
+preview viewer. Both the preview viewer and pdf.js load only when a file is
+opened, so neither is in the startup bundle (`npm run size` checks this in
+CI against `web/bundle-baseline.json`).
+* **Range loading.** The file is read from the normal content route with
+  byte ranges. Streaming and background fetching are off and chunks are
+  256 KB, so a large file shows its first page after a few small reads.
+  File content responses are never compressed on the fly, since that would
+  drop the Content-Length that range readers need.
+* **Same origin.** The worker is a build asset, and CMaps, standard fonts,
+  WASM decoders and ICC profiles are copied to `/pdfjs/<version>/` at build.
+  pdf.js 6 compiles no code at runtime, so it runs under the app's CSP with
+  no extra allowances. The worker, stylesheet and data files are fetched only
+  when a PDF opens; the service worker doesn't precache them.
+* **No document scripting.** No scripting manager is attached, forms and
+  XFA are off (annotations are links only), and links leave the viewer only
+  for http(s) URLs, in a new tab with `noopener noreferrer`.
+* **Viewer features.** Thumbnails render as they scroll into view. Find uses
+  pdf.js's find controller. Print renders the pages to images and prints
+  those.
 ## Security notes
 * Argon2id passwords; sessions are random tokens stored as BLAKE3 hashes.
 * Cookie sessions require an `X-Strata` header on mutating requests (CSRF).

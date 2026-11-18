@@ -89,6 +89,43 @@ impl ConnectionConfig {
         }
     }
 
+    /// Where this connection's files physically live, as (storage identity,
+    /// folder inside it). Two connections with the same identity reach the
+    /// same files, so their folders can overlap (e.g. two users' WebDAV or S3
+    /// connections to one share or bucket). Credentials are not part of it.
+    pub fn location(&self, local_base: &Path) -> Result<(String, String)> {
+        Ok(match self {
+            // Relative to the storage base (every local connection lives below
+            // it), so moving the base doesn't make stored locations disagree.
+            Self::Local { path } => {
+                self.local_dir(local_base)?; // validates the path
+                ("local".into(), canonical_folder(path)?)
+            }
+            Self::S3 {
+                bucket,
+                endpoint,
+                root,
+                ..
+            } => {
+                let host = match endpoint.as_deref() {
+                    None | Some("") => "s3.amazonaws.com".to_string(),
+                    Some(e) => endpoint_host(e, &[80, 443]),
+                };
+                // Regional AWS endpoints name the same bucket.
+                let host = if host.ends_with(".amazonaws.com") {
+                    "s3.amazonaws.com".into()
+                } else {
+                    host
+                };
+                (format!("s3:{host}|{bucket}"), remote_root(root)?)
+            }
+            Self::Ftp { endpoint, root, .. } => (
+                format!("ftp:{}", endpoint_host(endpoint, &[21, 990])),
+                remote_root(root)?,
+            ),
+        })
+    }
+
     /// A copy with secrets blanked, safe to send to the UI.
     pub fn redacted(&self) -> Self {
         let mut c = self.clone();
@@ -198,8 +235,10 @@ impl ConnectionConfig {
                 if let Some(e) = endpoint.as_deref().filter(|e| !e.is_empty()) {
                     b = b.endpoint(e);
                 }
-                if let Some(r) = root.as_deref().filter(|r| !r.is_empty()) {
-                    b = b.root(r);
+                // The canonical root, exactly what `location` records.
+                let r = remote_root(root)?;
+                if !r.is_empty() {
+                    b = b.root(&format!("/{r}"));
                 }
                 Operator::new(b)?
             }
@@ -216,8 +255,10 @@ impl ConnectionConfig {
                 if let Some(p) = password.as_deref().filter(|p| !p.is_empty()) {
                     b = b.password(p);
                 }
-                if let Some(r) = root.as_deref().filter(|r| !r.is_empty()) {
-                    b = b.root(r);
+                // The canonical root, exactly what `location` records.
+                let r = remote_root(root)?;
+                if !r.is_empty() {
+                    b = b.root(&format!("/{r}"));
                 }
                 Operator::new(b)?
             }
@@ -225,6 +266,38 @@ impl ConnectionConfig {
         Ok(op
             .layer(TimeoutLayer::new().with_timeout(Duration::from_secs(60)))
             .layer(RetryLayer::new().with_max_times(3)))
+    }
+}
+
+/// The canonical root folder of a remote (S3/FTP) connection: the one value
+/// both `operator` and `location` use.
+fn remote_root(root: &Option<String>) -> Result<String> {
+    canonical_folder(root.as_deref().unwrap_or(""))
+}
+
+/// The one canonical form of a folder inside a storage, for every backend:
+/// `a//b`, `/a/./b/` and `a/b` are the same place. `..` is refused (FTP
+/// servers resolve it, S3 keys don't), here and when building an operator,
+/// so a config that has one can't reach any storage at all.
+pub fn canonical_folder(p: &str) -> Result<String> {
+    let parts: Vec<&str> = p
+        .split('/')
+        .filter(|c| !c.is_empty() && *c != ".")
+        .collect();
+    if parts.contains(&"..") {
+        bail!("folder paths may not contain '..'");
+    }
+    Ok(parts.join("/"))
+}
+
+/// `host[:port]` of an endpoint URL, lowercased, without scheme, path or a
+/// default port, so equivalent spellings of one server compare equal.
+fn endpoint_host(url: &str, default_ports: &[u16]) -> String {
+    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    let host = rest.split('/').next().unwrap_or("").to_ascii_lowercase();
+    match host.rsplit_once(':') {
+        Some((h, p)) if p.parse::<u16>().is_ok_and(|p| default_ports.contains(&p)) => h.to_string(),
+        _ => host,
     }
 }
 
@@ -356,5 +429,89 @@ mod tests {
         let mut new = old.redacted();
         new.merge_secrets(&old);
         assert_eq!(new, old);
+        let ftp = |password: Option<&str>| ConnectionConfig::Ftp {
+            endpoint: "ftp://h".into(),
+            user: None,
+            password: password.map(Into::into),
+            root: None,
+        };
+        let mut new = ftp(Some("p")).redacted();
+        assert_eq!(new, ftp(Some("")));
+        new.merge_secrets(&ftp(Some("p")));
+        assert_eq!(new, ftp(Some("p")));
+        // No password stays none.
+        let mut new = ftp(None).redacted();
+        new.merge_secrets(&ftp(Some("p")));
+        assert_eq!(new, ftp(None));
+    }
+
+    #[test]
+    fn same_remote_storage_has_the_same_location() {
+        let s3 = |key: &str, root: Option<&str>| ConnectionConfig::S3 {
+            bucket: "b".into(),
+            region: None,
+            endpoint: Some("https://S3.example.com/".into()),
+            access_key_id: key.into(),
+            secret_access_key: "s".into(),
+            root: root.map(str::to_string),
+        };
+        let base = Path::new("/data");
+        assert_eq!(
+            s3("alice", Some("/x/")).location(base).unwrap(),
+            s3("bob", Some("x")).location(base).unwrap()
+        );
+        assert_ne!(
+            s3("a", None).location(base).unwrap().1,
+            s3("a", Some("y")).location(base).unwrap().1
+        );
+        let ftp = |e: &str| ConnectionConfig::Ftp {
+            endpoint: e.into(),
+            user: Some("u".into()),
+            password: None,
+            root: None,
+        };
+        assert_eq!(
+            ftp("ftp://NAS:21").location(base).unwrap(),
+            ("ftp:nas".to_string(), String::new())
+        );
+        assert_eq!(
+            ftp("ftp://nas").location(base).unwrap(),
+            ftp("ftps://nas:990/").location(base).unwrap()
+        );
+        let aws = |e: Option<&str>| ConnectionConfig::S3 {
+            bucket: "b".into(),
+            region: None,
+            endpoint: e.map(str::to_string),
+            access_key_id: "k".into(),
+            secret_access_key: "s".into(),
+            root: None,
+        };
+        assert_eq!(
+            aws(None).location(base).unwrap(),
+            aws(Some("https://s3.eu-west-1.amazonaws.com"))
+                .location(base)
+                .unwrap()
+        );
+        assert_eq!(
+            aws(Some("http://minio:9000")).location(base).unwrap(),
+            aws(Some("https://MINIO:9000/")).location(base).unwrap()
+        );
+        let local = |p: &str| {
+            ConnectionConfig::Local { path: p.into() }
+                .location(base)
+                .unwrap()
+        };
+        assert_eq!(local("store//users/5"), local("store/users/5"));
+        assert_eq!(local("store/users/5/"), local("/store/users/5"));
+        assert_eq!(
+            s3("a", Some("data//store/")).location(base).unwrap(),
+            s3("a", Some("/data/store")).location(base).unwrap()
+        );
+        assert!(s3("a", Some("pub/../store")).location(base).is_err());
+        assert!(s3("a", Some("pub/../store")).operator(base).is_err());
+        assert_eq!(
+            s3("a", Some("./data/.")).location(base).unwrap(),
+            s3("a", Some("data")).location(base).unwrap()
+        );
     }
 }

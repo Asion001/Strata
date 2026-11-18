@@ -73,14 +73,27 @@ pub struct VolumeLock(
     sqlx::Transaction<'static, sqlx::Postgres>,
     #[allow(dead_code)]
     (
-        tokio::sync::OwnedMutexGuard<()>,
+        Vec<tokio::sync::OwnedMutexGuard<()>>,
         tokio::sync::OwnedSemaphorePermit,
     ), // held until release/drop
 );
 
 pub async fn lock_volume(st: &AppState, volume_id: i64) -> ApiResult<VolumeLock> {
-    let local = st.volume_locks.entry(volume_id).or_default().clone();
-    let guard = local.lock_owned().await;
+    lock_volumes(st, &[volume_id]).await
+}
+
+/// Lock several volumes at once (always in ascending id order, so two
+/// multi-locks can't deadlock; single locks are a special case of it).
+/// One permit and one transaction cover them all.
+pub async fn lock_volumes(st: &AppState, ids: &[i64]) -> ApiResult<VolumeLock> {
+    let mut ids = ids.to_vec();
+    ids.sort_unstable();
+    ids.dedup();
+    let mut guards = Vec::with_capacity(ids.len());
+    for id in &ids {
+        let local = st.volume_locks.entry(*id).or_default().clone();
+        guards.push(local.lock_owned().await);
+    }
     // Cap concurrent holders well below the pool size, so every holder can
     // still get the extra connections its locked work needs.
     let permit = st
@@ -90,11 +103,13 @@ pub async fn lock_volume(st: &AppState, volume_id: i64) -> ApiResult<VolumeLock>
         .await
         .map_err(|e| ApiError::Internal(e.into()))?;
     let mut tx = st.db.begin().await?;
-    sqlx::query("SELECT pg_advisory_xact_lock(1398035009, $1::int4)")
-        .bind(volume_id as i32)
-        .execute(&mut *tx)
-        .await?;
-    Ok(VolumeLock(tx, (guard, permit)))
+    for id in &ids {
+        sqlx::query("SELECT pg_advisory_xact_lock(1398035009, $1::int4)")
+            .bind(*id as i32)
+            .execute(&mut *tx)
+            .await?;
+    }
+    Ok(VolumeLock(tx, (guards, permit)))
 }
 
 impl VolumeLock {
@@ -220,6 +235,8 @@ fn meta_mtime(meta: &opendal::Metadata) -> DateTime<Utc> {
         .unwrap_or_else(Utc::now)
 }
 
+/// Our own etag for raw entries whose backend gives none:
+/// `<size hex>-<mtime ns hex>`.
 fn raw_etag(meta: &opendal::Metadata) -> String {
     format!(
         "{:x}-{:x}",
@@ -692,12 +709,7 @@ pub async fn read_stream(
 /// BLAKE3 of a file's full content (used to verify copies).
 pub async fn content_digest(st: &AppState, m: &Mount, rel: &str) -> ApiResult<Hash> {
     let node = stat(st, m, rel).await?;
-    let mut s = read_stream(st, m, rel, &node, 0, node.size as u64).await?;
-    let mut h = blake3::Hasher::new();
-    while let Some(b) = s.next().await {
-        h.update(&b.map_err(|e| ApiError::Internal(e.into()))?);
-    }
-    Ok(Hash(*h.finalize().as_bytes()))
+    digest_node(st, m, rel, &node).await
 }
 
 // ---------------------------------------------------------------- writing
@@ -790,6 +802,212 @@ pub async fn touch_blobs(
         .collect())
 }
 
+/// A file version's identity, the same for every read and write path:
+/// hashed volumes use the content hash; raw volumes a hash of the size and
+/// the backend's etag (the backend's own, or size plus mtime in nanoseconds
+/// where it has none). It never depends on the request time.
+///
+/// Raw metadata can be too coarse to see every change (whole-second mtimes,
+/// backend etags built from them). Saves from the editor therefore also send
+/// the BLAKE3 of the bytes they were based on, and the server compares it
+/// with the file's content under the lock (`Expect::Etag::base`).
+pub fn version(node: &Node) -> String {
+    match (&node.chunks, &node.etag) {
+        (Some(_), Some(e)) => e.clone(),
+        _ => {
+            let s = format!("{}|{}", node.size, node.etag.as_deref().unwrap_or(""));
+            blake3::hash(s.as_bytes()).to_hex()[..32].to_string()
+        }
+    }
+}
+
+/// HTTP ETag for a file version (content responses and writes). The `r3`
+/// prefix is the serving-rules version: bump it when the way file bytes are
+/// served changes, so cached responses don't revalidate into place.
+pub fn etag_for(node: &Node) -> String {
+    format!("\"r3-{}\"", version(node))
+}
+
+/// Largest file whose content is compared on a conditional raw save.
+pub const BASE_CHECK_MAX: i64 = 5 * 1024 * 1024;
+
+/// What a write expects to find at the target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Expect {
+    /// Overwrite or create unconditionally (uploads, copies).
+    Any,
+    /// The file must exist with this ETag (as from `etag_for`) and, if
+    /// `base` is given, with exactly this content (BLAKE3 of its bytes).
+    Etag { etag: String, base: Option<Hash> },
+    /// The file must not exist (`If-None-Match: *`).
+    Absent,
+}
+
+/// Check a precondition against the current state (call under the volume
+/// lock, so nothing can change between the check and the write). Metadata
+/// only; raw saves also compare content (`verify_raw_base`).
+pub fn check_expect(expect: &Expect, current: Option<&Node>) -> ApiResult<()> {
+    if let Some(n) = current
+        && n.is_dir
+    {
+        return Err(conflict("a folder with that name already exists"));
+    }
+    match (expect, current) {
+        (Expect::Any, _) | (Expect::Absent, None) => Ok(()),
+        (Expect::Etag { etag, .. }, Some(n)) if *etag == etag_for(n) => Ok(()),
+        (_, cur) => Err(ApiError::PreconditionFailed(cur.map(etag_for))),
+    }
+}
+
+/// A raw entry whose version can miss a change: no backend etag and an
+/// mtime of whole seconds at best, so a same-size rewrite within the same
+/// second keeps its version. Such files are never answered with 304 and
+/// their type isn't cached; saves are protected by the base-content check.
+pub fn is_coarse(node: &Node) -> bool {
+    if node.chunks.is_some() {
+        return false;
+    }
+    let Some(tag) = node.etag.as_deref() else {
+        return true;
+    };
+    let tag = tag.trim_start_matches("W/").trim_matches('"');
+    let size = format!("{:x}", node.size);
+    match tag.split_once('-') {
+        // Ours (`raw_etag`): size, then mtime in ns; coarse when whole seconds.
+        Some((s, ns)) if s == size => {
+            u128::from_str_radix(ns, 16).is_ok_and(|ns| ns % 1_000_000_000 == 0)
+        }
+        // `mtime-size` style backend etags (nginx and friends): second resolution.
+        Some((_, s)) if s == size => true,
+        _ => false,
+    }
+}
+
+/// BLAKE3 of a file's content, read from an already-stat'ed node.
+async fn digest_node(st: &AppState, m: &Mount, rel: &str, node: &Node) -> ApiResult<Hash> {
+    let mut s = read_stream(st, m, rel, node, 0, node.size as u64).await?;
+    let mut h = blake3::Hasher::new();
+    while let Some(b) = s.next().await {
+        h.update(&b.map_err(|e| ApiError::Internal(e.into()))?);
+    }
+    Ok(Hash(*h.finalize().as_bytes()))
+}
+
+/// Cheap checks for a raw save, before taking the lock: the precondition
+/// against metadata, and that a raw `If-Match` carries a base hash (raw
+/// metadata can be too coarse to see every change, so one without is
+/// refused with 428 rather than trusted). The content itself is compared
+/// once, under the lock (`recheck_raw_base`). Returns the version seen.
+async fn verify_raw_base(
+    st: &AppState,
+    m: &Mount,
+    rel: &str,
+    expect: &Expect,
+) -> ApiResult<Option<Node>> {
+    let current = current_file(st, m, rel).await?;
+    check_expect(expect, current.as_ref())?;
+    if let (Expect::Etag { base, .. }, Some(n)) = (expect, &current) {
+        if base.is_none() {
+            return Err(ApiError::PreconditionRequired(
+                "saving over a file on this storage also needs X-Strata-Base-Hash",
+            ));
+        }
+        // An edit can only be based on a file the editor could save
+        // (BASE_CHECK_MAX); anything bigger has changed by definition.
+        if n.size > BASE_CHECK_MAX {
+            return Err(ApiError::PreconditionFailed(Some(etag_for(n))));
+        }
+    }
+    Ok(current)
+}
+
+/// Under the lock: the version must still be the one `verify_raw_base`
+/// checked, and the content still the base. Metadata alone can miss a
+/// same-size rewrite within the backend's timestamp granularity (a second,
+/// or a kernel tick), so the content is hashed again (at most 5 MB).
+async fn recheck_raw_base(
+    st: &AppState,
+    m: &Mount,
+    rel: &str,
+    expect: &Expect,
+    verified: &Option<Node>,
+) -> ApiResult<()> {
+    let now = current_file(st, m, rel).await?;
+    check_expect(expect, now.as_ref())?;
+    if let (Some(a), Some(b)) = (verified, &now) {
+        let same = etag_for(a) == etag_for(b);
+        if !same {
+            return Err(ApiError::PreconditionFailed(Some(etag_for(b))));
+        }
+        if let Expect::Etag {
+            base: Some(base), ..
+        } = expect
+            && digest_node(st, m, rel, b).await? != *base
+        {
+            return Err(ApiError::PreconditionFailed(Some(etag_for(b))));
+        }
+    }
+    Ok(())
+}
+
+/// Lock every raw volume overlapping this one. The set is checked again
+/// under the lock: a volume created (or re-pointed) onto the same folder
+/// meanwhile is locked too.
+async fn lock_overlapping_raw(st: &AppState, m: &Mount) -> ApiResult<VolumeLock> {
+    let mut ids = overlapping_raw_volumes(st, m).await?;
+    for _ in 0..3 {
+        let l = lock_volumes(st, &ids).await?;
+        let now = overlapping_raw_volumes(st, m).await?;
+        if now.iter().all(|v| ids.contains(v)) {
+            return Ok(l);
+        }
+        l.release().await?;
+        ids = now;
+    }
+    Err(conflict("the storage layout kept changing; try again"))
+}
+
+/// Raw volumes whose folders overlap this one's on the same storage
+/// (including this one): saving a file must lock them all, since the same
+/// physical file can be reached through each.
+async fn overlapping_raw_volumes(st: &AppState, m: &Mount) -> ApiResult<Vec<i64>> {
+    // (volume id, connection id, base path, stored storage id, stored folder)
+    type Row = (i64, i64, String, Option<String>, Option<String>);
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT v.id, v.connection_id, v.base_path, c.storage_id, c.storage_folder
+         FROM volumes v JOIN connections c ON c.id = v.connection_id WHERE v.mode = 'raw'",
+    )
+    .fetch_all(&st.db)
+    .await?;
+    let here = mounts::storage_root(st, m.connection_id, &m.base_path).await?;
+    let mut out = vec![m.volume_id];
+    let mut locs = mounts::Locations::default();
+    for (id, cid, base, sid, sfolder) in rows {
+        if id == m.volume_id {
+            continue;
+        }
+        let Some(other) = locs.of(st, cid, &base, (sid, sfolder)).await? else {
+            continue; // location unknown: can't reach storage, can't write
+        };
+        if mounts::overlaps((&here.0, &here.1), (&other.0, &other.1)) {
+            out.push(id);
+        }
+    }
+    Ok(out)
+}
+
+/// Current state of a file for a precondition check (None if missing).
+async fn current_file(st: &AppState, m: &Mount, rel: &str) -> ApiResult<Option<Node>> {
+    if m.is_hashed() {
+        return get_node(st, m.volume_id, rel).await;
+    }
+    match stat(st, m, rel).await {
+        Ok(n) => Ok(Some(n)),
+        Err(ApiError::NotFound) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
 /// Point a hashed file at a list of stored chunks. Returns true if it is new.
 pub async fn put_hashed_file(
     st: &AppState,
@@ -799,13 +1017,40 @@ pub async fn put_hashed_file(
     sizes: &[i64],
     mtime: Option<DateTime<Utc>>,
 ) -> ApiResult<bool> {
+    Ok(
+        put_hashed_file_if(st, m, rel, chunks, sizes, mtime, &Expect::Any)
+            .await?
+            .0,
+    )
+}
+
+/// `put_hashed_file` with a precondition, checked under the volume lock in
+/// the same critical section as the write. Returns whether the file is new
+/// and the version that was written (taken under the lock, so it is ours).
+pub async fn put_hashed_file_if(
+    st: &AppState,
+    m: &Mount,
+    rel: &str,
+    chunks: &[Hash],
+    sizes: &[i64],
+    mtime: Option<DateTime<Utc>>,
+    expect: &Expect,
+) -> ApiResult<(bool, Node)> {
     let (parent, name) = paths::split(rel).ok_or_else(|| bad("cannot write to a mount point"))?;
-    if !parent.is_empty() {
+    // Saving over an existing file needs no parent folders: if the file is
+    // still there, so is its folder. Only plain writes and creations make
+    // missing parents, and never for a write that is going to be refused.
+    if !parent.is_empty() && !matches!(expect, Expect::Etag { .. }) {
         mkdir_in(st, m, parent).await?;
     }
     let lock = lock_volume(st, m.volume_id).await?;
+    if *expect != Expect::Any {
+        check_expect(expect, get_node(st, m.volume_id, rel).await?.as_ref())?;
+    }
     let content = manifest_hash(chunks);
     let size: i64 = sizes.iter().sum();
+    let mtime = mtime.unwrap_or_else(Utc::now);
+    let etag = content.hex()[..32].to_string();
     let inserted: Option<bool> = sqlx::query_scalar(
         "INSERT INTO nodes (volume_id, parent, name, is_dir, size, mtime, etag, content_hash, chunks, chunk_sizes)
          VALUES ($1, $2, $3, FALSE, $4, $5, $6, $7, $8, $9)
@@ -819,8 +1064,8 @@ pub async fn put_hashed_file(
     .bind(parent)
     .bind(name)
     .bind(size)
-    .bind(mtime.unwrap_or_else(Utc::now))
-    .bind(&content.hex()[..32])
+    .bind(mtime)
+    .bind(&etag)
     .bind(content.0.to_vec())
     .bind(chunks.iter().map(|c| c.0.to_vec()).collect::<Vec<_>>())
     .bind(sizes)
@@ -838,7 +1083,16 @@ pub async fn put_hashed_file(
     )
     .await?;
     lock.release().await?;
-    Ok(inserted)
+    let node = Node {
+        name: name.to_string(),
+        is_dir: false,
+        size,
+        mtime,
+        etag: Some(etag),
+        chunks: Some(chunks.iter().map(|c| c.0.to_vec()).collect()),
+        chunk_sizes: Some(sizes.to_vec()),
+    };
+    Ok((inserted, node))
 }
 
 /// Write a byte stream as a file at `rel` of mount `m`. Returns the BLAKE3 of
@@ -847,8 +1101,34 @@ pub async fn write_stream(
     st: &AppState,
     m: &Mount,
     rel: &str,
-    mut input: ByteStream,
+    input: ByteStream,
 ) -> ApiResult<Hash> {
+    Ok(write_stream_if(st, m, rel, input, &Expect::Any).await?.0)
+}
+
+/// `write_stream` with a precondition. Hashed: checked under the volume lock
+/// when the node is written. Raw: the volume lock is taken and the
+/// precondition checked (including the base content) before any byte is
+/// written, and held until the atomic close, so a refused save writes
+/// nothing. Returns the stream's BLAKE3 and
+/// the version written, taken under the lock (so it is never someone
+/// else's later version).
+pub async fn write_stream_if(
+    st: &AppState,
+    m: &Mount,
+    rel: &str,
+    mut input: ByteStream,
+    expect: &Expect,
+) -> ApiResult<(Hash, Node)> {
+    // Refuse early (before writing anything, or creating parent folders)
+    // when the precondition already fails; re-checked under the lock below.
+    // Hashed: refuse early (a cheap DB lookup) before storing any blobs; the
+    // authoritative check runs under the lock in `put_hashed_file_if`. Raw
+    // conditional writes are checked under the lock before any byte is
+    // written (below), so they need no pre-check.
+    if m.is_hashed() && *expect != Expect::Any {
+        check_expect(expect, get_node(st, m.volume_id, rel).await?.as_ref())?;
+    }
     let mut whole = blake3::Hasher::new();
     if m.is_hashed() {
         let store = hashed_store(st, m).await?;
@@ -880,10 +1160,26 @@ pub async fn write_stream(
         for c in chunker.finish() {
             put(st, m, &store, c, &mut hashes, &mut sizes).await?;
         }
-        put_hashed_file(st, m, rel, &hashes, &sizes, None).await?;
+        let (_, node) = put_hashed_file_if(st, m, rel, &hashes, &sizes, None, expect).await?;
+        Ok((Hash(*whole.finalize().as_bytes()), node))
     } else {
         let op = op(st, m).await?;
         let path = backend_path(m, rel, false);
+        // Conditional writes (editor saves, at most 5 MB) are checked under
+        // the volume lock *before* any byte is written and keep the lock
+        // until the atomic close: a refused save writes nothing at all (no
+        // temp files on backends that can't abort, no parent folders).
+        // Plain writes (uploads, copies) lock only around the final close.
+        let early = if *expect != Expect::Any {
+            // Metadata checks run before the lock; the (up to 5 MB) content
+            // comparison against the base runs once, under the lock.
+            let verified = verify_raw_base(st, m, rel, expect).await?;
+            let l = lock_overlapping_raw(st, m).await?;
+            recheck_raw_base(st, m, rel, expect, &verified).await?;
+            Some(l)
+        } else {
+            None
+        };
         let mut w = op.writer_with(&path).chunk(8 << 20).await?;
         while let Some(b) = input.next().await {
             let b = match b {
@@ -898,29 +1194,32 @@ pub async fn write_stream(
         }
         // The atomic close makes the file visible: do it under the volume lock
         // so the journal entry lands in the same order as the change.
-        let lock = match lock_volume(st, m.volume_id).await {
-            Ok(l) => l,
-            Err(e) => {
-                let _ = w.abort().await;
-                return Err(e);
-            }
+        let lock = match early {
+            Some(l) => l,
+            None => match lock_volume(st, m.volume_id).await {
+                Ok(l) => l,
+                Err(e) => {
+                    let _ = w.abort().await;
+                    return Err(e);
+                }
+            },
         };
         w.close().await?;
         let node = stat(st, m, rel).await?;
-        let existed = !cache_node(st, m, rel, &node).await?;
+        let created = cache_node(st, m, rel, &node).await?;
         journal::record_volume(
             st,
             m.volume_id,
-            vec![if existed {
-                Change::modify(rel)
-            } else {
+            vec![if created {
                 Change::create(rel, false)
+            } else {
+                Change::modify(rel)
             }],
         )
         .await?;
         lock.release().await?;
+        Ok((Hash(*whole.finalize().as_bytes()), node))
     }
-    Ok(Hash(*whole.finalize().as_bytes()))
 }
 
 // ---------------------------------------------------------------- delete

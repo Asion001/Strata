@@ -35,8 +35,15 @@ DATABASE_URL=postgres://strata:strata@localhost:5432/strata STRATA_SECRET_KEY=de
   cargo run -p strata-server
 ```
 
-`scripts/check-private.sh` blocks commits containing patterns listed in a local,
-gitignored `.private-patterns` file (install it as a pre-commit hook).
+### Keeping private data out
+
+`scripts/check-private.sh` blocks commits whose changes, message or author match
+patterns you keep outside git: a gitignored `.private-patterns` file in the clone or
+`~/.config/strata/private-patterns` (one case-insensitive regex per line). Enable the
+hooks once per clone with `git config core.hooksPath .githooks`; the pre-commit hook
+also runs [gitleaks](https://github.com/gitleaks/gitleaks) when it is installed.
+In CI the `Privacy` workflow runs the same check against the `PRIVATE_PATTERNS`
+repository secret, reporting matches by location only, plus gitleaks for secrets.
 
 ## License
 
