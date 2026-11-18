@@ -1,6 +1,7 @@
 <script lang="ts">
   // Full-screen preview: image gallery (arrows, swipe, zoom), native video/audio, text.
-  import { isAudio, isImage, isSvg, isTextName, isVideo, bytes } from './format';
+  import { isAudio, isImage, isPdf, isSvg, isTextName, isVideo, bytes } from './format';
+  import { staleApp } from './lazy';
 
   interface Item { name: string; size: number; src: string; download: string }
   let {
@@ -15,6 +16,13 @@
   let zoom = $state(1);
 
   const isText = (n: string, size: number) => size < 2_000_000 && isTextName(n);
+
+  // The PDF viewer component, loaded on first use.
+  let Pdf = $state<typeof import('./pdf/PdfViewer.svelte').default>();
+  $effect(() => {
+    if (!Pdf && isPdf(item.name))
+      import('./pdf/PdfViewer.svelte').then((m) => (Pdf = m.default), staleApp);
+  });
 
   $effect(() => {
     text = null;
@@ -64,7 +72,12 @@
     if (n >= 0 && n < items.length) index = n;
   }
   function key(e: KeyboardEvent) {
-    if (e.key === 'Escape') onclose();
+    // Typing in a field (e.g. the PDF viewer's find box) isn't navigation.
+    if (e.key === 'Escape') return onclose();
+    const t = e.target as HTMLElement | null;
+    if (t?.closest('input, textarea, select, [contenteditable]')) return;
+    // In a PDF the arrow keys scroll the pages.
+    if (isPdf(item.name)) return;
     if (e.key === 'ArrowRight') step(1);
     if (e.key === 'ArrowLeft') step(-1);
   }
@@ -75,7 +88,7 @@
 
 <div class="viewer" role="dialog" aria-modal="true" tabindex="-1"
   ontouchstart={(e) => (touchX = e.touches[0].clientX)}
-  ontouchend={(e) => { if (zoom === 1) { const dx = e.changedTouches[0].clientX - touchX; if (Math.abs(dx) > 60) step(dx < 0 ? 1 : -1); } }}>
+  ontouchend={(e) => { if (zoom === 1 && !isPdf(item.name)) { const dx = e.changedTouches[0].clientX - touchX; if (Math.abs(dx) > 60) step(dx < 0 ? 1 : -1); } }}>
   <header>
     <span class="name">{item.name}</span>
     <span class="muted">{bytes(item.size)} · {index + 1}/{items.length}</span>
@@ -88,6 +101,9 @@
       <!-- SVG is shown only through <img>, which never runs scripts. -->
       <img src={item.src} alt={item.name} style="transform: scale({zoom})"
         ondblclick={() => (zoom = zoom === 1 ? 2.5 : 1)} />
+    {:else if isPdf(item.name)}
+      <!-- pdf.js loads only now, in its own chunks. -->
+      {#if Pdf}{#key item.src}<Pdf src={item.src} download={item.download} name={item.name} />{/key}{/if}
     {:else if isVideo(item.name)}
       <!-- svelte-ignore a11y_media_has_caption -->
       <video src={item.src} controls autoplay playsinline></video>
@@ -108,7 +124,7 @@
   header { display: flex; gap: 12px; align-items: center; padding: 10px 14px; padding-top: max(10px, env(safe-area-inset-top)); }
   .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
   header button, .btn { background: rgb(255 255 255 / .1); color: inherit; border: 0; padding: 6px 12px; border-radius: 8px; }
-  .stage { flex: 1; min-height: 0; display: grid; place-items: center; overflow: auto; padding: 8px; }
+  .stage { flex: 1; min-height: 0; display: grid; place-items: center; overflow: auto; padding: 8px; position: relative; }
   img, video { max-width: 100%; max-height: 100%; object-fit: contain; transition: transform .15s; touch-action: pinch-zoom; }
   pre { background: #0b1120; color: #e5e7eb; padding: 16px; border-radius: 8px; width: min(1000px, 100%); height: 100%; overflow: auto; margin: 0; white-space: pre-wrap; word-break: break-word; }
   .none { color: #94a3b8; }

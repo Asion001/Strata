@@ -28,6 +28,7 @@ export function parent(p: string) {
 
 const IMG = /\.(jpe?g|png|gif|webp|bmp|tiff?)$/i;
 export const isImage = (n: string) => IMG.test(n);
+export const isPdf = (n: string) => /\.pdf$/i.test(n);
 export const isVideo = (n: string) => /\.(mp4|webm|mov|m4v)$/i.test(n);
 /** Files the text editor opens (by name; content is checked on open). */
 export const isTextName = (n: string) =>

@@ -8,7 +8,10 @@ import { build, files, version } from '$service-worker';
 
 const sw = self as unknown as ServiceWorkerGlobalScope;
 const CACHE = `strata-shell-${version}`;
-const ASSETS = [...build, ...files.filter((f) => !f.endsWith('.gz')), '/'];
+// The PDF viewer's large files (worker, stylesheet, CMaps, fonts, WASM) are
+// fetched only when a PDF is opened, not precached with the shell.
+const lazyPdf = (f: string) => f.startsWith('/pdfjs/') || /\/(pdf\.worker|PdfViewer)[.-]/.test(f);
+const ASSETS = [...build, ...files.filter((f) => !f.endsWith('.gz'))].filter((f) => !lazyPdf(f)).concat('/');
 
 sw.addEventListener('install', (event) => {
   event.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)).then(() => sw.skipWaiting()));
