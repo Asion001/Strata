@@ -107,6 +107,40 @@ Blob names are the plain BLAKE3 hash today. The store's naming function
 already accepts a per-connection key (BLAKE3 keyed mode) for when encryption
 at rest arrives, so the backend will not learn content hashes.
 
+## Text editor
+Text, Markdown and code open in a CodeMirror 6 editor that loads lazily,
+with language modes loaded per file extension. Markdown gets a live preview
+(markdown-it with raw HTML off, then DOMPurify).
+
+Saves never overwrite silently:
+- `PUT /api/files/content?path=` takes `If-Match` with the ETag from the
+  GET. A changed file gets 412 with its current ETag. A missing precondition
+  on a write gets 428, and creating a file takes `If-None-Match: *`.
+- GET and PUT share one version function: hashed volumes use the content
+  hash; raw volumes hash the size and the backend etag (or the nanosecond
+  mtime where the backend has no etag).
+- Raw metadata can be coarse (whole-second mtimes), so on raw volumes an
+  `If-Match` save must also send `X-Strata-Base-Hash`, the BLAKE3 of the bytes
+  the edit is based on (428 without it). The server compares that hash with
+  the current content. Coarse raw files are never answered with 304, and
+  their type isn't cached.
+- Hashed volumes check under the volume lock in the same critical section as
+  the node write. Raw volumes take the volume lock, check, then write and
+  close atomically while still holding it. A refused save therefore writes
+  nothing at all (no temp files, no folders). Saves are at most 5 MB.
+- Writes take the normal store paths, so the journal and websocket push fire.
+
+On a 412, the editor offers three choices: keep mine (a copy named
+`name (conflict YYYY-MM-DD HH-MM).ext`), reload theirs, or view a side-by-side
+diff. Unsaved drafts autosave to IndexedDB every 2 s, keyed by user, mount and
+path with their base ETag and hash, and are offered back on reopen. They
+expire after 30 days, are cleared on sign-out, and other users' drafts are
+dropped when someone signs in. Autosave only writes while the draft's user is
+still the one signed in (a shared marker every tab sees). Line endings and
+the trailing newline are preserved; mixed-ending files are kept verbatim.
+Files over 5 MB or not valid UTF-8 open read-only, files over 20 MB are not
+loaded, and files with NUL bytes in their first 8 KB are refused.
+
 ## Security notes
 * Argon2id passwords; sessions are random tokens stored as BLAKE3 hashes.
 * Cookie sessions require an `X-Strata` header on mutating requests (CSRF).

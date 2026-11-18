@@ -119,10 +119,16 @@ pub async fn create(
     {
         return Err(bad("that folder is reserved"));
     }
+    // Refuse an overlap before making any folder; the parent folder is made
+    // outside the layout lock (it may be slow remote storage).
     check_storage_overlap(&st, req.connection_id, &base, &req.mode).await?;
     let (parent, name) = paths::split(&path).unwrap();
     // The mount point's parent must be a folder (create it if missing).
     vfs::mkdir_p(&st, u.id, parent).await?;
+    // Checked again and created under the layout lock, so a concurrent
+    // volume or connection edit can't slip an overlap in between.
+    let (mut tx, _layout) = lock_layout(&st).await?;
+    check_storage_overlap(&st, req.connection_id, &base, &req.mode).await?;
     let volume_id: i64 = sqlx::query_scalar(
         "INSERT INTO volumes (connection_id, base_path, mode) VALUES ($1, $2, $3)
          ON CONFLICT (connection_id, base_path, mode) DO UPDATE SET mode = EXCLUDED.mode RETURNING id",
@@ -130,7 +136,7 @@ pub async fn create(
     .bind(req.connection_id)
     .bind(&base)
     .bind(&req.mode)
-    .fetch_one(&st.db)
+    .fetch_one(&mut *tx)
     .await?;
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO mounts (owner_id, path, parent_path, name, volume_id, journal_from)
@@ -141,12 +147,13 @@ pub async fn create(
     .bind(parent)
     .bind(name)
     .bind(volume_id)
-    .fetch_one(&st.db)
+    .fetch_one(&mut *tx)
     .await
     .map_err(|e| match ApiError::from(e) {
         ApiError::Conflict(_) => conflict("something is already mounted there"),
         e => e,
     })?;
+    tx.commit().await?;
     invalidate(&st, u.id);
     journal::record_user(
         &st,
@@ -165,25 +172,94 @@ pub async fn create(
     Ok(Json(v))
 }
 
-/// Where a volume's files physically live: (connection or local directory, folder).
-async fn storage_root(
+/// Do two storage locations overlap (same storage, one folder inside the
+/// other or equal)? The single rule used by mount guards and save locks.
+pub fn overlaps(a: (&str, &str), b: (&str, &str)) -> bool {
+    a.0 == b.0
+        && (paths::strip_prefix(a.1, b.1).is_some() || paths::strip_prefix(b.1, a.1).is_some())
+}
+
+/// Volume locations for loops over many volumes. A connection's root comes
+/// from its stored columns (as fetched with a JOIN), else from its config
+/// (looked up once per connection). It is unknown (`None`) when
+/// the config names no valid location, or can't be decrypted and no
+/// location was stored before: such a connection can't reach any storage
+/// now. The one rule shared by mount guards and save locks.
+#[derive(Default)]
+pub struct Locations(std::collections::HashMap<i64, Option<(String, String)>>);
+
+impl Locations {
+    pub async fn of(
+        &mut self,
+        st: &AppState,
+        connection_id: i64,
+        base: &str,
+        stored: (Option<String>, Option<String>),
+    ) -> ApiResult<Option<(String, String)>> {
+        let root = match stored {
+            (Some(id), Some(folder)) => Some((id, folder)),
+            // Only this fallback is cached: it reads and decrypts the config.
+            _ => match self.0.get(&connection_id) {
+                Some(r) => r.clone(),
+                None => {
+                    let enc: Vec<u8> =
+                        sqlx::query_scalar("SELECT config_enc FROM connections WHERE id = $1")
+                            .bind(connection_id)
+                            .fetch_one(&st.db)
+                            .await?;
+                    let r = st
+                        .decrypt_config(&enc)
+                        .ok()
+                        .and_then(|c| c.location(&st.cfg.local_base).ok());
+                    self.0.insert(connection_id, r.clone());
+                    r
+                }
+            },
+        };
+        Ok(root.map(|(id, folder)| (id, paths::join(&folder, base))))
+    }
+}
+
+pub async fn storage_root(
     st: &AppState,
     connection_id: i64,
     base: &str,
 ) -> ApiResult<(String, String)> {
-    let cfg = st.connection_config(connection_id).await?;
-    Ok(match cfg.local_dir(&st.cfg.local_base)? {
-        // Two local connections may point at overlapping server folders.
-        Some(dir) => (
-            String::from("local"),
-            paths::join(dir.to_string_lossy().trim_matches('/'), base),
-        ),
-        None => (format!("conn:{connection_id}"), base.to_string()),
-    })
+    let stored: (Option<String>, Option<String>) =
+        sqlx::query_as("SELECT storage_id, storage_folder FROM connections WHERE id = $1")
+            .bind(connection_id)
+            .fetch_one(&st.db)
+            .await?;
+    let (id, folder) = match stored {
+        (Some(id), Some(folder)) => (id, folder),
+        _ => crate::connections::store_location(st, connection_id).await?,
+    };
+    Ok((id, paths::join(&folder, base)))
+}
+
+/// Serialises changes to where volumes live (new volumes, re-pointed
+/// connections) together with their overlap checks. Write the change in the
+/// returned transaction and keep the guard until it commits; checks may read
+/// outside it, since every earlier change has committed by the time the lock
+/// is granted. Waiters queue in-process first, so at most one pooled
+/// connection waits inside Postgres (like `vfs::lock_volumes`).
+pub async fn lock_layout(
+    st: &AppState,
+) -> ApiResult<(
+    sqlx::Transaction<'static, sqlx::Postgres>,
+    tokio::sync::OwnedMutexGuard<()>,
+)> {
+    let guard = st.layout_lock.clone().lock_owned().await;
+    let mut tx = st.db.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(1398035010, 0)")
+        .execute(&mut *tx)
+        .await?;
+    Ok((tx, guard))
 }
 
 /// A raw view over a hashed store (or a hashed store inside a raw folder) on
 /// the same storage would let raw deletes and moves destroy blobs. Refuse it.
+/// Call under `lock_layout`.
 pub async fn check_storage_overlap(
     st: &AppState,
     connection_id: i64,
@@ -191,23 +267,44 @@ pub async fn check_storage_overlap(
     mode: &str,
 ) -> ApiResult<()> {
     let (root, folder) = storage_root(st, connection_id, base).await?;
-    let other_mode = if mode == "raw" { "hashed" } else { "raw" };
-    let others: Vec<(i64, String)> =
-        sqlx::query_as("SELECT connection_id, base_path FROM volumes WHERE mode = $1")
-            .bind(other_mode)
-            .fetch_all(&st.db)
-            .await?;
-    for (cid, obase) in others {
-        let Ok((oroot, ofolder)) = storage_root(st, cid, &obase).await else {
-            continue;
+    check_overlap_at(st, &[(root, folder, mode.to_string())], None).await
+}
+
+/// Are these (`root`, `folder`, `mode`) places clear of every volume of the
+/// opposite mode? Volumes on `except` (the connection being edited) are left
+/// out, as are connections whose location is unknown (see `Locations`).
+pub async fn check_overlap_at(
+    st: &AppState,
+    places: &[(String, String, String)],
+    except: Option<i64>,
+) -> ApiResult<()> {
+    if places.is_empty() {
+        return Ok(());
+    }
+    // Volumes of a mode opposite to some place's, fetched once.
+    // (connection id, base path, mode, stored storage id, stored folder)
+    type Row = (i64, String, String, Option<String>, Option<String>);
+    let modes: Vec<&str> = places.iter().map(|(_, _, m)| m.as_str()).collect();
+    let others: Vec<Row> = sqlx::query_as(
+        "SELECT v.connection_id, v.base_path, v.mode, c.storage_id, c.storage_folder
+         FROM volumes v JOIN connections c ON c.id = v.connection_id
+         WHERE v.mode <> ANY($1) AND c.id IS DISTINCT FROM $2",
+    )
+    .bind(&modes)
+    .bind(except)
+    .fetch_all(&st.db)
+    .await?;
+    let mut locs = Locations::default();
+    for (cid, obase, omode, sid, sfolder) in others {
+        let Some(other) = locs.of(st, cid, &obase, (sid, sfolder)).await? else {
+            continue; // location unknown: can't reach storage
         };
-        if oroot == root
-            && (paths::strip_prefix(&folder, &ofolder).is_some()
-                || paths::strip_prefix(&ofolder, &folder).is_some())
-        {
-            return Err(conflict(
-                "that folder overlaps a hashed store (or a raw folder holds this store); pick a separate folder",
-            ));
+        for (root, folder, mode) in places {
+            if *mode != omode && overlaps((root, folder), (&other.0, &other.1)) {
+                return Err(conflict(
+                    "that folder overlaps a hashed store (or a raw folder holds this store); pick a separate folder",
+                ));
+            }
         }
     }
     Ok(())

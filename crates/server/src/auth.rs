@@ -247,7 +247,9 @@ pub async fn create_user(
     check_username(username)?;
     check_password(password)?;
     let hash = hash_password(password)?;
-    let mut tx = st.db.begin().await?;
+    // Under the layout lock from the start: the default connections (made
+    // by the first sign-up) and each private root's volume.
+    let (mut tx, _layout) = crate::mounts::lock_layout(st).await?;
     let user: User = sqlx::query_as(
         "INSERT INTO users (username, password_hash, is_admin) VALUES ($1, $2, $3) RETURNING id, username, is_admin",
     )
@@ -324,16 +326,19 @@ async fn insert_local_connection(
     };
     let op = cfg.operator(&st.cfg.local_base)?;
     let caps = Capabilities::detect(&cfg, &op, &st.cfg.local_base);
-    let enc = st.secrets.encrypt(&serde_json::to_vec(&cfg).unwrap())?;
+    let enc = st.encrypt_config(&cfg)?;
+    let (storage_id, storage_folder) = cfg.location(&st.cfg.local_base)?;
     Ok(sqlx::query_scalar(
-        "INSERT INTO connections (owner_id, name, kind, config_enc, capabilities, is_default)
-         VALUES ($1, $2, 'local', $3, $4, $5) RETURNING id",
+        "INSERT INTO connections (owner_id, name, kind, config_enc, capabilities, is_default, storage_id, storage_folder)
+         VALUES ($1, $2, 'local', $3, $4, $5, $6, $7) RETURNING id",
     )
     .bind(owner)
     .bind(name)
     .bind(enc)
     .bind(sqlx::types::Json(caps))
     .bind(is_default)
+    .bind(storage_id)
+    .bind(storage_folder)
     .fetch_one(&mut **tx)
     .await?)
 }

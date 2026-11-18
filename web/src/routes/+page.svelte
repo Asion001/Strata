@@ -2,14 +2,17 @@
   import { page } from '$app/state';
   import { goto } from '$app/navigation';
   import { api, contentUrl, previewUrl, thumbUrl, type Entry } from '$lib/api';
-  import { bytes, when, join, parent, icon, isImage } from '$lib/format';
+  import { bytes, when, join, parent, icon, isImage, isTextName } from '$lib/format';
   import { runUpload, type UploadTask } from '$lib/upload';
   import VirtualList from '$lib/VirtualList.svelte';
   import Viewer from '$lib/Viewer.svelte';
+  import Editor from '$lib/editor/Editor.svelte';
+  import { session } from '$lib/session.svelte';
 
   let path = $derived(page.url.searchParams.get('p') ?? '');
   let entries = $state<Entry[]>([]);
-  let mount = $state<{ mode: string; connection_name: string; path: string } | null>(null);
+  let mount = $state<{ id: number; mode: string; connection_name: string; path: string } | null>(null);
+  let editing = $state<string | null>(null);
   let loading = $state(false);
   let error = $state('');
   let query = $state('');
@@ -223,6 +226,9 @@
       <b class="trunc">{e.name}</b>
       {#if !e.is_dir}<a class="item" href={contentUrl(join(path, e.name), true)}>Download</a>{/if}
       {#if !e.mount_id}
+        {#if !e.is_dir && isTextName(e.name)}
+          <button class="item" onclick={() => { editing = join(path, e.name); menu = null; }}>Edit</button>
+        {/if}
         <button class="item" onclick={() => rename(e)}>Rename</button>
         <button class="item" onclick={() => moveTo(e)}>Move…</button>
       {/if}
@@ -241,7 +247,14 @@
   <Viewer
     items={viewable.map((v) => ({ name: v.name, size: v.size, src: previewUrl(join(path, v.name)), download: contentUrl(join(path, v.name), true) }))}
     bind:index={viewerIndex}
+    onedit={(i) => { editing = join(path, viewable[i].name); viewerIndex = -1; }}
     onclose={() => (viewerIndex = -1)} />
+{/if}
+
+{#if editing && session.user}
+  {#key editing}
+    <Editor path={editing} userId={session.user.id} mountId={mount?.id ?? null} onclose={() => { editing = null; load(); }} />
+  {/key}
 {/if}
 
 <style>

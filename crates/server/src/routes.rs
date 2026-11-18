@@ -62,7 +62,12 @@ pub fn router(st: AppState) -> Router {
         .route("/mounts/{id}/scan", post(mounts::scan))
         .route("/files/list", get(files::list))
         .route("/files/stat", get(files::stat))
-        .route("/files/content", get(files::content))
+        .route(
+            "/files/content",
+            get(files::content)
+                .put(files::put_content)
+                .layer(DefaultBodyLimit::max(files::MAX_EDIT_BYTES + 1)),
+        )
         .route("/files/thumb", get(thumbs::get))
         .route("/files/image", get(files::image))
         .route("/files/mkdir", post(files::mkdir))

@@ -1,16 +1,20 @@
 <script lang="ts">
   // Full-screen preview: image gallery (arrows, swipe, zoom), native video/audio, text.
-  import { isAudio, isImage, isSvg, isVideo, bytes } from './format';
+  import { isAudio, isImage, isSvg, isTextName, isVideo, bytes } from './format';
 
   interface Item { name: string; size: number; src: string; download: string }
-  let { items, index = $bindable(), onclose }: { items: Item[]; index: number; onclose: () => void } = $props();
+  let {
+    items,
+    index = $bindable(),
+    onclose,
+    onedit
+  }: { items: Item[]; index: number; onclose: () => void; onedit?: (index: number) => void } = $props();
 
   let item = $derived(items[index]);
   let text = $state<string | null>(null);
   let zoom = $state(1);
 
-  const isText = (n: string, size: number) =>
-    size < 2_000_000 && /\.(txt|md|markdown|json|ya?ml|toml|ini|cfg|conf|log|csv|tsv|xml|html?|css|scss|js|mjs|ts|tsx|jsx|svelte|vue|rs|go|py|rb|php|java|kt|swift|c|h|cpp|hpp|cs|sh|bash|zsh|fish|sql|env|gitignore|dockerfile)$/i.test(n);
+  const isText = (n: string, size: number) => size < 2_000_000 && isTextName(n);
 
   $effect(() => {
     text = null;
@@ -75,6 +79,7 @@
   <header>
     <span class="name">{item.name}</span>
     <span class="muted">{bytes(item.size)} · {index + 1}/{items.length}</span>
+    {#if onedit && isTextName(item.name)}<button onclick={() => onedit(index)}>Edit</button>{/if}
     <a class="btn" href={item.download}>Download</a>
     <button onclick={onclose} aria-label="Close">✕</button>
   </header>

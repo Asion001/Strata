@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use opendal::Operator;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use strata_storage::{Capabilities, ConnectionConfig};
+use strata_storage::{Capabilities, ConnectionConfig, paths};
 
 use crate::auth::{AuthUser, User};
 use crate::error::{ApiError, ApiResult, bad, conflict};
@@ -46,8 +46,7 @@ const COLS: &str = "id, owner_id, name, kind, config_enc, capabilities, is_defau
 
 impl Row {
     fn view(self, st: &AppState) -> ApiResult<ConnectionView> {
-        let cfg: ConnectionConfig = serde_json::from_slice(&st.secrets.decrypt(&self.config_enc)?)
-            .map_err(|e| ApiError::Internal(e.into()))?;
+        let cfg = st.decrypt_config(&self.config_enc)?;
         Ok(ConnectionView {
             id: self.id,
             owner_id: self.owner_id,
@@ -60,6 +59,78 @@ impl Row {
             health_error: self.health_error,
             health_checked_at: self.health_checked_at,
         })
+    }
+}
+
+/// Compute and store a connection's storage location (see migration 0006).
+/// A config that names no valid location (e.g. a bad path) has its stored
+/// one cleared: it can't reach storage. One that can't be decrypted or
+/// parsed keeps the last known location (the fault may be the server's key,
+/// and overlap checks keep working from it) and returns the error.
+pub async fn store_location(st: &AppState, id: i64) -> ApiResult<(String, String)> {
+    // The row lock orders this against a concurrent `update`, which writes
+    // its config and location together.
+    let mut tx = st.db.begin().await?;
+    let enc: Vec<u8> =
+        sqlx::query_scalar("SELECT config_enc FROM connections WHERE id = $1 FOR UPDATE")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or(ApiError::NotFound)?;
+    let cfg = st.decrypt_config(&enc)?;
+    let loc = cfg.location(&st.cfg.local_base).map_err(ApiError::Internal);
+    let (sid, folder) = match &loc {
+        Ok((sid, folder)) => (Some(sid.as_str()), Some(folder.as_str())),
+        Err(_) => (None, None),
+    };
+    sqlx::query(
+        "UPDATE connections SET storage_id = $2, storage_folder = $3
+         WHERE id = $1 AND (storage_id IS DISTINCT FROM $2 OR storage_folder IS DISTINCT FROM $3)",
+    )
+    .bind(id)
+    .bind(sid)
+    .bind(folder)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    loc
+}
+
+/// Recompute every connection's location at start-up, so rows written by
+/// older versions (missing, or in an older format) match today's rule.
+/// Configs that can't be read keep theirs (see `store_location`).
+pub async fn backfill_locations(st: &AppState) {
+    let mut ids: Option<Vec<i64>> = None;
+    for attempt in 0..5 {
+        match sqlx::query_scalar("SELECT id FROM connections")
+            .fetch_all(&st.db)
+            .await
+        {
+            Ok(v) => {
+                ids = Some(v);
+                break;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "recomputing connection locations (attempt {}): {e}",
+                    attempt + 1
+                );
+                if attempt < 4 {
+                    tokio::time::sleep(std::time::Duration::from_millis(250 << attempt)).await;
+                }
+            }
+        }
+    }
+    let Some(ids) = ids else {
+        tracing::error!(
+            "could not recompute connection locations; overlap checks may use stale rows"
+        );
+        return;
+    };
+    for id in ids {
+        if let Err(e) = store_location(st, id).await {
+            tracing::warn!("connection {id}: cannot determine its storage location: {e}");
+        }
     }
 }
 
@@ -143,17 +214,22 @@ pub async fn create(
         .operator(&st.cfg.local_base)
         .map_err(|e| bad(format!("invalid config: {e}")))?;
     let caps = Capabilities::detect(&req.config, &op, &st.cfg.local_base);
-    let enc = st
-        .secrets
-        .encrypt(&serde_json::to_vec(&req.config).unwrap())?;
+    let enc = st.encrypt_config(&req.config)?;
+    let (sid, sfolder) = req
+        .config
+        .location(&st.cfg.local_base)
+        .map_err(|e| bad(format!("invalid config: {e}")))?;
     let id: i64 = sqlx::query_scalar(
-        "INSERT INTO connections (owner_id, name, kind, config_enc, capabilities) VALUES ($1, $2, $3, $4, $5) RETURNING id",
+        "INSERT INTO connections (owner_id, name, kind, config_enc, capabilities, storage_id, storage_folder)
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
     )
     .bind(u.id)
     .bind(req.name.trim())
     .bind(req.config.kind())
     .bind(enc)
     .bind(sqlx::types::Json(caps))
+    .bind(sid)
+    .bind(sfolder)
     .fetch_one(&st.db)
     .await?;
     let res = probe_operator(&op).await;
@@ -186,28 +262,70 @@ pub async fn update(
 ) -> ApiResult<Json<ConnectionView>> {
     check_access(&st, &u, id).await?;
     validate(&u, &req.name, &req.config)?;
-    let old = st.connection_config(id).await?;
-    if old.kind() != req.config.kind() {
+    let (kind, old_enc): (String, Vec<u8>) =
+        sqlx::query_as("SELECT kind, config_enc FROM connections WHERE id = $1")
+            .bind(id)
+            .fetch_one(&st.db)
+            .await?;
+    if kind != req.config.kind() {
         return Err(bad("the backend type of a connection cannot change"));
     }
+    // Blank secrets mean "unchanged", so the old config must be readable.
+    let old = st.decrypt_config(&old_enc).map_err(|e| {
+        tracing::warn!("connection {id}: stored config can't be read: {e:#}");
+        bad("the stored settings of this connection can't be read (wrong server key, or an unknown format)")
+    })?;
     req.config.merge_secrets(&old);
     let op = req
         .config
         .operator(&st.cfg.local_base)
         .map_err(|e| bad(format!("invalid config: {e}")))?;
     let caps = Capabilities::detect(&req.config, &op, &st.cfg.local_base);
-    let enc = st
-        .secrets
-        .encrypt(&serde_json::to_vec(&req.config).unwrap())?;
+    let (sid, sfolder) = req
+        .config
+        .location(&st.cfg.local_base)
+        .map_err(|e| bad(format!("invalid config: {e}")))?;
+    // Re-pointing a connection must not make its volumes overlap volumes of
+    // the opposite mode (a raw view over a hashed store): checked and
+    // written under the layout lock. The row lock and the compare make a
+    // concurrent edit (whose secrets were not merged here) a conflict.
+    let (mut tx, layout) = crate::mounts::lock_layout(&st).await?;
+    let now_enc: Vec<u8> =
+        sqlx::query_scalar("SELECT config_enc FROM connections WHERE id = $1 FOR UPDATE")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?;
+    if now_enc != old_enc {
+        return Err(conflict(
+            "the connection was changed meanwhile; reload it and try again",
+        ));
+    }
+    let volumes: Vec<(String, String)> =
+        sqlx::query_as("SELECT base_path, mode FROM volumes WHERE connection_id = $1")
+            .bind(id)
+            .fetch_all(&mut *tx)
+            .await?;
+    let places: Vec<_> = volumes
+        .into_iter()
+        .map(|(base, mode)| (sid.clone(), paths::join(&sfolder, &base), mode))
+        .collect();
+    crate::mounts::check_overlap_at(&st, &places, Some(id)).await?;
+    let enc = st.encrypt_config(&req.config)?;
+    // Config and location change together, in one statement.
     sqlx::query(
-        "UPDATE connections SET name = $2, config_enc = $3, capabilities = $4 WHERE id = $1",
+        "UPDATE connections SET name = $2, config_enc = $3, capabilities = $4,
+                storage_id = $5, storage_folder = $6 WHERE id = $1",
     )
     .bind(id)
     .bind(req.name.trim())
     .bind(enc)
     .bind(sqlx::types::Json(caps))
-    .execute(&st.db)
+    .bind(&sid)
+    .bind(&sfolder)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
+    drop(layout);
     st.forget_operator(id);
     let res = probe_operator(&op).await;
     store_probe(&st, id, &res).await?;

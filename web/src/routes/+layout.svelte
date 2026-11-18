@@ -4,6 +4,7 @@
   import { goto } from '$app/navigation';
   import { api } from '$lib/api';
   import { session } from '$lib/session.svelte';
+  import { markSignedIn } from '$lib/editor/drafts';
 
   let { children } = $props();
   let isPublic = $derived(page.url.pathname === '/login' || page.url.pathname.startsWith('/s/'));
@@ -11,7 +12,10 @@
   $effect(() => {
     if (isPublic || session.checked) return;
     api('GET', '/api/auth/me')
-      .then((u) => (session.user = u))
+      .then((u) => {
+        session.user = u;
+        markSignedIn(u.id); // lets the editor's autosave run in every tab
+      })
       .catch(() => goto('/login?next=' + encodeURIComponent(page.url.pathname + page.url.search)))
       .finally(() => (session.checked = true));
   });
