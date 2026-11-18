@@ -27,6 +27,8 @@ pub struct Config {
     pub gc_grace_hours: i64,
     /// How long a raw folder listing is trusted before rescanning the backend.
     pub raw_ttl_secs: i64,
+    /// Seconds between health probes of each connection (jittered).
+    pub probe_secs: u64,
 }
 
 fn env(name: &str) -> Option<String> {
@@ -61,6 +63,10 @@ impl Config {
             raw_ttl_secs: env("STRATA_RAW_TTL_SECS")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(30),
+            probe_secs: env("STRATA_PROBE_SECS")
+                .and_then(|v| v.parse().ok())
+                .filter(|&s: &u64| s >= 5)
+                .unwrap_or(60),
             data_dir,
         }
         .checked()

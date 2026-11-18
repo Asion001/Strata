@@ -19,18 +19,56 @@ no code with it and offers no Nextcloud API compatibility (yet).
 A connection is a storage backend (local folder, S3, FTP to start; all through
 OpenDAL) plus credentials. The config is stored as JSON encrypted with
 XChaCha20-Poly1305 (key derived from `STRATA_SECRET_KEY`). Each connection
-has a `capabilities` JSON column, e.g.
+has a `capabilities` JSON column, detected when it is added and again on
+every health probe:
 
 ```json
-{ "snapshots": "none|btrfs|zfs|s3_versioning|smb", "snapshots_create": false,
-  "rename": true, "range_read": true, "fs_type": "btrfs" }
+{ "snapshots": { "kind": "none|btrfs|zfs|s3_versioning|smb", "create": false },
+  "rename": true, "range_read": true, "atomic_write": true, "list_fast": true,
+  "fs_type": "btrfs" }
 ```
 
-For local connections the filesystem type is detected with `statfs(2)` when the
-connection is added, so phase 2 can use native btrfs/ZFS snapshots (falling
-back to Strata's own history elsewhere). Local folders always live below
-`STRATA_LOCAL_BASE` and only admins may create them. A background job probes
-every connection's health every 10 minutes.
+* **Local:** the filesystem comes from `statfs(2)` (btrfs `0x9123683E`, ZFS
+  `0x2FC12FC1`; the type name on macOS). `snapshots.create` is set only when
+  a real test works: a scratch subvolume and a read-only snapshot of it on
+  btrfs (both removed again), or the `snapshot` permission in `zfs allow`.
+* **S3:** `GetBucketVersioning` (a SigV4-signed request) turns on
+  `s3_versioning`.
+
+Local folders always live below `STRATA_LOCAL_BASE` and only admins may
+create them.
+
+### Connection health
+Each connection is probed every `STRATA_PROBE_SECS` (default 60, up to 10%
+less as jitter; half that while reads are failing), one probe per connection
+at a time.
+* **What a probe does.** It reads the root (for a local folder, the folder
+  must exist, so an unmounted disk isn't mistaken for an empty one). It then
+  writes, reads back and deletes one small file, `probe-<random>.tmp`, under
+  `.strata-probe/` at the connection's root.
+* **No junk files.** The probe file is deleted whatever happened. Files an
+  interrupted probe left behind are swept by later probes once they are ten
+  minutes old. Versioned buckets get no write test, since a delete there
+  would leave versions behind.
+* **Reserved folder.** `.strata-probe` is reserved: hidden from raw
+  listings, not writable through mounts, and refused in connection and
+  mount paths.
+* **States.**
+  * `ok`: everything worked.
+  * `degraded`: the write test failed, or reads failed fewer than three
+    times in a row.
+  * `offline`: three failed reads in a row. One successful read ends it.
+* **What gets recorded.** The state, the last latency, a plain-words reason
+  and the backend's message. Credentials, `user:password@` and URL query
+  strings are scrubbed from the message. Only admins see the message; owners
+  see the reason.
+* **Offline connections.** The storage isn't touched at all: reads and writes
+  through the connection's mounts get 503, including changes a hashed mount
+  keeps only in the database. The mount points stay in listings (flagged
+  `offline`), and hashed mounts still list from the database.
+* **Live updates.** State changes are pushed over the websocket
+  (`{"health": <connection id>}`) to users who mount the connection, its
+  owner and admins.
 
 ### Volumes and mounts
 A **volume** is `(connection, folder inside it, mode)`. A **mount** shows a

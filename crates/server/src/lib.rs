@@ -7,6 +7,7 @@ pub mod config;
 pub mod connections;
 pub mod error;
 pub mod files;
+pub mod health;
 pub mod journal;
 pub mod mounts;
 pub mod routes;

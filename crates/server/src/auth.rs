@@ -325,7 +325,7 @@ async fn insert_local_connection(
         path: path.to_string(),
     };
     let op = cfg.operator(&st.cfg.local_base)?;
-    let caps = Capabilities::detect(&cfg, &op, &st.cfg.local_base);
+    let caps = Capabilities::detect(&cfg, &op, &st.cfg.local_base).await;
     let enc = st.encrypt_config(&cfg)?;
     let (storage_id, storage_folder) = cfg.location(&st.cfg.local_base)?;
     Ok(sqlx::query_scalar(

@@ -19,6 +19,8 @@ pub struct ChangeEvent {
     pub volume_id: Option<i64>,
     /// Set for changes to one user's tree (mounts).
     pub user_id: Option<i64>,
+    /// Set when a connection's health state changed.
+    pub connection_id: Option<i64>,
 }
 
 #[derive(Clone)]
@@ -33,6 +35,11 @@ pub struct Inner {
     /// connection id -> times its operator was forgotten (a config change),
     /// so an operator built from the old config isn't cached afterwards
     pub op_gens: DashMap<i64, u64>,
+    /// Connections the health probes found offline: their storage isn't
+    /// touched (reads and writes get 503) until a probe succeeds again.
+    pub offline: DashMap<i64, ()>,
+    /// One health probe per connection at a time.
+    pub probe_locks: DashMap<i64, Arc<tokio::sync::Mutex<()>>>,
     /// user id -> that user's mounts, longest path first
     pub mounts: DashMap<i64, Arc<Vec<Mount>>>,
     pub events: broadcast::Sender<ChangeEvent>,
@@ -80,12 +87,14 @@ impl AppState {
         let staging = cfg.data_dir.join("staging");
         std::fs::create_dir_all(&staging)?;
         let (events, _) = broadcast::channel(1024);
-        Ok(AppState(Arc::new(Inner {
+        let st = AppState(Arc::new(Inner {
             secrets: SecretBox::from_secret(&cfg.secret_key),
             db,
             cfg,
             ops: DashMap::new(),
             op_gens: DashMap::new(),
+            offline: DashMap::new(),
+            probe_locks: DashMap::new(),
             mounts: DashMap::new(),
             events,
             decisions: quick_cache::sync::Cache::new(100_000),
@@ -93,7 +102,9 @@ impl AppState {
             layout_lock: Arc::new(tokio::sync::Mutex::new(())),
             lock_permits: Arc::new(tokio::sync::Semaphore::new(8)),
             staging,
-        })))
+        }));
+        crate::health::load(&st).await?;
+        Ok(st)
     }
 
     /// Decrypt a connection's config.
@@ -117,8 +128,29 @@ impl AppState {
         Ok(self.secrets.encrypt(&plain)?)
     }
 
-    /// Cached OpenDAL operator for a connection.
+    /// Cached OpenDAL operator for a connection, refused (503) while the
+    /// connection is offline. Health probes use `operator_unchecked`.
     pub async fn operator(&self, connection_id: i64) -> ApiResult<Operator> {
+        self.ensure_online(connection_id)?;
+        self.operator_unchecked(connection_id).await
+    }
+
+    /// 503 while a connection is offline.
+    pub fn ensure_online(&self, connection_id: i64) -> ApiResult<()> {
+        if self.offline.contains_key(&connection_id) {
+            return Err(ApiError::Unavailable(
+                "this storage is offline right now; try again later".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn is_offline(&self, connection_id: i64) -> bool {
+        self.offline.contains_key(&connection_id)
+    }
+
+    /// The operator whatever the connection's health (for probes).
+    pub async fn operator_unchecked(&self, connection_id: i64) -> ApiResult<Operator> {
         if let Some(op) = self.ops.get(&connection_id) {
             return Ok(op.clone());
         }

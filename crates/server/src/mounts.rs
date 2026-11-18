@@ -114,8 +114,9 @@ pub async fn create(
     }
     let base = paths::normalize(&req.base_path)?;
     check_access(&st, &u, req.connection_id).await?;
-    if strata_storage::backend::has_reserved_component(&base)
-        && st.connection_config(req.connection_id).await?.kind() == "local"
+    if strata_storage::backend::is_probe_path(&base)
+        || (strata_storage::backend::has_reserved_component(&base)
+            && st.connection_config(req.connection_id).await?.kind() == "local")
     {
         return Err(bad("that folder is reserved"));
     }

@@ -1,11 +1,8 @@
 //! Connections CRUD and health probes.
 
-use std::time::Duration;
-
 use axum::Json;
 use axum::extract::{Path, State};
 use chrono::{DateTime, Utc};
-use opendal::Operator;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use strata_storage::{Capabilities, ConnectionConfig, paths};
@@ -23,8 +20,14 @@ pub struct ConnectionView {
     pub config: ConnectionConfig,
     pub capabilities: serde_json::Value,
     pub is_default: bool,
+    /// ok | degraded | offline | unknown (not probed yet)
     pub health: String,
+    /// Why the last probe failed, in plain words anyone may see.
+    pub health_reason: Option<String>,
+    /// The backend's own (sanitized) message: admins only, since it can
+    /// name hosts and paths.
     pub health_error: Option<String>,
+    pub health_latency_ms: Option<i32>,
     pub health_checked_at: Option<DateTime<Utc>>,
 }
 
@@ -38,14 +41,16 @@ struct Row {
     capabilities: serde_json::Value,
     is_default: bool,
     health: String,
+    health_reason: Option<String>,
     health_error: Option<String>,
+    health_latency_ms: Option<i32>,
     health_checked_at: Option<DateTime<Utc>>,
 }
 
-const COLS: &str = "id, owner_id, name, kind, config_enc, capabilities, is_default, health, health_error, health_checked_at";
+const COLS: &str = "id, owner_id, name, kind, config_enc, capabilities, is_default, health, health_reason, health_error, health_latency_ms, health_checked_at";
 
 impl Row {
-    fn view(self, st: &AppState) -> ApiResult<ConnectionView> {
+    fn view(self, st: &AppState, admin: bool) -> ApiResult<ConnectionView> {
         let cfg = st.decrypt_config(&self.config_enc)?;
         Ok(ConnectionView {
             id: self.id,
@@ -56,7 +61,9 @@ impl Row {
             capabilities: self.capabilities,
             is_default: self.is_default,
             health: self.health,
-            health_error: self.health_error,
+            health_reason: self.health_reason,
+            health_error: if admin { self.health_error } else { None },
+            health_latency_ms: self.health_latency_ms,
             health_checked_at: self.health_checked_at,
         })
     }
@@ -171,7 +178,7 @@ pub async fn list(
     .await?;
     Ok(Json(
         rows.into_iter()
-            .map(|r| r.view(&st))
+            .map(|r| r.view(&st, u.is_admin))
             .collect::<ApiResult<_>>()?,
     ))
 }
@@ -180,27 +187,6 @@ pub async fn list(
 pub struct UpsertReq {
     pub name: String,
     pub config: ConnectionConfig,
-}
-
-/// Probe a backend: list its root, with a timeout.
-pub async fn probe_operator(op: &Operator) -> Result<(), String> {
-    match tokio::time::timeout(Duration::from_secs(20), op.list("/")).await {
-        Ok(Ok(_)) => Ok(()),
-        Ok(Err(e)) => Err(e.to_string()),
-        Err(_) => Err("timed out after 20s".into()),
-    }
-}
-
-async fn store_probe(st: &AppState, id: i64, res: &Result<(), String>) -> ApiResult<()> {
-    sqlx::query(
-        "UPDATE connections SET health = $2, health_error = $3, health_checked_at = now() WHERE id = $1",
-    )
-    .bind(id)
-    .bind(if res.is_ok() { "ok" } else { "error" })
-    .bind(res.as_ref().err())
-    .execute(&st.db)
-    .await?;
-    Ok(())
 }
 
 pub async fn create(
@@ -213,7 +199,7 @@ pub async fn create(
         .config
         .operator(&st.cfg.local_base)
         .map_err(|e| bad(format!("invalid config: {e}")))?;
-    let caps = Capabilities::detect(&req.config, &op, &st.cfg.local_base);
+    let caps = Capabilities::detect(&req.config, &op, &st.cfg.local_base).await;
     let enc = st.encrypt_config(&req.config)?;
     let (sid, sfolder) = req
         .config
@@ -232,17 +218,16 @@ pub async fn create(
     .bind(sfolder)
     .fetch_one(&st.db)
     .await?;
-    let res = probe_operator(&op).await;
-    store_probe(&st, id, &res).await?;
-    get_view(&st, id).await.map(Json)
+    crate::health::probe_one(&st, id, true).await;
+    get_view(&st, &u, id).await.map(Json)
 }
 
-async fn get_view(st: &AppState, id: i64) -> ApiResult<ConnectionView> {
+async fn get_view(st: &AppState, u: &User, id: i64) -> ApiResult<ConnectionView> {
     let r: Row = sqlx::query_as(&format!("SELECT {COLS} FROM connections WHERE id = $1"))
         .bind(id)
         .fetch_one(&st.db)
         .await?;
-    r.view(st)
+    r.view(st, u.is_admin)
 }
 
 pub async fn get(
@@ -251,7 +236,7 @@ pub async fn get(
     Path(id): Path<i64>,
 ) -> ApiResult<Json<ConnectionView>> {
     check_access(&st, &u, id).await?;
-    get_view(&st, id).await.map(Json)
+    get_view(&st, &u, id).await.map(Json)
 }
 
 pub async fn update(
@@ -280,7 +265,7 @@ pub async fn update(
         .config
         .operator(&st.cfg.local_base)
         .map_err(|e| bad(format!("invalid config: {e}")))?;
-    let caps = Capabilities::detect(&req.config, &op, &st.cfg.local_base);
+    let caps = Capabilities::detect(&req.config, &op, &st.cfg.local_base).await;
     let (sid, sfolder) = req
         .config
         .location(&st.cfg.local_base)
@@ -327,9 +312,10 @@ pub async fn update(
     tx.commit().await?;
     drop(layout);
     st.forget_operator(id);
-    let res = probe_operator(&op).await;
-    store_probe(&st, id, &res).await?;
-    get_view(&st, id).await.map(Json)
+    // A re-pointed connection is probed again at once (and may come back
+    // online, or go offline only after three failed probes as usual).
+    crate::health::probe_one(&st, id, true).await;
+    get_view(&st, &u, id).await.map(Json)
 }
 
 pub async fn delete(
@@ -384,12 +370,8 @@ pub async fn probe(
     Path(id): Path<i64>,
 ) -> ApiResult<Json<ConnectionView>> {
     check_access(&st, &u, id).await?;
-    let res = match st.operator(id).await {
-        Ok(op) => probe_operator(&op).await,
-        Err(e) => Err(e.to_string()),
-    };
-    store_probe(&st, id, &res).await?;
-    get_view(&st, id).await.map(Json)
+    crate::health::probe_one(&st, id, true).await;
+    get_view(&st, &u, id).await.map(Json)
 }
 
 #[derive(Deserialize)]
@@ -413,27 +395,20 @@ pub async fn test(
         .config
         .operator(&st.cfg.local_base)
         .map_err(|e| bad(format!("invalid config: {e}")))?;
-    let res = probe_operator(&op).await;
-    Ok(Json(json!({ "ok": res.is_ok(), "error": res.err() })))
-}
-
-/// Background: probe every connection.
-pub async fn probe_all(st: &AppState) {
-    let ids: Vec<i64> = match sqlx::query_scalar("SELECT id FROM connections")
-        .fetch_all(&st.db)
-        .await
-    {
-        Ok(v) => v,
-        Err(e) => return tracing::warn!("probe: {e}"),
-    };
-    for id in ids {
-        let res = match st.operator(id).await {
-            Ok(op) => probe_operator(&op).await,
-            Err(e) => Err(e.to_string()),
-        };
-        if let Err(e) = &res {
-            tracing::warn!("connection {id} unhealthy: {e}");
+    let secrets = crate::health::secrets(&req.config);
+    let secrets: Vec<&str> = secrets.iter().map(String::as_str).collect();
+    let root = req.config.local_dir(&st.cfg.local_base).ok().flatten();
+    // Read only: this config isn't saved yet, so nothing is written to it.
+    let p = strata_storage::probe::probe(&op, root.as_deref(), false, &secrets).await;
+    Ok(Json(match p.outcome {
+        strata_storage::probe::Outcome::Ok => json!({ "ok": true, "error": null, "reason": null }),
+        strata_storage::probe::Outcome::Down(f) | strata_storage::probe::Outcome::ReadOnly(f) => {
+            json!({
+                "ok": false,
+                "reason": f.reason.as_str(),
+                // The backend's own message names hosts: admins only.
+                "error": if u.is_admin { Some(f.detail) } else { None },
+            })
         }
-        let _ = store_probe(st, id, &res).await;
-    }
+    }))
 }

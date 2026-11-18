@@ -26,6 +26,9 @@ pub enum ApiError {
     /// A precondition (header) the write needs is missing; says which.
     #[error("{0}")]
     PreconditionRequired(&'static str),
+    /// The storage behind this path is offline (see the health probes).
+    #[error("{0}")]
+    Unavailable(String),
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
 }
@@ -78,6 +81,7 @@ impl IntoResponse for ApiError {
             ApiError::RangeNotSatisfiable => StatusCode::RANGE_NOT_SATISFIABLE,
             ApiError::PreconditionFailed(_) => StatusCode::PRECONDITION_FAILED,
             ApiError::PreconditionRequired(_) => StatusCode::PRECONDITION_REQUIRED,
+            ApiError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             ApiError::Internal(e) => {
                 tracing::error!("internal error: {e:#}");
                 StatusCode::INTERNAL_SERVER_ERROR

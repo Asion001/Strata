@@ -12,6 +12,16 @@ use serde::{Deserialize, Serialize};
 /// Folder inside each local connection used for atomic writes; never listed.
 pub const ATOMIC_TMP_DIR: &str = ".strata-tmp";
 
+/// Folder at a connection's root reserved for health probes (see `probe`).
+/// Nothing else is ever written there and it is hidden from listings.
+pub const PROBE_DIR: &str = ".strata-probe";
+
+/// Is a `/`-separated path (from the connection's root) inside the probe
+/// folder?
+pub fn is_probe_path(path: &str) -> bool {
+    path.trim_start_matches('/').split('/').next() == Some(PROBE_DIR)
+}
+
 /// Does a `/`-separated path contain the reserved atomic-write folder?
 pub fn has_reserved_component(path: &str) -> bool {
     path.split('/').any(|c| c == ATOMIC_TMP_DIR)
@@ -140,8 +150,12 @@ impl ConnectionConfig {
         if rel.components().any(|c| !matches!(c, Component::Normal(_))) {
             bail!("local path must stay inside the storage base");
         }
-        if has_reserved_component(&path.replace('\\', "/")) {
+        let slashed = path.replace('\\', "/");
+        if has_reserved_component(&slashed) {
             bail!("{ATOMIC_TMP_DIR} is reserved");
+        }
+        if slashed.split('/').any(|c| c == PROBE_DIR) {
+            bail!("{PROBE_DIR} is reserved");
         }
         Ok(Some(local_base.join(rel)))
     }
@@ -219,7 +233,11 @@ impl ConnectionConfig {
 /// The canonical root folder of a remote (S3/FTP) connection: the one value
 /// both `operator` and `location` use.
 fn remote_root(root: &Option<String>) -> Result<String> {
-    canonical_folder(root.as_deref().unwrap_or(""))
+    let r = canonical_folder(root.as_deref().unwrap_or(""))?;
+    if r.split('/').any(|c| c == PROBE_DIR) {
+        bail!("{PROBE_DIR} is reserved");
+    }
+    Ok(r)
 }
 
 /// The one canonical form of a folder inside a storage, for every backend:
@@ -246,97 +264,6 @@ fn endpoint_host(url: &str, default_ports: &[u16]) -> String {
         Some((h, p)) if p.parse::<u16>().is_ok_and(|p| default_ports.contains(&p)) => h.to_string(),
         _ => host,
     }
-}
-
-/// Native snapshot support a backend offers (used from phase 2 on).
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum SnapshotKind {
-    #[default]
-    None,
-    Btrfs,
-    Zfs,
-    S3Versioning,
-    Smb,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub struct Capabilities {
-    pub snapshots: SnapshotKind,
-    /// Whether Strata can create snapshots itself (vs. only read existing ones).
-    pub snapshots_create: bool,
-    pub rename: bool,
-    pub range_read: bool,
-    /// Filesystem type name for local connections (e.g. "ext4", "btrfs").
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fs_type: Option<String>,
-}
-
-impl Capabilities {
-    /// Detect what a connection can do. For local folders this inspects the
-    /// filesystem with statfs(2) to spot btrfs and ZFS.
-    pub fn detect(cfg: &ConnectionConfig, op: &Operator, local_base: &Path) -> Self {
-        let cap = op.info().capability();
-        let mut c = Capabilities {
-            rename: cap.rename,
-            range_read: cap.read,
-            ..Default::default()
-        };
-        if let Ok(Some(dir)) = cfg.local_dir(local_base) {
-            let fs = fs_type(&dir);
-            c.snapshots = match fs.as_deref() {
-                Some("btrfs") => SnapshotKind::Btrfs,
-                Some("zfs") => SnapshotKind::Zfs,
-                _ => SnapshotKind::None,
-            };
-            // Creating btrfs/ZFS snapshots needs privileges we do not assume yet.
-            c.snapshots_create = false;
-            c.fs_type = fs;
-        }
-        c
-    }
-}
-
-#[cfg(target_os = "linux")]
-pub fn fs_type(dir: &Path) -> Option<String> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-    let c = CString::new(dir.as_os_str().as_bytes()).ok()?;
-    let mut s: libc::statfs = unsafe { std::mem::zeroed() };
-    if unsafe { libc::statfs(c.as_ptr(), &mut s) } != 0 {
-        return None;
-    }
-    #[allow(clippy::unnecessary_cast)]
-    Some(
-        match s.f_type as i64 {
-            0x9123_683E => "btrfs",
-            0x2FC1_2FC1 => "zfs",
-            0xEF53 => "ext4",
-            0x5846_5342 => "xfs",
-            0x0102_1994 => "tmpfs",
-            0x794c_7630 => "overlayfs",
-            other => return Some(format!("0x{other:x}")),
-        }
-        .to_string(),
-    )
-}
-
-#[cfg(target_os = "macos")]
-pub fn fs_type(dir: &Path) -> Option<String> {
-    use std::ffi::{CStr, CString};
-    use std::os::unix::ffi::OsStrExt;
-    let c = CString::new(dir.as_os_str().as_bytes()).ok()?;
-    let mut s: libc::statfs = unsafe { std::mem::zeroed() };
-    if unsafe { libc::statfs(c.as_ptr(), &mut s) } != 0 {
-        return None;
-    }
-    let name = unsafe { CStr::from_ptr(s.f_fstypename.as_ptr()) };
-    Some(name.to_string_lossy().into_owned())
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub fn fs_type(_dir: &Path) -> Option<String> {
-    None
 }
 
 #[cfg(test)]

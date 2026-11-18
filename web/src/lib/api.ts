@@ -36,6 +36,8 @@ export interface Entry {
   mtime: string;
   etag: string | null;
   mount_id: number | null;
+  /** A mount point whose storage is offline. */
+  offline?: boolean;
 }
 
 export interface User {

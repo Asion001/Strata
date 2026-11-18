@@ -4,8 +4,31 @@
 
   type Conn = {
     id: number; name: string; kind: string; config: Record<string, any>; capabilities: Record<string, any>;
-    is_default: boolean; health: string; health_error: string | null; health_checked_at: string | null;
+    is_default: boolean; health: string; health_reason: string | null; health_error: string | null;
+    health_latency_ms: number | null; health_checked_at: string | null;
   };
+  // Snapshot support, from either the current or the older capability shape.
+  const snapshots = (c: Conn): { kind: string; create: boolean } | null => {
+    const s = c.capabilities?.snapshots;
+    const kind = typeof s === 'string' ? s : s?.kind;
+    return kind && kind !== 'none' ? { kind, create: typeof s === 'object' ? !!s.create : false } : null;
+  };
+  const healthClass = (h: string) => (h === 'ok' ? 'ok' : h === 'offline' ? 'err' : h === 'degraded' ? 'warn' : '');
+
+  // Live: health changes are pushed over the websocket.
+  $effect(() => {
+    let ws: WebSocket | null = null;
+    let closed = false;
+    const connect = () => {
+      ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/ws`);
+      ws.onmessage = (m) => {
+        try { if ('health' in JSON.parse(m.data)) load(); } catch {}
+      };
+      ws.onclose = () => { if (!closed) setTimeout(connect, 3000); };
+    };
+    connect();
+    return () => { closed = true; ws?.close(); };
+  });
   let conns = $state<Conn[]>([]);
   let error = $state('');
   let editing = $state<{ id?: number; name: string; config: Record<string, any> } | null>(null);
@@ -47,7 +70,7 @@
     testResult = 'testing…';
     try {
       const r = await api('POST', '/api/connections/test', { config: clean(editing.config), id: editing.id });
-      testResult = r.ok ? '✓ reachable' : `✗ ${r.error}`;
+      testResult = r.ok ? '✓ reachable' : `✗ ${r.error ?? r.reason ?? 'failed'}`;
     } catch (err) { testResult = `✗ ${(err as Error).message}`; }
   }
   async function probe(c: Conn) { await api('POST', `/api/connections/${c.id}/probe`); await load(); }
@@ -73,13 +96,16 @@
         <div class="grow">
           <b>{c.name}</b> <span class="badge">{c.kind}</span>
           {#if c.is_default}<span class="badge">server default</span>{/if}
-          <span class="badge {c.health === 'ok' ? 'ok' : c.health === 'error' ? 'err' : ''}">{c.health}</span>
-          {#if c.capabilities?.snapshots && c.capabilities.snapshots !== 'none'}<span class="badge">snapshots: {c.capabilities.snapshots}</span>{/if}
+          <span class="badge {healthClass(c.health)}" title={c.health_checked_at ? `checked ${new Date(c.health_checked_at).toLocaleString()}` : 'not checked yet'}>{c.health}</span>
+          {#if c.health_latency_ms != null && c.health !== 'offline'}<span class="muted small-inline">{c.health_latency_ms} ms</span>{/if}
+          {#if snapshots(c)}{@const s = snapshots(c)!}<span class="badge">snapshots: {s.kind}{s.create ? '' : ' (read-only)'}</span>{/if}
           <div class="muted small">
             {c.kind === 'local' ? `/${c.config.path}` : c.kind === 's3' ? `${c.config.endpoint ?? 'aws'} · ${c.config.bucket}${c.config.root ?? ''}` : c.config.endpoint}
             {#if c.capabilities?.fs_type} · {c.capabilities.fs_type}{/if}
           </div>
-          {#if c.health_error}<div class="error small">{c.health_error}</div>{/if}
+          {#if c.health !== 'ok' && (c.health_reason || c.health_error)}
+            <div class="error small">{c.health_reason ?? ''}{#if c.health_error}<span class="detail">: {c.health_error}</span>{/if}</div>
+          {/if}
         </div>
         <button onclick={() => probe(c)}>Check</button>
         <button onclick={() => { testResult = ''; editing = { id: c.id, name: c.name, config: { ...blank(c.kind), ...Object.fromEntries(Object.entries(c.config).map(([k, v]) => [k, v ?? ''])) } }; }}>Edit</button>
@@ -115,6 +141,9 @@
 
 <style>
   .small { font-size: .85em; margin-top: 4px; }
+  .small-inline { font-size: .85em; }
+  .detail { word-break: break-word; }
+  :global(.badge.warn) { background: #fef3c7; color: #92400e; }
   .modal-bg { position: fixed; inset: 0; background: rgb(0 0 0 / .4); display: grid; place-items: center; z-index: 30; padding: 16px; }
   .modal { width: min(480px, 100%); max-height: 90dvh; overflow: auto; }
   h2 { margin: 0; }

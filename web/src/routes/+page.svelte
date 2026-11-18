@@ -11,7 +11,7 @@
 
   let path = $derived(page.url.searchParams.get('p') ?? '');
   let entries = $state<Entry[]>([]);
-  let mount = $state<{ id: number; mode: string; connection_name: string; path: string } | null>(null);
+  let mount = $state<{ id: number; mode: string; connection_name: string; path: string; offline?: boolean } | null>(null);
   let editing = $state<string | null>(null);
   let loading = $state(false);
   let error = $state('');
@@ -185,19 +185,22 @@
   {:else if error}
     <div class="pad error">{error}</div>
   {:else}
+    {#if mount?.offline}
+      <div class="pad offline-note" role="status">This storage is offline. Its files can't be opened or changed until it's back.</div>
+    {/if}
     <div class="list">
       {#if !loading && entries.length === 0}
         <div class="empty muted">This folder is empty. Drop files here or press Upload.</div>
       {/if}
       <VirtualList items={entries} rowHeight={56}>
         {#snippet row(e: Entry)}
-          <div class="entry" role="button" tabindex="0" onclick={() => open(e)} onkeydown={(k) => k.key === 'Enter' && open(e)}>
+          <div class="entry" class:offline={e.offline} role="button" tabindex="0" onclick={() => open(e)} onkeydown={(k) => k.key === 'Enter' && open(e)}>
             <span class="ico">
               {#if !e.is_dir && isImage(e.name)}
                 <img loading="lazy" src={thumbUrl(join(path, e.name), e.etag)} alt="" />
               {:else}{icon(e)}{/if}
             </span>
-            <span class="name">{e.name}{#if e.mount_id}<small class="muted">mount</small>{/if}</span>
+            <span class="name">{e.name}{#if e.mount_id}<small class="muted">{e.offline ? 'mount · offline' : 'mount'}</small>{/if}</span>
             <span class="meta">{e.is_dir ? '' : bytes(e.size)}</span>
             <span class="meta date">{when(e.mtime)}</span>
             <button class="more" aria-label="Actions" onclick={(ev) => { ev.stopPropagation(); menu = e; }}>⋯</button>
@@ -276,6 +279,8 @@
   .empty { position: absolute; inset: 40px 0 auto; text-align: center; }
   .entry { display: flex; align-items: center; gap: 12px; height: 56px; padding: 0 16px; border-bottom: 1px solid var(--border); cursor: pointer; color: var(--text); }
   .entry:hover { background: var(--hover); }
+  .entry.offline { opacity: .5; }
+  .offline-note { color: var(--muted); border-bottom: 1px solid var(--border); }
   .ico { width: 36px; height: 36px; display: grid; place-items: center; font-size: 22px; flex: none; }
   .ico img { width: 36px; height: 36px; object-fit: cover; border-radius: 6px; }
   .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: flex; flex-direction: column; }

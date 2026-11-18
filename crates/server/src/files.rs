@@ -36,7 +36,7 @@ pub async fn list(
     Ok(Json(json!({
         "path": path,
         "mount": { "id": m.id, "path": m.path, "mode": m.mode, "connection_name": m.connection_name,
-                   "connection_kind": m.connection_kind },
+                   "connection_kind": m.connection_kind, "offline": st.is_offline(m.connection_id) },
         "entries": entries,
     })))
 }
