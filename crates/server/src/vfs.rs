@@ -123,16 +123,18 @@ impl VolumeLock {
 
 /// A raw local mount never exposes `.strata-tmp` folders (where atomic writes
 /// are staged), at any depth; no local connection or mount may point into
-/// one either. No raw mount exposes the health probes' `.strata-probe`
-/// folder at a connection's root. The server's own state lives outside the
+/// one either. No raw mount exposes a `.strata-probe` folder (the health
+/// probes' folder, at any connection's root). The server's own state lives outside the
 /// storage base.
 pub fn is_reserved(m: &Mount, rel: &str) -> bool {
     if m.is_hashed() {
         return false;
     }
     let full = paths::join(&m.base_path, rel);
-    // The health probes' folder at a connection's root, on any backend.
-    strata_storage::backend::is_probe_path(&full)
+    // The health probes' folder, on any backend and at any depth (another
+    // connection's root, with its marker, can be inside this one).
+    full.split('/')
+        .any(|c| c == strata_storage::backend::PROBE_DIR)
         || (m.connection_kind == "local" && strata_storage::backend::has_reserved_component(&full))
 }
 

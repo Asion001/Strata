@@ -45,7 +45,7 @@ pub struct Inner {
     /// One health probe per connection at a time.
     pub probe_locks: DashMap<i64, Arc<tokio::sync::Mutex<()>>>,
     /// A local connection's folder check still running (see `health`).
-    pub root_checks: DashMap<i64, Arc<std::sync::atomic::AtomicBool>>,
+    pub root_checks: DashMap<i64, Arc<std::sync::atomic::AtomicUsize>>,
     /// Local connections' folders, checked before every use (see `operator`).
     pub local_roots: DashMap<i64, LocalRoot>,
     /// user id -> that user's mounts, longest path first
@@ -246,6 +246,25 @@ impl LocalRoot {
 }
 
 impl AppState {
+    /// Write a local connection's marker into its folder (just created or
+    /// confirmed) and record it.
+    pub async fn mark_root(&self, connection_id: i64, dir: PathBuf) -> ApiResult<()> {
+        let m = LocalRoot::marker_path(&dir, connection_id);
+        tokio::task::spawn_blocking(move || {
+            std::fs::create_dir_all(m.parent().unwrap())?;
+            std::fs::write(&m, b"strata connection folder marker\n")
+        })
+        .await
+        .map_err(|e| ApiError::Internal(e.into()))?
+        .map_err(|e| ApiError::Internal(e.into()))?;
+        sqlx::query("UPDATE connections SET root_marker = TRUE WHERE id = $1")
+            .bind(connection_id)
+            .execute(&self.db)
+            .await?;
+        self.local_roots.remove(&connection_id);
+        Ok(())
+    }
+
     /// A local connection's folder and marker, if it is local.
     pub async fn local_root(
         &self,
@@ -265,28 +284,32 @@ impl AppState {
     }
 
     /// Is a local connection's folder there (and the right one)? Checked off
-    /// the async threads within `wait`; while an earlier check of the same
-    /// connection is still stuck (a hung network mount), no new one starts,
-    /// so stuck threads can't pile up.
+    /// the async threads within `wait`. Checks of one connection run side by
+    /// side (busy folders get many requests at once), but at most
+    /// `ROOT_CHECKS` at a time: on a hung network mount, stuck threads can't
+    /// pile up beyond that, and further requests get 503 at once.
     pub async fn check_root(
         &self,
         connection_id: i64,
         root: LocalRoot,
         wait: Duration,
     ) -> Result<(), String> {
-        let busy = self
+        use std::sync::atomic::Ordering;
+        const ROOT_CHECKS: usize = 16;
+        let running = self
             .root_checks
             .entry(connection_id)
-            .or_insert_with(|| Arc::new(std::sync::atomic::AtomicBool::new(false)))
+            .or_insert_with(|| Arc::new(std::sync::atomic::AtomicUsize::new(0)))
             .clone();
         let stuck = "the connection's folder doesn't answer".to_string();
-        if busy.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        if running.fetch_add(1, Ordering::AcqRel) >= ROOT_CHECKS {
+            running.fetch_sub(1, Ordering::AcqRel);
             return Err(stuck);
         }
-        let flag = busy.clone();
+        let done = running.clone();
         let task = tokio::task::spawn_blocking(move || {
             let r = root.check();
-            flag.store(false, std::sync::atomic::Ordering::Release);
+            done.fetch_sub(1, Ordering::AcqRel);
             r
         });
         match tokio::time::timeout(wait, task).await {

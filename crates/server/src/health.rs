@@ -254,25 +254,35 @@ async fn probe_inner(st: &AppState, id: i64, counted: bool) -> anyhow::Result<Op
         )
     });
 
-    // A local folder seen healthy for the first time gets its marker (see
-    // `LocalRoot`): from now on a folder without it counts as missing.
+    // A folder from before markers existed (new and re-pointed folders get
+    // theirs when they are made) is adopted once it is seen healthy, but
+    // only if it holds something: an empty folder may be the bare mount
+    // point of a disk that isn't mounted right now, and marking that would
+    // make it "the" folder.
     if found == Found::Ok
-        && let Some(m) = marker
+        && let Some(dir) = marker
+            .as_ref()
+            .and_then(|m| m.parent())
+            .and_then(|p| p.parent())
     {
-        let written = tokio::task::spawn_blocking(move || {
-            std::fs::create_dir_all(m.parent().unwrap())?;
-            std::fs::write(&m, b"strata connection folder marker\n")
+        let d = dir.to_path_buf();
+        let has_content = tokio::task::spawn_blocking(move || {
+            std::fs::read_dir(d).is_ok_and(|mut rd| {
+                rd.any(|e| {
+                    e.is_ok_and(|e| {
+                        let n = e.file_name();
+                        n != strata_storage::backend::PROBE_DIR
+                            && n != strata_storage::backend::ATOMIC_TMP_DIR
+                    })
+                })
+            })
         })
-        .await;
-        if matches!(written, Ok(Ok(()))) {
-            sqlx::query(
-                "UPDATE connections SET root_marker = TRUE WHERE id = $1 AND config_enc = $2",
-            )
-            .bind(id)
-            .bind(&enc)
-            .execute(&st.db)
-            .await?;
-            st.local_roots.remove(&id);
+        .await
+        .unwrap_or(false);
+        if has_content {
+            if let Err(e) = st.mark_root(id, dir.to_path_buf()).await {
+                tracing::warn!("connection {id}: can't write its folder marker: {e}");
+            }
             st.forget_operator(id);
         }
     }

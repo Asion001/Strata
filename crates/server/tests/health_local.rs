@@ -180,3 +180,87 @@ async fn manual_checks_never_take_a_connection_offline() {
     assert_eq!(v["health"], "degraded", "{v}");
     assert!(!t.st.is_offline(id));
 }
+
+#[tokio::test]
+async fn busy_folders_repoints_and_nested_markers() {
+    let Some(t) = app().await else { return };
+    let c = t
+        .ok(
+            "POST",
+            "/api/connections",
+            json!({"name": "disk", "config": {"kind": "local", "path": "a"}}),
+        )
+        .await;
+    let id = c["id"].as_i64().unwrap();
+    t.ok(
+        "POST",
+        "/api/mounts",
+        json!({"path": "disk", "connection_id": id, "base_path": "", "mode": "raw"}),
+    )
+    .await;
+    t.upload("disk/f.txt", b"one").await;
+
+    // Many requests at once on one folder: none is refused.
+    let reqs = (0..40).map(|_| async {
+        t.raw(
+            "GET",
+            &format!("/api/files/content?path={}", enc("disk/f.txt")),
+            axum::body::Body::empty(),
+            &[],
+        )
+        .await
+        .0
+    });
+    let codes = futures::future::join_all(reqs).await;
+    assert!(codes.iter().all(|c| *c == StatusCode::OK), "{codes:?}");
+
+    // Re-pointed to another folder: its own marker, healthy.
+    let v = t
+        .ok(
+            "PUT",
+            &format!("/api/connections/{id}"),
+            json!({"name": "disk", "config": {"kind": "local", "path": "x/b"}}),
+        )
+        .await;
+    assert_eq!(v["health"], "ok", "{v}");
+    health::probe_one(&t.st, id, true, true).await;
+    let (_, v) = t.get(&format!("/api/connections/{id}")).await;
+    assert_eq!(v["health"], "ok", "{v}");
+    t.upload("disk/g.txt", b"two").await;
+    assert!(t.st.cfg.local_base.join("x/b/g.txt").exists());
+
+    // A connection inside another one's folder: its marker can't be reached
+    // (or removed) through the outer one's raw mount.
+    let outer = t
+        .ok(
+            "POST",
+            "/api/connections",
+            json!({"name": "outer", "config": {"kind": "local", "path": "x"}}),
+        )
+        .await;
+    t.ok(
+        "POST",
+        "/api/mounts",
+        json!({"path": "outer", "connection_id": outer["id"], "base_path": "", "mode": "raw"}),
+    )
+    .await;
+    assert!(
+        !t.names("outer/b")
+            .await
+            .contains(&".strata-probe".to_string())
+    );
+    let (s, _) = t
+        .json(
+            "POST",
+            "/api/files/delete",
+            json!({"paths": ["outer/b/.strata-probe"]}),
+        )
+        .await;
+    assert_ne!(s, StatusCode::OK);
+    assert!(
+        t.st.cfg
+            .local_base
+            .join(format!("x/b/.strata-probe/conn-{id}"))
+            .exists()
+    );
+}

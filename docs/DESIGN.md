@@ -49,9 +49,10 @@ at a time.
   dropped.
 * **Local folders.** A local connection's folder is never created again
   once it exists (OpenDAL would, so no operator is built for a missing
-  one). The first probe that finds the folder healthy writes a marker,
-  `.strata-probe/conn-<id>`; from then on a folder without the marker
-  counts as missing. An unmounted disk leaves its empty mount point behind,
+  one). Its marker, `.strata-probe/conn-<id>`, is written when the folder
+  is made (a folder from before markers existed is adopted by the first
+  healthy probe, if it isn't empty). From then on a folder without the
+  marker counts as missing. An unmounted disk leaves its empty mount point behind,
   which is a folder, but not this one. The folder and marker are checked
   before every use, off the async threads and with a time limit, and a
   missing one gets 503 at once rather than only after three probes.
@@ -60,9 +61,9 @@ at a time.
   interrupted probe left behind are swept by later probes once they are ten
   minutes old. Versioned buckets get no write test, since a delete there
   would leave versions behind.
-* **Reserved folder.** `.strata-probe` is reserved: hidden from raw
-  listings, not writable through mounts, and refused in connection and
-  mount paths.
+* **Reserved folder.** `.strata-probe` is reserved at any depth: hidden
+  from raw listings, not reachable through mounts, and refused in
+  connection and mount paths.
 * **States.**
   * `ok`: everything worked.
   * `degraded`: the write test failed, or reads failed fewer than three

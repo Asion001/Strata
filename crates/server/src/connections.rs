@@ -222,6 +222,10 @@ pub async fn create(
     .bind(sfolder)
     .fetch_one(&st.db)
     .await?;
+    // A local folder gets its marker now (see `state::LocalRoot`).
+    if let Some(dir) = req.config.local_dir(&st.cfg.local_base).ok().flatten() {
+        st.mark_root(id, dir).await?;
+    }
     crate::health::probe_soon(&st, id).await;
     get_view(&st, &u, id).await.map(Json)
 }
@@ -313,6 +317,8 @@ pub async fn update(
         // capabilities come from the probe below.
         "UPDATE connections SET name = $2, config_enc = $3, storage_id = $4, storage_folder = $5,
                 health_failures = CASE WHEN $6 THEN 0 ELSE health_failures END,
+                health = CASE WHEN $6 THEN 'unknown' ELSE health END,
+                root_marker = CASE WHEN $6 THEN FALSE ELSE root_marker END,
                 capabilities = CASE WHEN $6 THEN '{}'::jsonb ELSE capabilities END
          WHERE id = $1",
     )
@@ -327,6 +333,15 @@ pub async fn update(
     tx.commit().await?;
     drop(layout);
     st.forget_operator(id);
+    if repointed {
+        // A new target starts over: not offline, a fresh failure count, and
+        // (local) its own folder marker.
+        st.offline.remove(&id);
+        st.local_roots.remove(&id);
+        if let Some(dir) = req.config.local_dir(&st.cfg.local_base).ok().flatten() {
+            st.mark_root(id, dir).await?;
+        }
+    }
     // A re-pointed connection is probed again at once: it may come back
     // online, and goes offline only after three failed probes as usual.
     crate::health::probe_soon(&st, id).await;
@@ -407,11 +422,20 @@ pub async fn test(
         req.config.merge_secrets(&st.connection_config(id).await?);
     }
     // A new local folder is made when the connection is saved; testing
-    // must not make it (or fail because it isn't there yet).
+    // must not make it (or fail because it isn't there yet). An existing
+    // connection's unchanged folder isn't made by saving, so it is tested.
+    let unchanged = match req.id {
+        Some(id) => st
+            .connection_config(id)
+            .await
+            .is_ok_and(|c| c == req.config),
+        None => false,
+    };
     if let Some(dir) = req
         .config
         .local_dir(&st.cfg.local_base)
         .map_err(|e| bad(format!("invalid config: {e}")))?
+        && !unchanged
         && !dir.exists()
     {
         return Ok(Json(

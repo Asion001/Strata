@@ -16,12 +16,6 @@ pub const ATOMIC_TMP_DIR: &str = ".strata-tmp";
 /// Nothing else is ever written there and it is hidden from listings.
 pub const PROBE_DIR: &str = ".strata-probe";
 
-/// Is a `/`-separated path (from the connection's root) inside the probe
-/// folder?
-pub fn is_probe_path(path: &str) -> bool {
-    path.trim_start_matches('/').split('/').next() == Some(PROBE_DIR)
-}
-
 /// Does a `/`-separated path contain the reserved atomic-write folder?
 pub fn has_reserved_component(path: &str) -> bool {
     path.split('/').any(|c| c == ATOMIC_TMP_DIR)

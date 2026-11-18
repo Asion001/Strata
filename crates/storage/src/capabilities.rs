@@ -377,12 +377,19 @@ async fn s3_versioning(cfg: &ConnectionConfig) -> Versioning {
     };
     let now = chrono::Utc::now();
     let headers = crate::sigv4::sign_get(&url, region, access_key_id, secret_access_key, now);
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
+    // One client for all probes (TLS setup once).
+    static CLIENT: std::sync::OnceLock<Option<reqwest::Client>> = std::sync::OnceLock::new();
+    let client = match CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build()
+                .ok()
+        })
+        .clone()
     {
-        Ok(c) => c,
-        Err(_) => return Versioning::Unknown,
+        Some(c) => c,
+        None => return Versioning::Unknown,
     };
     let mut req = client.get(url);
     for (k, v) in headers {

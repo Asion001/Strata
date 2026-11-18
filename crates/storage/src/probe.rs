@@ -176,9 +176,18 @@ async fn write_test(op: &Operator) -> Result<(), StepError> {
     // Always delete, whatever happened above (a timed-out write may still
     // have landed).
     let del = step(async { Ok(op.delete(&path).await?) }).await;
-    // An empty folder left on a filesystem goes too (not an error if it
-    // isn't empty or doesn't exist).
-    let _ = step(async { Ok(op.delete(&dir).await?) }).await;
+    // The folder goes too when nothing else is in it (on a filesystem; S3
+    // has no folders). Checked first: deleting a non-empty folder fails and
+    // would only be retried.
+    let empty = step(async {
+        let l = op.list(&dir).await?;
+        Ok(l.iter().all(|e| e.path() == dir))
+    })
+    .await
+    .unwrap_or(false);
+    if empty {
+        let _ = step(async { Ok(op.delete(&dir).await?) }).await;
+    }
     res.and(del)
 }
 

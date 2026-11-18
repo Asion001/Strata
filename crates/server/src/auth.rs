@@ -331,7 +331,7 @@ async fn insert_local_connection(
     let caps = serde_json::json!({});
     let enc = st.encrypt_config(&cfg)?;
     let (storage_id, storage_folder) = cfg.location(&st.cfg.local_base)?;
-    Ok(sqlx::query_scalar(
+    let id: i64 = sqlx::query_scalar(
         "INSERT INTO connections (owner_id, name, kind, config_enc, capabilities, is_default, storage_id, storage_folder)
          VALUES ($1, $2, 'local', $3, $4, $5, $6, $7) RETURNING id",
     )
@@ -343,7 +343,19 @@ async fn insert_local_connection(
     .bind(storage_id)
     .bind(storage_folder)
     .fetch_one(&mut **tx)
-    .await?)
+    .await?;
+    // The folder's marker (see `state::LocalRoot`), written with the row.
+    if let Some(dir) = cfg.local_dir(&st.cfg.local_base)? {
+        let m = crate::state::LocalRoot::marker_path(&dir, id);
+        std::fs::create_dir_all(m.parent().unwrap()).map_err(|e| ApiError::Internal(e.into()))?;
+        std::fs::write(&m, b"strata connection folder marker\n")
+            .map_err(|e| ApiError::Internal(e.into()))?;
+        sqlx::query("UPDATE connections SET root_marker = TRUE WHERE id = $1")
+            .bind(id)
+            .execute(&mut **tx)
+            .await?;
+    }
+    Ok(id)
 }
 
 /// Create the first admin from STRATA_ADMIN_USER / STRATA_ADMIN_PASSWORD when
