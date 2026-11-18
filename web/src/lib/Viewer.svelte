@@ -2,6 +2,16 @@
   // Full-screen preview: image gallery (arrows, swipe, zoom), native video/audio, text.
   import { isAudio, isImage, isPdf, isSvg, isTextName, isVideo, bytes } from './format';
   import { staleApp } from './lazy';
+  import { cn } from './utils';
+  import Button, { buttonClass } from './components/ui/button/button.svelte';
+  import XIcon from '@lucide/svelte/icons/x';
+  import DownloadIcon from '@lucide/svelte/icons/download';
+  import PencilIcon from '@lucide/svelte/icons/pencil';
+  import ChevronLeftIcon from '@lucide/svelte/icons/chevron-left';
+  import ChevronRightIcon from '@lucide/svelte/icons/chevron-right';
+
+  // Light-on-dark buttons for the viewer's black backdrop.
+  const dark = 'text-white/90 hover:bg-white/15 hover:text-white focus-visible:ring-white/40';
 
   interface Item { name: string; size: number; src: string; download: string }
   let {
@@ -90,11 +100,15 @@
   ontouchstart={(e) => (touchX = e.touches[0].clientX)}
   ontouchend={(e) => { if (zoom === 1 && !isPdf(item.name)) { const dx = e.changedTouches[0].clientX - touchX; if (Math.abs(dx) > 60) step(dx < 0 ? 1 : -1); } }}>
   <header>
-    <span class="name">{item.name}</span>
-    <span class="muted">{bytes(item.size)} · {index + 1}/{items.length}</span>
-    {#if onedit && isTextName(item.name)}<button onclick={() => onedit(index)}>Edit</button>{/if}
-    <a class="btn" href={item.download}>Download</a>
-    <button onclick={onclose} aria-label="Close">✕</button>
+    <div class="min-w-0 flex-1">
+      <div class="truncate text-sm font-semibold">{item.name}</div>
+      <div class="text-xs text-white/60">{bytes(item.size)} · {index + 1} of {items.length}</div>
+    </div>
+    {#if onedit && isTextName(item.name)}
+      <Button variant="ghost" size="sm" class={dark} onclick={() => onedit(index)}><PencilIcon /><span class="max-sm:sr-only">Edit</span></Button>
+    {/if}
+    <a data-slot="button" class={cn(buttonClass('ghost', 'sm'), dark)} href={item.download}><DownloadIcon /><span class="max-sm:sr-only">Download</span></a>
+    <Button variant="ghost" size="icon" class={dark} onclick={onclose} aria-label="Close"><XIcon /></Button>
   </header>
   <div class="stage">
     {#if isImage(item.name) || isSvg(item.name)}
@@ -115,20 +129,18 @@
       <div class="none">No preview for this file. <a href={item.download}>Download it</a>.</div>
     {/if}
   </div>
-  {#if index > 0}<button class="nav prev" onclick={() => step(-1)} aria-label="Previous">‹</button>{/if}
-  {#if index < items.length - 1}<button class="nav next" onclick={() => step(1)} aria-label="Next">›</button>{/if}
+  {#if index > 0}<Button variant="ghost" size="icon" class={cn(dark, 'nav prev size-12 rounded-full bg-black/40')} onclick={() => step(-1)} aria-label="Previous"><ChevronLeftIcon class="size-7" /></Button>{/if}
+  {#if index < items.length - 1}<Button variant="ghost" size="icon" class={cn(dark, 'nav next size-12 rounded-full bg-black/40')} onclick={() => step(1)} aria-label="Next"><ChevronRightIcon class="size-7" /></Button>{/if}
 </div>
 
 <style>
-  .viewer { position: fixed; inset: 0; background: rgb(0 0 0 / .92); z-index: 50; display: flex; flex-direction: column; color: #e5e7eb; }
-  header { display: flex; gap: 12px; align-items: center; padding: 10px 14px; padding-top: max(10px, env(safe-area-inset-top)); }
-  .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
-  header button, .btn { background: rgb(255 255 255 / .1); color: inherit; border: 0; padding: 6px 12px; border-radius: 8px; }
+  .viewer { position: fixed; inset: 0; background: #0a0a0a; z-index: 50; display: flex; flex-direction: column; color: #e5e7eb; }
+  header { display: flex; gap: 4px; align-items: center; padding: 8px 8px 8px 16px; padding-top: max(8px, env(safe-area-inset-top)); }
   .stage { flex: 1; min-height: 0; display: grid; place-items: center; overflow: auto; padding: 8px; position: relative; }
   img, video { max-width: 100%; max-height: 100%; object-fit: contain; transition: transform .15s; touch-action: pinch-zoom; }
   pre { background: #0b1120; color: #e5e7eb; padding: 16px; border-radius: 8px; width: min(1000px, 100%); height: 100%; overflow: auto; margin: 0; white-space: pre-wrap; word-break: break-word; }
   .none { color: #94a3b8; }
-  .nav { position: absolute; top: 50%; transform: translateY(-50%); font-size: 36px; background: rgb(255 255 255 / .08); border: 0; color: #fff; width: 48px; height: 72px; }
-  .prev { left: 8px; } .next { right: 8px; }
-  @media (hover: none) { .nav { display: none; } }
+  .viewer :global(.nav) { position: absolute; top: 50%; transform: translateY(-50%); }
+  .viewer :global(.prev) { left: 12px; } .viewer :global(.next) { right: 12px; }
+  @media (hover: none) { .viewer :global(.nav) { display: none; } }
 </style>

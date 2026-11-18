@@ -40,7 +40,7 @@
   <h1 class={cn(h1Class, 'mb-6')}>Users</h1>
   <ul class={listClass}>
     {#each users as u (u.id)}
-      <li class={rowClass}>
+      <li class={cn(rowClass, 'flex-wrap')}>
         <span class="grid size-8 shrink-0 place-items-center rounded-full bg-accent text-xs font-semibold uppercase">{u.username.slice(0, 2)}</span>
         <span class="min-w-0 flex-1 truncate font-medium">{u.username}</span>
         {#if u.is_admin}<span class={badgeClass}>admin</span>{/if}
