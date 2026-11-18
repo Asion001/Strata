@@ -324,6 +324,7 @@ async fn insert_local_connection(
     let cfg = ConnectionConfig::Local {
         path: path.to_string(),
     };
+    cfg.create_local_root(&st.cfg.local_base)?;
     let op = cfg.operator(&st.cfg.local_base)?;
     let caps = Capabilities::detect(&cfg, &op, &st.cfg.local_base).await;
     let enc = st.encrypt_config(&cfg)?;

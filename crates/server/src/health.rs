@@ -12,12 +12,14 @@
 //! mounts still list from the database.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use rand::Rng;
 use strata_storage::probe::{self, Outcome, Reason};
-use strata_storage::{Capabilities, ConnectionConfig, SnapshotKind};
+use strata_storage::{Capabilities, ConnectionConfig};
 
 use crate::state::{AppState, ChangeEvent};
 
@@ -106,9 +108,10 @@ pub fn secrets(cfg: &ConnectionConfig) -> Vec<String> {
     }
 }
 
-/// Probe one connection now and record the result. One probe per
-/// connection at a time: `wait` false skips if one is running.
-pub async fn probe_one(st: &AppState, id: i64, wait: bool) {
+/// Probe one connection now and record the result; returns the failed
+/// reads in a row afterwards (None if skipped or it failed to record). One
+/// probe per connection at a time: `wait` false skips if one is running.
+pub async fn probe_one(st: &AppState, id: i64, wait: bool) -> Option<i32> {
     let lock = st
         .probe_locks
         .entry(id)
@@ -119,22 +122,62 @@ pub async fn probe_one(st: &AppState, id: i64, wait: bool) {
     } else {
         match lock.try_lock() {
             Ok(g) => g,
-            Err(_) => return,
+            Err(_) => return None,
         }
     };
-    if let Err(e) = probe_inner(st, id).await {
-        tracing::warn!("probe of connection {id}: {e:#}");
+    match probe_inner(st, id).await {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::warn!("probe of connection {id}: {e:#}");
+            None
+        }
     }
 }
 
-async fn probe_inner(st: &AppState, id: i64) -> anyhow::Result<()> {
+/// Does a local connection's folder exist? Checked off the async threads
+/// with a time limit; while an earlier check is still stuck (a hung network
+/// mount), no new one is started, so stuck threads can't pile up.
+async fn local_root(st: &AppState, id: i64, dir: PathBuf) -> Result<(), probe::Failure> {
+    let busy = st
+        .root_checks
+        .entry(id)
+        .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+        .clone();
+    let stuck = || probe::Failure {
+        reason: Reason::TimedOut,
+        detail: "the connection's folder doesn't answer".into(),
+    };
+    if busy.swap(true, Ordering::AcqRel) {
+        return Err(stuck());
+    }
+    let flag = busy.clone();
+    let check = tokio::task::spawn_blocking(move || {
+        let r = std::fs::metadata(&dir).map(|m| m.is_dir());
+        flag.store(false, Ordering::Release);
+        r
+    });
+    match tokio::time::timeout(Duration::from_secs(20), check).await {
+        Err(_) => Err(stuck()),
+        Ok(Ok(Ok(true))) => Ok(()),
+        Ok(Ok(Ok(false))) => Err(probe::Failure {
+            reason: Reason::NotFound,
+            detail: "the connection's folder is not a folder".into(),
+        }),
+        Ok(_) => Err(probe::Failure {
+            reason: Reason::NotFound,
+            detail: "the connection's folder is missing".into(),
+        }),
+    }
+}
+
+async fn probe_inner(st: &AppState, id: i64) -> anyhow::Result<Option<i32>> {
     let row: Option<(Vec<u8>, String, i32)> =
         sqlx::query_as("SELECT config_enc, health, health_failures FROM connections WHERE id = $1")
             .bind(id)
             .fetch_optional(&st.db)
             .await?;
     let Some((enc, prev, failures)) = row else {
-        return Ok(()); // deleted meanwhile
+        return Ok(None); // deleted meanwhile
     };
     let prev = State::parse(&prev);
 
@@ -148,8 +191,17 @@ async fn probe_inner(st: &AppState, id: i64) -> anyhow::Result<()> {
                 detail: "the stored settings can't be read (server key?)".into(),
             }),
         ),
-        Ok(cfg) => match st.operator_unchecked(id).await {
-            Err(e) => (
+        Ok(cfg) => match async {
+            // A local folder must exist before its operator is even built.
+            if let Ok(Some(dir)) = cfg.local_dir(&st.cfg.local_base) {
+                local_root(st, id, dir).await.map_err(Err)?;
+            }
+            st.operator_unchecked(id).await.map_err(Ok)
+        }
+        .await
+        {
+            Err(Err(f)) => (Found::Down, Duration::ZERO, Some(f)),
+            Err(Ok(e)) => (
                 Found::Down,
                 Duration::ZERO,
                 Some(probe::Failure {
@@ -160,15 +212,16 @@ async fn probe_inner(st: &AppState, id: i64) -> anyhow::Result<()> {
             Ok(op) => {
                 let secrets = secrets(&cfg);
                 let secrets: Vec<&str> = secrets.iter().map(String::as_str).collect();
-                let root = cfg.local_dir(&st.cfg.local_base).ok().flatten();
-                let p = probe::probe(&op, root.as_deref(), false, &secrets).await;
+                // (A local folder was checked above.)
+                let p = probe::probe(&op, None, false, &secrets).await;
                 match p.outcome {
                     Outcome::Down(f) | Outcome::ReadOnly(f) => (Found::Down, p.latency, Some(f)),
                     Outcome::Ok => {
                         let c = Capabilities::detect(&cfg, &op, &st.cfg.local_base).await;
-                        // No write test on a versioned bucket: deleting the
-                        // probe file there would leave versions behind.
-                        let write = c.snapshots.kind != SnapshotKind::S3Versioning;
+                        // A write test only where a delete leaves nothing
+                        // behind (not on a versioned bucket, nor where that
+                        // can't be confirmed).
+                        let write = c.clean_deletes;
                         caps = Some(c);
                         if !write {
                             (Found::Ok, p.latency, None)
@@ -207,6 +260,11 @@ async fn probe_inner(st: &AppState, id: i64) -> anyhow::Result<()> {
     } else {
         st.offline.remove(&id);
     }
+    if state == State::Ok && prev != State::Ok {
+        // An operator built while the storage was away (a local folder
+        // missing its temp folder) is rebuilt.
+        st.forget_operator(id);
+    }
     if state != prev {
         match &failure {
             Some(f) => tracing::warn!(
@@ -218,18 +276,30 @@ async fn probe_inner(st: &AppState, id: i64) -> anyhow::Result<()> {
             ),
             None => tracing::info!("connection {id}: {} -> {}", prev.as_str(), state.as_str()),
         }
+        // Who hears about it: users with a mount on it, its owner, admins.
+        let audience: Vec<i64> = sqlx::query_scalar(
+            "SELECT m.owner_id FROM mounts m JOIN volumes v ON v.id = m.volume_id WHERE v.connection_id = $1
+             UNION SELECT owner_id FROM connections WHERE id = $1
+             UNION SELECT id FROM users WHERE is_admin",
+        )
+        .bind(id)
+        .fetch_all(&st.db)
+        .await
+        .unwrap_or_default();
         let _ = st.events.send(ChangeEvent {
             volume_id: None,
             user_id: None,
             connection_id: Some(id),
+            audience: Some(Arc::new(audience)),
         });
     }
-    Ok(())
+    Ok(Some(failures))
 }
 
-/// Time to a connection's next probe: the interval minus up to 10% jitter
-/// (never more, so a dead backend is offline within three intervals), and
-/// half of that while reads are failing but it isn't offline yet.
+/// Time from a probe to the connection's next one: the interval minus up to
+/// 10% jitter (never more), and half of that while reads are failing but it
+/// isn't offline yet. Computed from the probe's own result, so a backend
+/// that dies is offline within two intervals plus the probes' run time.
 pub fn delay(every: Duration, failures: i32, jitter: f64) -> Duration {
     let d = every.mul_f64(1.0 - 0.1 * jitter.clamp(0.0, 1.0));
     if (1..OFFLINE_AFTER).contains(&failures) {
@@ -243,34 +313,51 @@ pub fn delay(every: Duration, failures: i32, jitter: f64) -> Duration {
 /// most one probe per connection at a time.
 pub async fn run(st: AppState) {
     let every = Duration::from_secs(st.cfg.probe_secs);
-    let mut due: HashMap<i64, Instant> = HashMap::new();
-    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    let due: Arc<std::sync::Mutex<HashMap<i64, Instant>>> = Default::default();
+    let mut tick = tokio::time::interval(Duration::from_secs(2));
     loop {
         tick.tick().await;
-        let rows: Vec<(i64, i32)> =
-            match sqlx::query_as("SELECT id, health_failures FROM connections")
-                .fetch_all(&st.db)
-                .await
-            {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::warn!("health probes: {e}");
-                    continue;
-                }
-            };
-        due.retain(|id, _| rows.iter().any(|(r, _)| r == id));
-        let now = Instant::now();
-        for (id, failures) in rows {
-            // New connections (and all at start-up) spread over a few seconds.
-            let at = due.entry(id).or_insert_with(|| {
-                now + Duration::from_millis(rand::thread_rng().gen_range(0..5000))
-            });
-            if *at > now {
+        let ids: Vec<i64> = match sqlx::query_scalar("SELECT id FROM connections")
+            .fetch_all(&st.db)
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("health probes: {e}");
                 continue;
             }
-            *at = now + delay(every, failures, rand::thread_rng().gen_range(0.0..1.0));
-            let s = st.clone();
-            tokio::spawn(async move { probe_one(&s, id, false).await });
+        };
+        let now = Instant::now();
+        let mut start = Vec::new();
+        {
+            let mut due = due.lock().unwrap();
+            due.retain(|id, _| ids.contains(id));
+            for id in ids {
+                // New connections (and all at start-up) spread over a few seconds.
+                let at = due.entry(id).or_insert_with(|| {
+                    now + Duration::from_millis(rand::thread_rng().gen_range(0..5000))
+                });
+                if *at <= now {
+                    // Rescheduled by the probe itself, from its result.
+                    *at = now + Duration::from_secs(3600);
+                    start.push(id);
+                }
+            }
+        }
+        for id in start {
+            let (s, due) = (st.clone(), due.clone());
+            tokio::spawn(async move {
+                let next = match probe_one(&s, id, false).await {
+                    Some(failures) => {
+                        delay(every, failures, rand::thread_rng().gen_range(0.0..1.0))
+                    }
+                    // Busy (a manual probe) or not recorded: soon again.
+                    None => Duration::from_secs(5),
+                };
+                if let Some(at) = due.lock().unwrap().get_mut(&id) {
+                    *at = Instant::now() + next;
+                }
+            });
         }
     }
 }

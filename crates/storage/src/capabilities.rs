@@ -44,6 +44,23 @@ pub struct Capabilities {
     /// Filesystem type of a local connection (e.g. "ext4", "btrfs", "apfs").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fs_type: Option<String>,
+    /// Whether deleting a file leaves nothing behind (no object versions or
+    /// delete markers). False when that can't be confirmed; health probes
+    /// only write test files where it is true.
+    #[serde(skip)]
+    pub clean_deletes: bool,
+}
+
+/// A bucket's versioning state from GetBucketVersioning.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Versioning {
+    /// Never enabled: a delete removes the object for good.
+    Off,
+    Enabled,
+    /// Was enabled: deletes still leave delete markers.
+    Suspended,
+    /// The request failed (no permission, timeout).
+    Unknown,
 }
 
 impl Capabilities {
@@ -59,8 +76,9 @@ impl Capabilities {
                 // Local writes go to a temp file renamed into place.
                 c.atomic_write = true;
                 c.list_fast = true;
+                c.clean_deletes = true;
                 if let Ok(Some(dir)) = cfg.local_dir(local_base) {
-                    let fs = fs_type(&dir);
+                    let fs = fs_type_bounded(&dir).await;
                     c.snapshots = match fs.as_deref() {
                         Some("btrfs") => Snapshots {
                             kind: SnapshotKind::Btrfs,
@@ -79,14 +97,29 @@ impl Capabilities {
                 // A PUT replaces the whole object at once.
                 c.atomic_write = true;
                 c.list_fast = true;
-                if s3_versioning_enabled(cfg).await {
+                let v = s3_versioning(cfg).await;
+                if v == Versioning::Enabled {
                     c.snapshots.kind = SnapshotKind::S3Versioning;
                 }
+                c.clean_deletes = v == Versioning::Off;
             }
-            ConnectionConfig::Ftp { .. } => {}
+            ConnectionConfig::Ftp { .. } => c.clean_deletes = true,
         }
         c
     }
+}
+
+/// `fs_type` off the async threads, with a time limit (a hung network mount
+/// must not block the server).
+async fn fs_type_bounded(dir: &Path) -> Option<String> {
+    let dir = dir.to_path_buf();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::task::spawn_blocking(move || fs_type(&dir)),
+    )
+    .await
+    .ok()?
+    .ok()?
 }
 
 /// Filesystem type of a folder, from statfs(2): `f_type` on Linux (btrfs is
@@ -153,12 +186,16 @@ async fn run(cmd: &str, args: &[&std::ffi::OsStr]) -> Option<String> {
 }
 
 /// Can this process create btrfs snapshots here? Only a real one proves it:
-/// a scratch subvolume and a read-only snapshot of it, both removed again,
-/// inside the hidden probe folder.
+/// a scratch subvolume and a snapshot of it, both removed again, inside the
+/// hidden probe folder. The snapshot is writable, so an empty one can be
+/// removed with rmdir even where `btrfs subvolume delete` isn't allowed.
 async fn btrfs_can_snapshot(dir: &Path) -> bool {
     let probe = dir.join(PROBE_DIR);
-    // Leftovers of an earlier, interrupted test go first.
-    sweep_btrfs_scratch(&probe).await;
+    // Leftovers of an earlier, interrupted test go first. If one can't be
+    // removed, no new test runs (it would only add another).
+    if !sweep_btrfs_scratch(&probe).await {
+        return false;
+    }
     let made_probe_dir = !probe.exists();
     if tokio::fs::create_dir_all(&probe).await.is_err() {
         return false;
@@ -177,7 +214,6 @@ async fn btrfs_can_snapshot(dir: &Path) -> bool {
             &[
                 "subvolume".as_ref(),
                 "snapshot".as_ref(),
-                "-r".as_ref(),
                 sub.as_os_str(),
                 snap.as_os_str(),
             ],
@@ -210,15 +246,18 @@ async fn remove_subvolume(p: &PathBuf) -> bool {
     tokio::fs::remove_dir(p).await.is_ok() || !p.exists()
 }
 
-async fn sweep_btrfs_scratch(probe: &Path) {
+/// Remove scratch subvolumes earlier tests left. True when none remain.
+async fn sweep_btrfs_scratch(probe: &Path) -> bool {
     let Ok(mut rd) = tokio::fs::read_dir(probe).await else {
-        return;
+        return true; // no probe folder: nothing left over
     };
+    let mut clean = true;
     while let Ok(Some(e)) = rd.next_entry().await {
         if e.file_name().to_string_lossy().starts_with("snap-") {
-            remove_subvolume(&e.path()).await;
+            clean &= remove_subvolume(&e.path()).await;
         }
     }
+    clean
 }
 
 /// Can this process create ZFS snapshots of the dataset holding `dir`?
@@ -248,8 +287,32 @@ async fn zfs_can_snapshot(dir: &Path) -> bool {
     let Some(allow) = run("zfs", &["allow".as_ref(), ds.as_ref()]).await else {
         return false;
     };
-    let user = std::env::var("USER").unwrap_or_default();
-    zfs_allows_snapshot(&allow, &user)
+    zfs_allows_snapshot(&allow, &effective_user().unwrap_or_default())
+}
+
+/// The name of the effective user (not `$USER`, which may be unset or
+/// belong to someone else after su/sudo).
+fn effective_user() -> Option<String> {
+    let mut buf = vec![0u8; 4096];
+    let mut pw: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut out: *mut libc::passwd = std::ptr::null_mut();
+    let rc = unsafe {
+        libc::getpwuid_r(
+            libc::geteuid(),
+            &mut pw,
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+            &mut out,
+        )
+    };
+    if rc != 0 || out.is_null() {
+        return None;
+    }
+    Some(
+        unsafe { std::ffi::CStr::from_ptr(pw.pw_name) }
+            .to_string_lossy()
+            .into_owned(),
+    )
 }
 
 /// Does `zfs allow` output grant `snapshot` to `user` (or everyone)? Group
@@ -274,9 +337,8 @@ pub fn zfs_allows_snapshot(output: &str, user: &str) -> bool {
     })
 }
 
-/// GetBucketVersioning: is versioning on for the connection's bucket? Any
-/// failure (no permission, not S3) counts as no.
-async fn s3_versioning_enabled(cfg: &ConnectionConfig) -> bool {
+/// GetBucketVersioning for the connection's bucket.
+async fn s3_versioning(cfg: &ConnectionConfig) -> Versioning {
     let ConnectionConfig::S3 {
         bucket,
         region,
@@ -286,7 +348,7 @@ async fn s3_versioning_enabled(cfg: &ConnectionConfig) -> bool {
         ..
     } = cfg
     else {
-        return false;
+        return Versioning::Unknown;
     };
     let region = region
         .as_deref()
@@ -297,7 +359,7 @@ async fn s3_versioning_enabled(cfg: &ConnectionConfig) -> bool {
         None => format!("https://s3.{region}.amazonaws.com"),
     };
     let Ok(url) = reqwest::Url::parse(&format!("{base}/{bucket}?versioning")) else {
-        return false;
+        return Versioning::Unknown;
     };
     let now = chrono::Utc::now();
     let headers = crate::sigv4::sign_get(&url, region, access_key_id, secret_access_key, now);
@@ -306,29 +368,38 @@ async fn s3_versioning_enabled(cfg: &ConnectionConfig) -> bool {
         .build()
     {
         Ok(c) => c,
-        Err(_) => return false,
+        Err(_) => return Versioning::Unknown,
     };
     let mut req = client.get(url);
     for (k, v) in headers {
         req = req.header(k, v);
     }
     match req.send().await {
-        Ok(r) if r.status().is_success() => r
-            .text()
-            .await
-            .map(|t| versioning_status_enabled(&t))
-            .unwrap_or(false),
-        _ => false,
+        Ok(r) if r.status().is_success() => match r.text().await {
+            Ok(t) => versioning_status(&t),
+            Err(_) => Versioning::Unknown,
+        },
+        _ => Versioning::Unknown,
     }
 }
 
-/// `<VersioningConfiguration><Status>Enabled</Status>…`: only "Enabled"
-/// counts (a suspended or never-enabled bucket keeps no new versions).
-pub fn versioning_status_enabled(xml: &str) -> bool {
-    xml.split("<Status>")
+/// `<VersioningConfiguration><Status>Enabled</Status>…`; no Status at all
+/// means versioning was never turned on.
+pub fn versioning_status(xml: &str) -> Versioning {
+    if !xml.contains("VersioningConfiguration") {
+        return Versioning::Unknown;
+    }
+    match xml
+        .split("<Status>")
         .nth(1)
         .and_then(|s| s.split("</Status>").next())
-        .is_some_and(|s| s.trim() == "Enabled")
+        .map(str::trim)
+    {
+        None => Versioning::Off,
+        Some("Enabled") => Versioning::Enabled,
+        Some("Suspended") => Versioning::Suspended,
+        Some(_) => Versioning::Unknown,
+    }
 }
 
 #[cfg(test)]
@@ -356,15 +427,23 @@ mod tests {
     }
 
     #[test]
-    fn versioning_status() {
+    fn parses_versioning() {
         let on = r#"<?xml version="1.0"?><VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Status>Enabled</Status></VersioningConfiguration>"#;
-        assert!(versioning_status_enabled(on));
-        assert!(!versioning_status_enabled(
-            &on.replace("Enabled", "Suspended")
-        ));
-        assert!(!versioning_status_enabled(
-            r#"<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"/>"#
-        ));
+        assert_eq!(versioning_status(on), Versioning::Enabled);
+        assert_eq!(
+            versioning_status(&on.replace("Enabled", "Suspended")),
+            Versioning::Suspended
+        );
+        assert_eq!(
+            versioning_status(
+                r#"<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"/>"#
+            ),
+            Versioning::Off
+        );
+        assert_eq!(
+            versioning_status("<Error><Code>AccessDenied</Code></Error>"),
+            Versioning::Unknown
+        );
     }
 
     #[test]
@@ -380,7 +459,7 @@ mod tests {
         let cfg = ConnectionConfig::Local { path: "".into() };
         let op = cfg.operator(dir.path()).unwrap();
         let c = Capabilities::detect(&cfg, &op, dir.path()).await;
-        assert!(c.rename && c.range_read && c.atomic_write && c.list_fast);
+        assert!(c.rename && c.range_read && c.atomic_write && c.list_fast && c.clean_deletes);
         let fs = c.fs_type.clone().unwrap();
         #[cfg(target_os = "macos")]
         assert_eq!(fs, "apfs");

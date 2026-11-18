@@ -127,6 +127,7 @@ async fn insert(st: &AppState, scope: Scope, changes: &[Change]) -> ApiResult<()
         volume_id: vid,
         user_id: uid,
         connection_id: None,
+        audience: None,
     });
     Ok(())
 }
@@ -498,6 +499,7 @@ pub fn spawn_listener(st: AppState) {
                             volume_id: None,
                             user_id: None,
                             connection_id: None,
+                            audience: None,
                         });
                         backoff = std::time::Duration::from_secs(1);
                         fresh = false;
@@ -517,6 +519,7 @@ pub fn spawn_listener(st: AppState) {
                         volume_id: vid,
                         user_id: uid,
                         connection_id: v["c"].as_i64(),
+                        audience: None,
                     });
                 }
                 #[allow(unreachable_code)]
@@ -539,27 +542,6 @@ pub async fn ws(
     upgrade: WebSocketUpgrade,
 ) -> Response {
     upgrade.on_upgrade(move |socket| ws_loop(st, u.id, socket))
-}
-
-/// A connection's health changed: does this user see it (a mount on it,
-/// their own connection, or an admin)?
-async fn sees_connection(st: &AppState, user_id: i64, connection_id: i64) -> bool {
-    if mounts::user_mounts(st, user_id)
-        .await
-        .map(|ms| ms.iter().any(|m| m.connection_id == connection_id))
-        .unwrap_or(false)
-    {
-        return true;
-    }
-    sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM connections WHERE id = $1 AND owner_id = $2)
-             OR EXISTS (SELECT 1 FROM users WHERE id = $2 AND is_admin)",
-    )
-    .bind(connection_id)
-    .bind(user_id)
-    .fetch_one(&st.db)
-    .await
-    .unwrap_or(false)
 }
 
 async fn relevant(st: &AppState, user_id: i64, ev: &ChangeEvent) -> bool {
@@ -593,9 +575,9 @@ async fn ws_loop(st: AppState, user_id: i64, mut socket: WebSocket) {
     loop {
         tokio::select! {
             ev = rx.recv() => match ev {
-                Ok(ChangeEvent { connection_id: Some(c), .. }) => {
+                Ok(ChangeEvent { connection_id: Some(c), audience, .. }) => {
                     // Health changes go out at once: `{"health": <connection id>}`.
-                    if sees_connection(&st, user_id, c).await {
+                    if audience.is_some_and(|a| a.contains(&user_id)) {
                         let msg = json!({ "health": c }).to_string();
                         if socket.send(Message::Text(msg.into())).await.is_err() { return; }
                     }

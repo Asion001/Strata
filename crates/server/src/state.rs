@@ -21,6 +21,8 @@ pub struct ChangeEvent {
     pub user_id: Option<i64>,
     /// Set when a connection's health state changed.
     pub connection_id: Option<i64>,
+    /// For connection events: the users to tell (computed once).
+    pub audience: Option<Arc<Vec<i64>>>,
 }
 
 #[derive(Clone)]
@@ -40,6 +42,8 @@ pub struct Inner {
     pub offline: DashMap<i64, ()>,
     /// One health probe per connection at a time.
     pub probe_locks: DashMap<i64, Arc<tokio::sync::Mutex<()>>>,
+    /// A local connection's folder check still running (see `health`).
+    pub root_checks: DashMap<i64, Arc<std::sync::atomic::AtomicBool>>,
     /// user id -> that user's mounts, longest path first
     pub mounts: DashMap<i64, Arc<Vec<Mount>>>,
     pub events: broadcast::Sender<ChangeEvent>,
@@ -95,6 +99,7 @@ impl AppState {
             op_gens: DashMap::new(),
             offline: DashMap::new(),
             probe_locks: DashMap::new(),
+            root_checks: DashMap::new(),
             mounts: DashMap::new(),
             events,
             decisions: quick_cache::sync::Cache::new(100_000),

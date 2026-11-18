@@ -195,11 +195,14 @@ pub async fn create(
     Json(req): Json<UpsertReq>,
 ) -> ApiResult<Json<ConnectionView>> {
     validate(&u, &req.name, &req.config)?;
-    let op = req
-        .config
+    req.config
+        .create_local_root(&st.cfg.local_base)
+        .map_err(|e| bad(format!("invalid config: {e}")))?;
+    req.config
         .operator(&st.cfg.local_base)
         .map_err(|e| bad(format!("invalid config: {e}")))?;
-    let caps = Capabilities::detect(&req.config, &op, &st.cfg.local_base).await;
+    // Capabilities come from the first probe, right after the insert.
+    let caps = Capabilities::default();
     let enc = st.encrypt_config(&req.config)?;
     let (sid, sfolder) = req
         .config
@@ -261,11 +264,12 @@ pub async fn update(
         bad("the stored settings of this connection can't be read (wrong server key, or an unknown format)")
     })?;
     req.config.merge_secrets(&old);
-    let op = req
-        .config
+    req.config
+        .create_local_root(&st.cfg.local_base)
+        .map_err(|e| bad(format!("invalid config: {e}")))?;
+    req.config
         .operator(&st.cfg.local_base)
         .map_err(|e| bad(format!("invalid config: {e}")))?;
-    let caps = Capabilities::detect(&req.config, &op, &st.cfg.local_base).await;
     let (sid, sfolder) = req
         .config
         .location(&st.cfg.local_base)
@@ -298,13 +302,14 @@ pub async fn update(
     let enc = st.encrypt_config(&req.config)?;
     // Config and location change together, in one statement.
     sqlx::query(
-        "UPDATE connections SET name = $2, config_enc = $3, capabilities = $4,
-                storage_id = $5, storage_folder = $6 WHERE id = $1",
+        // A new config starts a fresh failure count; capabilities come from
+        // the probe below.
+        "UPDATE connections SET name = $2, config_enc = $3, health_failures = 0,
+                storage_id = $4, storage_folder = $5 WHERE id = $1",
     )
     .bind(id)
     .bind(req.name.trim())
     .bind(enc)
-    .bind(sqlx::types::Json(caps))
     .bind(&sid)
     .bind(&sfolder)
     .execute(&mut *tx)
@@ -312,8 +317,8 @@ pub async fn update(
     tx.commit().await?;
     drop(layout);
     st.forget_operator(id);
-    // A re-pointed connection is probed again at once (and may come back
-    // online, or go offline only after three failed probes as usual).
+    // A re-pointed connection is probed again at once: it may come back
+    // online, and goes offline only after three failed probes as usual.
     crate::health::probe_one(&st, id, true).await;
     get_view(&st, &u, id).await.map(Json)
 }

@@ -160,6 +160,15 @@ impl ConnectionConfig {
         Ok(Some(local_base.join(rel)))
     }
 
+    /// Create a local connection's folder (when the connection is added or
+    /// re-pointed). Nothing for other kinds.
+    pub fn create_local_root(&self, local_base: &Path) -> Result<()> {
+        if let Some(dir) = self.local_dir(local_base)? {
+            std::fs::create_dir_all(dir)?;
+        }
+        Ok(())
+    }
+
     /// Build an OpenDAL operator rooted at this connection.
     pub fn operator(&self, local_base: &Path) -> Result<Operator> {
         static INIT: std::sync::Once = std::sync::Once::new();
@@ -167,13 +176,18 @@ impl ConnectionConfig {
         let op = match self {
             Self::Local { .. } => {
                 let dir = self.local_dir(local_base)?.unwrap();
-                std::fs::create_dir_all(&dir)?;
                 // Writes land in a temp file and are renamed into place, so an
                 // interrupted upload never leaves a partial file at the target.
                 // Inside the connection's own folder: same filesystem, so the
                 // final rename never crosses devices.
                 let tmp = dir.join(ATOMIC_TMP_DIR);
-                std::fs::create_dir_all(&tmp)?;
+                // Never (re)create the connection's folder here: if it is
+                // missing (an unmounted disk), creating it would put files on
+                // the wrong disk. `create_local_root` makes it, once, when the
+                // connection is set up; the health probes see it go missing.
+                if dir.is_dir() {
+                    std::fs::create_dir_all(&tmp)?;
+                }
                 Operator::new(
                     services::Fs::default()
                         .root(&dir.to_string_lossy())
