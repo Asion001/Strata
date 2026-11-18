@@ -1,5 +1,5 @@
 use axum::extract::DefaultBodyLimit;
-use axum::http::{HeaderValue, header};
+use axum::http::{Extensions, HeaderMap, HeaderValue, StatusCode, Version, header};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde_json::json;
@@ -21,7 +21,7 @@ async fn healthz(
         Err(e) => {
             tracing::warn!("health check: database unavailable: {e}");
             (
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                StatusCode::SERVICE_UNAVAILABLE,
                 Json(json!({ "ok": false })),
             )
                 .into_response()
@@ -129,7 +129,14 @@ pub fn router(st: AppState) -> Router {
                     ))
                     .and(tower_http::compression::predicate::NotForContentType::new(
                         "application/octet-stream",
-                    )),
+                    ))
+                    // Byte-range responses (file contents) stay as they are:
+                    // compressing drops their Content-Length, so clients such
+                    // as the PDF viewer can't fetch parts of a large file.
+                    .and(|_: StatusCode, _: Version, h: &HeaderMap, _: &Extensions| {
+                        !h.contains_key(header::ACCEPT_RANGES)
+                            && !h.contains_key(header::CONTENT_RANGE)
+                    }),
             ),
         )
         .layer(SetResponseHeaderLayer::if_not_present(

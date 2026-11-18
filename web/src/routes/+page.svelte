@@ -5,7 +5,6 @@
   import { bytes, when, join, parent, icon, isImage, isTextName } from '$lib/format';
   import { runUpload, type UploadTask } from '$lib/upload';
   import VirtualList from '$lib/VirtualList.svelte';
-  import Viewer from '$lib/Viewer.svelte';
   import Editor from '$lib/editor/Editor.svelte';
   import { session } from '$lib/session.svelte';
 
@@ -20,6 +19,11 @@
   let uploads = $state<UploadTask[]>([]);
   let menu = $state<Entry | null>(null);
   let viewerIndex = $state(-1);
+  // The preview viewer (and, through it, the PDF viewer) loads on first use.
+  let Viewer = $state<typeof import('$lib/Viewer.svelte').default>();
+  $effect(() => {
+    if (viewerIndex >= 0 && !Viewer) import('$lib/Viewer.svelte').then((m) => (Viewer = m.default));
+  });
   let dragging = $state(false);
   let fileInput: HTMLInputElement;
   let folderInput: HTMLInputElement;
@@ -243,7 +247,7 @@
   </div>
 {/if}
 
-{#if viewerIndex >= 0}
+{#if viewerIndex >= 0 && Viewer}
   <Viewer
     items={viewable.map((v) => ({ name: v.name, size: v.size, src: previewUrl(join(path, v.name)), download: contentUrl(join(path, v.name), true) }))}
     bind:index={viewerIndex}
