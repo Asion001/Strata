@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { confirmDialog, promptDialog } from '$lib/dialogs.svelte';
+  import { toast, toastError } from '$lib/toast.svelte';
   import { api, type User } from '$lib/api';
   import { session } from '$lib/session.svelte';
 
@@ -10,15 +12,15 @@
   async function create(e: Event) {
     e.preventDefault();
     try { await api('POST', '/api/admin/users', form); form = { username: '', password: '', is_admin: false }; await load(); }
-    catch (err) { alert((err as Error).message); }
+    catch (err) { toastError(err); }
   }
   async function reset(u: User) {
-    const pw = prompt(`New password for ${u.username} (8+ characters)`);
-    if (pw) try { await api('POST', `/api/admin/users/${u.id}/password`, { password: pw }); alert('Password changed'); } catch (e) { alert((e as Error).message); }
+    const pw = await promptDialog({ title: `New password for ${u.username}`, label: 'Password', type: 'password', confirm: 'Change password', body: 'At least 8 characters.' });
+    if (pw) try { await api('POST', `/api/admin/users/${u.id}/password`, { password: pw }); toast('Password changed', 'success'); } catch (e) { toastError(e); }
   }
   async function del(u: User) {
-    if (confirm(`Delete ${u.username}? Their mounts are removed; stored data stays on disk.`))
-      try { await api('DELETE', `/api/admin/users/${u.id}`); await load(); } catch (e) { alert((e as Error).message); }
+    const ok = await confirmDialog({ title: `Delete ${u.username}?`, body: 'Their mounts are removed; stored data stays on disk.', confirm: 'Delete user', danger: true });
+    if (ok) try { await api('DELETE', `/api/admin/users/${u.id}`); await load(); } catch (e) { toastError(e); }
   }
 </script>
 

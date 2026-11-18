@@ -46,6 +46,7 @@
   --muted-foreground: var(--muted);
   --accent-foreground: var(--text);
   --destructive: var(--danger);
+  --destructive-foreground: var(--accent-text);
   --input: var(--border);
   --ring: var(--accent);
   --sidebar: var(--panel);
@@ -82,6 +83,7 @@
   --color-accent: var(--hover);
   --color-accent-foreground: var(--accent-foreground);
   --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
   --color-success: var(--ok);
   --color-border: var(--border);
   --color-input: var(--input);

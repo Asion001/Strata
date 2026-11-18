@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { confirmDialog } from '$lib/dialogs.svelte';
+  import { toast, toastError } from '$lib/toast.svelte';
   import { api } from '$lib/api';
   import { reloadMounts } from '$lib/mounts.svelte';
 
@@ -24,14 +26,15 @@
     try {
       const m = await api('POST', '/api/mounts', form);
       if (m.overlaps?.length)
-        alert(`Heads up: ${m.overlaps.map((p: string) => '/' + p).join(', ')} shows an overlapping folder of the same connection. Changes appear in both places.`);
+        toast(`Heads up: ${m.overlaps.map((p: string) => '/' + p).join(', ')} shows an overlapping folder of the same connection. Changes appear in both places.`, 'info', 12000);
       form.path = ''; form.base_path = ''; await load(); reloadMounts();
     }
-    catch (err) { alert((err as Error).message); }
+    catch (err) { toastError(err); }
   }
   async function unmount(m: Mount) {
-    if (!confirm(`Unmount "${m.path}"? Files stay on the backend; remounting the same folder brings them back.`)) return;
-    try { await api('DELETE', `/api/mounts/${m.id}`); await load(); reloadMounts(); } catch (e) { alert((e as Error).message); }
+    const ok = await confirmDialog({ title: `Unmount “${m.path}”?`, body: 'Files stay on the backend; remounting the same folder brings them back.', confirm: 'Unmount' });
+    if (!ok) return;
+    try { await api('DELETE', `/api/mounts/${m.id}`); await load(); reloadMounts(); } catch (e) { toastError(e); }
   }
   async function scan(m: Mount) {
     await api('POST', `/api/mounts/${m.id}/scan`);

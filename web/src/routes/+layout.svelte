@@ -1,15 +1,23 @@
 <script lang="ts">
   import '../app.css';
   import { page } from '$app/state';
-  import { goto } from '$app/navigation';
+  import { afterNavigate, goto } from '$app/navigation';
   import { api } from '$lib/api';
   import { session } from '$lib/session.svelte';
   import { markSignedIn } from '$lib/editor/drafts';
   import { reloadMounts } from '$lib/mounts.svelte';
   import AppSidebar from '$lib/components/shell/AppSidebar.svelte';
   import BottomNav from '$lib/components/shell/BottomNav.svelte';
+  import { cancelAllDialogs, dialogHost } from '$lib/dialogs.svelte';
+  import { toaster } from '$lib/toast.svelte';
 
   let { children } = $props();
+
+  // A question asked on one page means nothing on the next (Back pressed
+  // while it was open): withdraw it rather than act on the new page.
+  afterNavigate((nav) => {
+    if (nav.type !== 'enter') cancelAllDialogs();
+  });
   let isPublic = $derived(page.url.pathname === '/login' || page.url.pathname.startsWith('/s/'));
 
   $effect(() => {
@@ -39,3 +47,6 @@
     </div>
   </div>
 {/if}
+
+{#if dialogHost.component}<dialogHost.component />{/if}
+{#if toaster.component}<toaster.component />{/if}

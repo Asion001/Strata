@@ -5,7 +5,9 @@
   // - keeps the file's line endings and trailing newline;
   // - Ctrl/Cmd+S saves; leaving with unsaved changes asks first.
   import { onDestroy, onMount, untrack } from 'svelte';
-  import { beforeNavigate } from '$app/navigation';
+  import { beforeNavigate, goto } from '$app/navigation';
+  import { confirmDialog, dialogs } from '$lib/dialogs.svelte';
+  import { toast } from '$lib/toast.svelte';
   import { contentUrl } from '$lib/api';
   import { join, parent } from '$lib/format';
   import { MAX_EDIT_BYTES, MAX_VIEW_BYTES, conflictName, decodeUtf8, fromEditor, looksBinary, toEditor, type Eol } from './textio';
@@ -211,8 +213,11 @@
     }
   });
 
+  // Questions this editor asked go away with it.
+  const asks = new AbortController();
   onDestroy(() => {
     destroyed = true;
+    asks.abort();
     clearInterval(draftTimer);
     clearTimeout(previewTimer);
     editor?.destroy();
@@ -311,7 +316,16 @@
   async function restoreDraft() {
     const d = draftOffer;
     if (!d || !editor) return;
-    if (dirty && !confirm('Replace what you typed since opening with the recovered draft?')) return;
+    if (dirty) {
+      const ok = await confirmDialog({
+        signal: asks.signal,
+        title: 'Restore the draft?',
+        body: 'This replaces what you typed since opening with the recovered draft.',
+        confirm: 'Restore'
+      });
+      // The offer may have been dismissed or replaced while the dialog was open.
+      if (!ok || draftOffer !== d || !editor) return;
+    }
     // Keep the draft's base: if the file changed since, saving asks how to resolve.
     etag = d.baseEtag;
     baseHash = d.baseHash ?? null;
@@ -414,7 +428,7 @@
           // Wait briefly for the clean-up, but never let stuck storage keep
           // the editor from closing.
           await atMost(afterDrafts(() => clearTabDraft(key, tab)), 2000);
-          alert(msg);
+          toast(msg, 'success', 8000);
           onclose();
         }
         return;
@@ -482,31 +496,89 @@
   async function close() {
     if (dirty && !isSignedIn(userId)) {
       // Drafts aren't kept for a signed-out user.
-      if (confirm('Close and lose the unsaved changes?')) onclose();
+      const ok = await confirmDialog({
+        signal: asks.signal,
+        title: 'Close and lose the unsaved changes?',
+        body: 'You are signed out, so no draft is kept.',
+        confirm: 'Close',
+        danger: true
+      });
+      if (ok) onclose();
       return;
     }
-    if (dirty && !confirm('Close with unsaved changes? A draft stays in this browser for up to 30 days, until you sign out, or until someone else signs in here.')) return;
-    // The last seconds of typing too; stuck storage never keeps the editor
-    // from closing.
-    // Close quietly only when nothing is unsaved or the draft is known to
-    // be stored; a failed, slow or refused write asks first.
-    const r = await atMost(autosave(true), 2000);
-    if (r !== 'clean' && r !== 'stored') {
-      const why: Partial<Record<NonNullable<typeof r>, string>> = {
-        timeout: 'The draft is still being written to this browser and may not be kept.',
-        signedOut: 'You were signed out, so no draft is kept.'
-      };
-      const msg = (r && why[r]) ?? 'The draft could not be stored in this browser.';
-      if (!confirm(`${msg} Close anyway and lose the unsaved changes?`)) return;
-    }
-    onclose();
+    if (
+      dirty &&
+      !(await confirmDialog({
+        signal: asks.signal,
+        title: 'Close with unsaved changes?',
+        body: 'A draft stays in this browser for up to 30 days, until you sign out, or until someone else signs in here.',
+        confirm: 'Close'
+      }))
+    )
+      return;
+    if (await draftKeptOrAgreed('Close')) onclose();
   }
 
+  /** Writes the last seconds of typing to the draft. True when nothing is
+   *  unsaved or the draft is known to be stored; a failed, slow or refused
+   *  write asks first. Stuck storage never blocks for more than 2 s. */
+  async function draftKeptOrAgreed(verb: 'Close' | 'Leave') {
+    const r = await atMost(autosave(true), 2000);
+    if (r === 'clean' || r === 'stored') return true;
+    const why: Partial<Record<NonNullable<typeof r>, string>> = {
+      timeout: 'The draft is still being written to this browser and may not be kept.',
+      signedOut: 'You were signed out, so no draft is kept.'
+    };
+    return confirmDialog({
+      signal: asks.signal,
+      title: `${verb} and lose the unsaved changes?`,
+      body: (r && why[r]) ?? 'The draft could not be stored in this browser.',
+      confirm: `${verb} anyway`,
+      danger: true
+    });
+  }
+
+  // Set once the user agrees to leave; the navigation we then start passes.
+  let leaveAgreed = false;
+  // One question at a time: more attempts while it's open (Back pressed
+  // again) are dropped, so agreeing can't go further than the user meant.
+  let leaveAsking = false;
   beforeNavigate((nav) => {
-    if (dirty && !confirm('You have unsaved changes. Leave anyway?')) {
+    if (dirty && !leaveAgreed) {
+      // Closing or reloading the tab: only the browser's own prompt can
+      // ask, and cancelling is what shows it.
       nav.cancel();
+      if (nav.type === 'leave' || leaveAsking) return;
+      leaveAsking = true;
+      const to = nav.to?.url;
+      const delta = nav.delta;
+      const kept = isSignedIn(userId);
+      void confirmDialog({
+        signal: asks.signal,
+        title: 'Leave with unsaved changes?',
+        body: kept
+          ? 'A draft stays in this browser, so you can restore it when you open the file again.'
+          : 'You are signed out, so no draft is kept.',
+        confirm: 'Leave',
+        danger: !kept
+      }).then(async (ok) => {
+        // The draft is only promised once it is known to be stored.
+        if (ok && kept) ok = await draftKeptOrAgreed('Leave');
+        leaveAsking = false;
+        if (!ok || !to) return;
+        leaveAgreed = true;
+        // If the navigation doesn't happen after all (a download, a 204),
+        // the guards come back.
+        setTimeout(() => (leaveAgreed = false), 1000);
+        if (nav.type === 'popstate' && delta) history.go(delta);
+        else if (to.origin !== location.origin) location.href = to.href;
+        else void goto(to);
+      });
       return;
     }
+    // SvelteKit's own 'leave' check runs before our beforeunload handler,
+    // which still needs to see the agreement.
+    if (nav.type !== 'leave') leaveAgreed = false;
     void autosave(true);
   });
 
@@ -514,12 +586,15 @@
   function onKey(e: KeyboardEvent) {
     if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 's') {
       e.preventDefault();
+      // Not underneath an open question (restore, close, leave).
+      if (dialogs.queue.length) return;
       void save();
     }
   }
 
   function beforeUnload(e: BeforeUnloadEvent) {
-    if (dirty) {
+    // Already agreed to in the app's dialog (an external link): don't ask twice.
+    if (dirty && !leaveAgreed) {
       e.preventDefault();
       e.returnValue = '';
     }

@@ -9,6 +9,8 @@
   import Editor from '$lib/editor/Editor.svelte';
   import { staleApp } from '$lib/lazy';
   import { session } from '$lib/session.svelte';
+  import { alertDialog, confirmDialog, formDialog, promptDialog } from '$lib/dialogs.svelte';
+  import { toastError } from '$lib/toast.svelte';
 
   let path = $derived(page.url.searchParams.get('p') ?? '');
   let entries = $state<Entry[]>([]);
@@ -78,41 +80,72 @@
   }
 
   async function act(fn: () => Promise<unknown>) {
-    try { await fn(); } catch (e) { alert((e as Error).message); }
+    try { await fn(); } catch (e) { toastError(e); }
     menu = null;
     await load();
     reloadMounts();
   }
 
-  const newFolder = () => {
-    const name = prompt('New folder name');
-    if (name) act(() => api('POST', '/api/files/mkdir', { path: join(path, name) }));
+  // Each action fixes its target before asking: the folder may change
+  // (Back, a sidebar click) while the dialog is open.
+  const newFolder = async () => {
+    const dir = path;
+    const name = await promptDialog({ title: 'New folder', label: 'Name', confirm: 'Create' });
+    if (name) act(() => api('POST', '/api/files/mkdir', { path: join(dir, name) }));
   };
-  const rename = (e: Entry) => {
-    const name = prompt('Rename to', e.name);
-    if (name && name !== e.name) act(() => api('POST', '/api/files/move', { from: join(path, e.name), to: join(path, name) }));
+  const rename = async (e: Entry) => {
+    menu = null;
+    const dir = path;
+    const name = await promptDialog({ title: `Rename “${e.name}”`, label: 'New name', value: e.name, confirm: 'Rename' });
+    if (name && name !== e.name) act(() => api('POST', '/api/files/move', { from: join(dir, e.name), to: join(dir, name) }));
   };
-  const moveTo = (e: Entry, copy = false) => {
-    const to = prompt(`${copy ? 'Copy' : 'Move'} to (full path)`, join(path, e.name));
-    if (to && to !== join(path, e.name)) act(() => api('POST', copy ? '/api/files/copy' : '/api/files/move', { from: join(path, e.name), to }));
+  const moveTo = async (e: Entry, copy = false) => {
+    menu = null;
+    const from = join(path, e.name);
+    const to = await promptDialog({
+      title: `${copy ? 'Copy' : 'Move'} “${e.name}”`,
+      label: 'To (full path)',
+      value: from,
+      confirm: copy ? 'Copy' : 'Move'
+    });
+    if (to && to !== from) act(() => api('POST', copy ? '/api/files/copy' : '/api/files/move', { from, to }));
   };
-  const remove = (e: Entry) => {
-    if (confirm(`Delete "${e.name}"?`)) act(() => api('POST', '/api/files/delete', { paths: [join(path, e.name)] }));
+  const remove = async (e: Entry) => {
+    menu = null;
+    const target = join(path, e.name);
+    const ok = await confirmDialog({
+      title: `Delete “${e.name}”?`,
+      body: e.is_dir ? 'The folder and everything in it will be deleted.' : 'The file will be deleted.',
+      confirm: 'Delete',
+      danger: true
+    });
+    if (ok) act(() => api('POST', '/api/files/delete', { paths: [target] }));
   };
   const share = async (e: Entry) => {
-    const password = prompt('Password for the link (leave empty for none)') ?? '';
-    const days = prompt('Expires after how many days? (empty = never)') ?? '';
+    menu = null;
+    const target = join(path, e.name);
+    const f = await formDialog({
+      title: `Share “${e.name}”`,
+      body: 'Anyone with the link can open it.',
+      confirm: 'Create link',
+      fields: [
+        { name: 'password', label: 'Password', type: 'password', hint: 'Optional. Leave empty for none.' },
+        { name: 'days', label: 'Expires after (days)', type: 'number', min: 1, hint: 'Optional. Leave empty to never expire.' }
+      ]
+    });
+    if (!f) return;
     try {
       const s = await api('POST', '/api/shares', {
-        path: join(path, e.name),
-        password: password || null,
-        expires_at: days ? new Date(Date.now() + Number(days) * 86400000).toISOString() : null
+        path: target,
+        password: f.password || null,
+        // The field allows only whole days from 1 up.
+        expires_at: f.days ? new Date(Date.now() + Number(f.days) * 86400000).toISOString() : null
       });
       const url = `${location.origin}/s/${s.token}`;
-      try { await navigator.clipboard.writeText(url); } catch {}
-      prompt('Share link (copied):', url);
-    } catch (err) { alert((err as Error).message); }
-    menu = null;
+      let copied = false;
+      try { await navigator.clipboard.writeText(url); copied = true; } catch {}
+      await alertDialog({ title: 'Share link', body: copied ? 'Copied to the clipboard.' : undefined, copy: url, ok: 'Done' });
+    } catch (err) { toastError(err); }
   };
 
   let uid = 0;

@@ -1,4 +1,5 @@
 import { version } from '$app/environment';
+import { toast } from '$lib/toast.svelte';
 
 /** A lazily loaded part of the app failed to load. If the app was updated
  *  since this page opened (its old chunks are gone), reload to pick up the
@@ -18,5 +19,5 @@ export async function staleApp(err: unknown) {
     if (updated && !recent) sessionStorage.setItem(key, String(Date.now()));
   } catch {}
   if (updated && !recent) location.reload();
-  else alert('Part of the app could not load. Check the connection and try again.');
+  else toast('Part of the app could not load. Check the connection and try again.', 'error');
 }

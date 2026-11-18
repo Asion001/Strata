@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { confirmDialog } from '$lib/dialogs.svelte';
+  import { toastError } from '$lib/toast.svelte';
   import { api } from '$lib/api';
   import { when } from '$lib/format';
 
@@ -8,7 +10,9 @@
   $effect(() => { load(); });
   const link = (s: Share) => `${location.origin}/s/${s.token}`;
   async function del(s: Share) {
-    if (confirm('Delete this link? People who have it lose access.')) { await api('DELETE', `/api/shares/${s.id}`); await load(); }
+    const ok = await confirmDialog({ title: 'Delete this link?', body: 'People who have it lose access.', confirm: 'Delete link', danger: true });
+    if (!ok) return;
+    try { await api('DELETE', `/api/shares/${s.id}`); await load(); } catch (e) { toastError(e); }
   }
 </script>
 
