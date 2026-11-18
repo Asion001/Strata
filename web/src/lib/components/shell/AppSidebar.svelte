@@ -24,7 +24,7 @@
   const on = 'bg-sidebar-accent font-medium text-sidebar-accent-foreground';
 </script>
 
-<aside class={cn('flex w-60 shrink-0 flex-col gap-1 border-r border-sidebar-border bg-sidebar px-3 py-3 text-sidebar-foreground', className)}>
+<aside class={cn('flex w-60 shrink-0 flex-col gap-1 border-r border-sidebar-border bg-sidebar px-3 py-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] pl-[calc(0.75rem+env(safe-area-inset-left))] text-sidebar-foreground', className)}>
   <a href="/" class="mb-3 flex items-center gap-2 px-2 py-1 text-[15px] font-semibold text-foreground">
     <img src="/favicon.png" alt="" width="24" height="24" class="rounded-md" />
     Strata

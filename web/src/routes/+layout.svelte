@@ -31,10 +31,10 @@
 {#if isPublic}
   <div class="legacy contents">{@render children()}</div>
 {:else if session.user}
-  <div class="flex h-dvh">
+  <div class="flex h-dvh pt-[env(safe-area-inset-top)]">
     <AppSidebar class="hidden md:flex" />
     <div class="flex min-w-0 flex-1 flex-col">
-      <main class="legacy min-h-0 flex-1 overflow-auto pt-[env(safe-area-inset-top)] md:pt-0">{@render children()}</main>
+      <main class="legacy min-h-0 flex-1 overflow-auto md:pr-[env(safe-area-inset-right)]">{@render children()}</main>
       <BottomNav class="md:hidden" />
     </div>
   </div>
