@@ -66,3 +66,9 @@ export function sidebarMounts<T extends { path: string }>(list: T[]): (T & { lab
   for (const m of shown) count.set(last(m.path), (count.get(last(m.path)) ?? 0) + 1);
   return shown.map((m) => ({ ...m, label: count.get(last(m.path))! > 1 ? m.path : last(m.path) }));
 }
+
+/** Link to a file: its folder, with the file's details open. */
+export function fileHref(path: string): string {
+  const i = path.lastIndexOf('/');
+  return `/?p=${encodeURIComponent(i < 0 ? '' : path.slice(0, i))}&f=${encodeURIComponent(path.slice(i + 1))}`;
+}

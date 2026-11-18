@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { activeMount, folderHref, inMount, isActive, sidebarMounts } from './nav';
+import { activeMount, fileHref, folderHref, inMount, isActive, sidebarMounts } from './nav';
 
 describe('isActive', () => {
   it('marks All files only on the root browser', () => {
@@ -38,5 +38,12 @@ describe('sidebarMounts', () => {
   it('shows the full path when two mounts end in the same name', () => {
     const r = sidebarMounts([{ path: 'Photos/NAS' }, { path: 'Backup/NAS' }, { path: 'Music' }]);
     expect(r.map((m) => m.label)).toEqual(['Photos/NAS', 'Backup/NAS', 'Music']);
+  });
+});
+
+describe('fileHref', () => {
+  it('links to the folder with the file named', () => {
+    expect(fileHref('a/b/c d.txt')).toBe('/?p=a%2Fb&f=c%20d.txt');
+    expect(fileHref('top.md')).toBe('/?p=&f=top.md');
   });
 });

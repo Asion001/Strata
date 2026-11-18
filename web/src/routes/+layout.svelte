@@ -11,6 +11,7 @@
   import BottomNav from '$lib/components/shell/BottomNav.svelte';
   import { cancelAllDialogs, dialogHost } from '$lib/dialogs.svelte';
   import { toaster } from '$lib/toast.svelte';
+  import { palette, paletteKey } from '$lib/palette.svelte';
 
   let { children } = $props();
 
@@ -49,5 +50,8 @@
   </div>
 {/if}
 
+<svelte:window onkeydown={(e) => { if (session.user && !isPublic) paletteKey(e); }} />
+
+{#if palette.component && session.user && !isPublic}<palette.component />{/if}
 {#if dialogHost.component}<dialogHost.component />{/if}
 {#if toaster.component}<toaster.component />{/if}

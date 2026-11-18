@@ -23,6 +23,8 @@
   import TrashIcon from '@lucide/svelte/icons/trash';
   import SearchIcon from '@lucide/svelte/icons/search';
   import XIcon from '@lucide/svelte/icons/x';
+  import InfoIcon from '@lucide/svelte/icons/info';
+  import { fileHref } from '$lib/components/shell/nav';
   import { runUpload, type UploadTask } from '$lib/upload';
   import { reloadMounts } from '$lib/mounts.svelte';
   import VirtualList from '$lib/VirtualList.svelte';
@@ -51,6 +53,14 @@
   $effect(() => {
     if (viewerIndex >= 0 && !Viewer) import('$lib/Viewer.svelte').then((m) => (Viewer = m.default), staleApp);
   });
+  // The details panel, by entry name in the listed folder; loads on first use.
+  let details = $state<string | null>(null);
+  let Details = $state<typeof import('$lib/components/files/DetailsPanel.svelte').default>();
+  $effect(() => {
+    if (details !== null && !Details) import('$lib/components/files/DetailsPanel.svelte').then((m) => (Details = m.default), staleApp);
+  });
+  // ?f=name opens a file's details once its folder lists (links from ⌘K).
+  let appliedF = '';
   let dragging = $state(false);
   let fileInput: HTMLInputElement;
   let folderInput: HTMLInputElement;
@@ -94,6 +104,15 @@
   // From the selection, not a scan of the folder: cheap in big folders.
   const picked = $derived([...selection.names].flatMap((n) => byName.get(n) ?? []));
   const pickedMounts = $derived(picked.filter((e) => e.mount_id).length);
+  const detailsEntry = $derived(details === null ? undefined : byName.get(details));
+  // Gone after a refresh (deleted, renamed elsewhere): close.
+  $effect(() => {
+    if (details !== null && !loading && !detailsEntry) details = null;
+  });
+  const showDetails = (e: Entry) => {
+    menu = null;
+    details = e.name;
+  };
 
   // Grid: as many columns as fit, rendered as virtual rows.
   let gridWidth = $state(0);
@@ -132,6 +151,7 @@
     // Focus stays on the ⋯ button, outside the menu, so Escape lands here.
     if (menu && ev.key === 'Escape') return void (menu = null);
     if (viewerIndex >= 0 || editing || menu || hits) return;
+    if (ev.key === 'Escape' && !selection.size && details !== null) return void (details = null);
     const t = ev.target as HTMLElement | null;
     if (t?.closest('input:not([type=checkbox]), textarea, select, [contenteditable]')) return;
     if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'a') {
@@ -153,7 +173,13 @@
       const r = await api('GET', `/api/files/list?path=${encodeURIComponent(p)}`);
       if (my !== seq) return;
       entries = r.entries;
+      if (listedPath !== p) details = null;
       listedPath = p;
+      const f = page.url.searchParams.get('f');
+      if (f && appliedF !== page.url.href && (page.url.searchParams.get('p') ?? '') === p) {
+        appliedF = page.url.href;
+        if (r.entries.some((e: Entry) => e.name === f)) details = f;
+      }
       mount = r.mount;
     } catch (e) {
       if (my === seq) { error = (e as Error).message; entries = []; }
@@ -258,6 +284,7 @@
       let copied = false;
       try { await navigator.clipboard.writeText(url); copied = true; } catch {}
       await alertDialog({ title: 'Share link', body: copied ? 'Copied to the clipboard.' : undefined, copy: url, ok: 'Done' });
+      return s;
     } catch (err) { toastError(err); }
   };
 
@@ -439,7 +466,8 @@
   </button>
 {/snippet}
 
-<div class="relative flex h-full flex-col text-[15px]">
+<div class="flex h-full">
+<div class="relative flex min-w-0 flex-1 flex-col text-[15px]">
   <header class="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b border-border px-4 py-2.5">
     <nav aria-label="Folder path" class="flex min-w-0 flex-wrap items-center gap-1 text-sm">
       <a href="/?p=" class="rounded-md px-1.5 py-1 font-medium text-foreground hover:bg-accent">Home</a>
@@ -474,6 +502,9 @@
     <div class="flex items-center gap-2 border-b border-border bg-accent/60 px-4 py-1.5 text-sm" role="toolbar" aria-label="Selected items">
       <Button variant="ghost" size="icon" class="size-8" aria-label="Clear selection" onclick={() => selection.clear()}><XIcon /></Button>
       <span class="mr-auto font-medium" aria-live="polite">{selection.size} selected</span>
+      {#if picked.length === 1}
+        <Button variant="ghost" size="sm" onclick={() => showDetails(picked[0])}><InfoIcon /><span class="max-sm:sr-only">Details</span></Button>
+      {/if}
       <Button variant="ghost" size="sm" onclick={() => transferPicked(false)} disabled={busy || pickedMounts === picked.length} title={pickedMounts ? 'Mounts are moved on the Mounts page' : undefined}><FolderInputIcon /><span class="max-sm:sr-only">Move</span></Button>
       <Button variant="ghost" size="sm" onclick={() => transferPicked(true)} disabled={busy}><CopyIcon /><span class="max-sm:sr-only">Copy</span></Button>
       <Button variant="ghost" size="sm" class="text-destructive hover:text-destructive" onclick={removePicked} disabled={busy || pickedMounts === picked.length} title={pickedMounts ? 'Mounts are removed on the Mounts page' : undefined}><TrashIcon /><span class="max-sm:sr-only">Delete</span></Button>
@@ -485,7 +516,7 @@
       <p class="px-4 py-3 text-sm text-muted-foreground">{hits.length} results for “{query}”</p>
       {#each hits as h (h.path)}
         <a class="flex h-14 items-center gap-3 border-b border-border px-4 text-foreground hover:bg-accent"
-          href={h.is_dir ? `/?p=${encodeURIComponent(h.path)}` : `/?p=${encodeURIComponent(parent(h.path))}`} onclick={() => (query = '')}>
+          href={h.is_dir ? `/?p=${encodeURIComponent(h.path)}` : fileHref(h.path)} onclick={() => (query = '')}>
           <FileIcon entry={h} class="size-6" />
           <span class="flex min-w-0 flex-1 flex-col"><span class="truncate">{h.name}</span><small class="truncate text-xs text-muted-foreground">{h.path}</small></span>
           <span class="text-sm text-muted-foreground">{h.is_dir ? '' : bytes(h.size)}</span>
@@ -599,6 +630,19 @@
   {/if}
 </div>
 
+{#if detailsEntry && Details}
+  <!-- Beside the list on wide screens, over it on phones. -->
+  <div class="w-80 shrink-0 border-l border-border max-md:fixed max-md:inset-0 max-md:z-30 max-md:w-full max-md:border-0 max-md:pt-[env(safe-area-inset-top)] max-md:pb-[env(safe-area-inset-bottom)] lg:w-96">
+    <Details
+      entry={detailsEntry}
+      path={join(listedPath, detailsEntry.name)}
+      storage={mount ? `${mount.mode} · ${mount.connection_name}` : undefined}
+      onclose={() => (details = null)}
+      onshare={() => share(detailsEntry)} />
+  </div>
+{/if}
+</div>
+
 {#if menu}
   {@const e = menu}
   <div class="fixed inset-0 z-30 grid place-items-center bg-black/35 max-sm:items-end" role="presentation" onclick={() => (menu = null)}>
@@ -606,6 +650,7 @@
       class="grid w-[min(320px,calc(100vw-2rem))] gap-0.5 rounded-xl border border-border bg-popover p-2 text-popover-foreground shadow-lg max-sm:w-full max-sm:rounded-b-none max-sm:pb-[max(0.75rem,env(safe-area-inset-bottom))]"
       onclick={(ev) => ev.stopPropagation()} onkeydown={(ev) => { if (ev.key === 'Escape') menu = null; }}>
       <div class="flex items-center gap-2 px-2.5 pt-1.5 pb-2.5"><FileIcon entry={e} class="size-5" /><b class="truncate text-sm">{e.name}</b></div>
+      <button role="menuitem" class="item" onclick={() => showDetails(e)}>Details</button>
       {#if !e.is_dir}<a role="menuitem" class="item" href={contentUrl(join(listedPath, e.name), true)}>Download</a>{/if}
       {#if !e.mount_id}
         {#if !e.is_dir && isTextName(e.name)}
