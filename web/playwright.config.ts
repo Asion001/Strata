@@ -14,8 +14,8 @@ export default defineConfig({
     // PW_CHANNEL=chrome uses an installed Google Chrome instead of the bundled build.
     // (Playwright's Chromium can't decode H.264: media runs in webkit-media.)
     { name: 'chromium', testIgnore: /media\.spec\.ts/, use: { ...devices['Desktop Chrome'], channel: process.env.PW_CHANNEL } },
-    { name: 'firefox', use: { ...devices['Desktop Firefox'] } },
-    { name: 'webkit', use: { ...devices['Desktop Safari'] } },
+    { name: 'firefox', testIgnore: /media\.spec\.ts/, use: { ...devices['Desktop Firefox'] } },
+    { name: 'webkit', testIgnore: /media\.spec\.ts/, use: { ...devices['Desktop Safari'] } },
     // Media playback in WebKit (CI runs this next to the Chromium project).
     { name: 'webkit-media', testMatch: /media\.spec\.ts/, use: { ...devices['Desktop Safari'] } }
   ]

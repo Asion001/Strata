@@ -176,9 +176,12 @@ single byte range (RFC 9110).
   stored chunk sizes. Only those are read, one at a time, with the first
   and last sliced; the file's first bytes are also read once for the type
   sniff.
-* **Raw mounts.** The backend reads the range itself. One whose
-  capabilities say it can't (`range_read: false`) is read from the start
-  and the bytes before the range are dropped, with a warning.
+* **Raw mounts.** The backend reads the range itself (local, S3 and FTP
+  all can). A backend whose capabilities say it can't (`range_read:
+  false`; none of the current ones) is read from the start, and the bytes
+  before the range are dropped, with a warning.
+* **Playback.** Opening a file starts playback, from where it stopped last
+  time.
 * **Memory.** Responses stream with backpressure, so memory per download
   is bounded: ten parallel 1 GB downloads stayed flat at about 200 MB.
 

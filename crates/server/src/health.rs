@@ -343,6 +343,13 @@ async fn probe_inner(st: &AppState, id: i64, counted: bool) -> anyhow::Result<Op
         // result is about the old config, so it is dropped.
         return Ok(None);
     }
+    // Mounts carry `range_read` from the capabilities: cached mounts are
+    // dropped when it changed.
+    if let (Some(new), Some(old)) = (&caps, &prev_caps)
+        && new.range_read != old.range_read
+    {
+        st.mounts.clear();
+    }
     if full && found != Found::Down {
         st.full_checks.insert(id, Instant::now());
     }

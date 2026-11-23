@@ -4,6 +4,7 @@
   import { staleApp } from './lazy';
   import { cn } from './utils';
   import MediaPlayer from './media/MediaPlayer.svelte';
+  import { session } from './session.svelte';
   import Button, { buttonClass } from './components/ui/button/button.svelte';
   import XIcon from '@lucide/svelte/icons/x';
   import DownloadIcon from '@lucide/svelte/icons/download';
@@ -100,7 +101,7 @@
 
 <div class="viewer" role="dialog" aria-modal="true" tabindex="-1"
   ontouchstart={(e) => (touchX = e.touches[0].clientX)}
-  ontouchend={(e) => { if (zoom === 1 && !isPdf(item.name)) { const dx = e.changedTouches[0].clientX - touchX; if (Math.abs(dx) > 60) step(dx < 0 ? 1 : -1); } }}>
+  ontouchend={(e) => { if (zoom === 1 && !isPdf(item.name) && !(e.target as HTMLElement | null)?.closest('video, audio')) { const dx = e.changedTouches[0].clientX - touchX; if (Math.abs(dx) > 60) step(dx < 0 ? 1 : -1); } }}>
   <header>
     <div class="min-w-0 flex-1">
       <div class="truncate text-sm font-semibold">{item.name}</div>
@@ -123,7 +124,8 @@
     {:else if isVideo(item.name) || isAudio(item.name)}
       <!-- Keyed by file: each one gets a fresh player and its own position. -->
       {#key item.src}
-        <MediaPlayer kind={isVideo(item.name) ? 'video' : 'audio'} src={item.src} file={item.src} name={item.name} />
+        <MediaPlayer kind={isVideo(item.name) ? 'video' : 'audio'} src={item.src} name={item.name}
+          file={session.user && !item.src.startsWith('/api/public/') ? `${session.user.id}|${item.src}` : null} />
       {/key}
     {:else if text !== null}
       <pre>{text}</pre>

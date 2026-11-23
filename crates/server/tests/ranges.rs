@@ -236,13 +236,16 @@ async fn raw_on_ftp() {
     // (127.0.0.1:<port>) is reachable from the host.
     let control = free_port();
     let pasv = 21100;
-    let mut img = GenericImage::new("delfer/alpine-ftp-server", "latest")
-        .with_wait_for(WaitFor::seconds(2))
-        .with_env_var("USERS", "strata|secret123")
-        .with_env_var("ADDRESS", "127.0.0.1")
-        .with_env_var("MIN_PORT", pasv.to_string())
-        .with_env_var("MAX_PORT", (pasv + 4).to_string())
-        .with_mapped_port(control, 21.tcp());
+    let mut img = GenericImage::new(
+        "delfer/alpine-ftp-server",
+        "latest@sha256:b27013e7436cea343826ba7edb77aa3a8b2d22df14e366b82d10a3b0b5ecc880",
+    )
+    .with_wait_for(WaitFor::seconds(1))
+    .with_env_var("USERS", "strata|secret123")
+    .with_env_var("ADDRESS", "127.0.0.1")
+    .with_env_var("MIN_PORT", pasv.to_string())
+    .with_env_var("MAX_PORT", (pasv + 4).to_string())
+    .with_mapped_port(control, 21.tcp());
     for p in pasv..=pasv + 4 {
         img = img.with_mapped_port(p, p.tcp());
     }
@@ -250,6 +253,22 @@ async fn raw_on_ftp() {
         Ok(c) => c,
         Err(e) => return require_docker(e, "an FTP server").unwrap_or(()),
     };
+    // Ready once it greets (a slow runner can take a while).
+    let mut ready = false;
+    for _ in 0..60 {
+        if let Ok(mut s) = std::net::TcpStream::connect(("127.0.0.1", control)) {
+            use std::io::Read;
+            s.set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .ok();
+            let mut b = [0u8; 3];
+            if s.read_exact(&mut b).is_ok() && &b == b"220" {
+                ready = true;
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    assert!(ready, "the FTP server never greeted");
     let c = t
         .ok(
             "POST",

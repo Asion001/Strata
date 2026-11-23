@@ -205,6 +205,8 @@ export function markSignedOut() {
     localStorage.removeItem(AUTH_KEY);
     localStorage.removeItem(SEEN_KEY);
     localStorage.removeItem(ALIVE_KEY);
+    // Playback positions name private paths too (see media/positions.ts).
+    localStorage.removeItem('strata-media-positions');
   } catch {}
 }
 

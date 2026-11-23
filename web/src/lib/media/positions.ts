@@ -1,6 +1,8 @@
 // Where playback stopped, per file, in this browser (localStorage). Kept
-// small: the most recent entries only. Every access tolerates a missing or
-// broken store (private mode, quota): it just doesn't remember then.
+// small: the most recent entries only. Entries are per signed-in user and
+// are wiped on sign-out (editor/drafts.ts markSignedOut), since file paths
+// are private. Every access tolerates a missing or broken store (private
+// mode, quota): it just doesn't remember then.
 
 const KEY = 'strata-media-positions';
 const MAX = 200;
