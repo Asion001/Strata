@@ -91,9 +91,14 @@ async fn other_errors_are_not_read_only_refusals() {
 async fn writable_local_folder_is_not_read_only() {
     let base = tempfile::tempdir().unwrap();
     let cfg = ConnectionConfig::Local { path: "rw".into() };
+    cfg.create_local_root(base.path()).unwrap();
     let op = cfg.operator(base.path()).unwrap();
     assert!(base.path().join("rw/.strata-tmp").is_dir());
-    assert!(!Capabilities::detect(&cfg, &op, base.path()).read_only);
+    assert!(
+        !Capabilities::detect(&cfg, &op, base.path(), None)
+            .await
+            .read_only
+    );
     op.write("x.txt", vec![1u8]).await.unwrap();
 }
 
@@ -114,7 +119,7 @@ async fn unwritable_local_folder_opens_read_only() {
         .operator(base.path())
         .expect("a read-only folder still opens");
     assert!(!dir.join(".strata-tmp").exists());
-    let caps = Capabilities::detect(&cfg, &op, base.path());
+    let caps = Capabilities::detect(&cfg, &op, base.path(), None).await;
     assert!(caps.read_only);
     assert!(!caps.rename);
     assert_refuses_writes(&op, &dir).await;

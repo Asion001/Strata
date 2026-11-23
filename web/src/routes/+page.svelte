@@ -39,7 +39,7 @@
   // The folder `entries` belong to. It lags `path` until a new listing
   // arrives, and every action on an entry joins with it, never with `path`.
   let listedPath = $state('');
-  let mount = $state<{ id: number; mode: string; connection_name: string; path: string } | null>(null);
+  let mount = $state<{ id: number; mode: string; connection_name: string; path: string; offline?: boolean } | null>(null);
   let editing = $state<string | null>(null);
   let loading = $state(false);
   let error = $state('');
@@ -476,7 +476,7 @@
         <a href="/?p={encodeURIComponent(c.path)}" class="truncate rounded-md px-1.5 py-1 font-medium text-foreground hover:bg-accent" aria-current={i === crumbs.length - 1 ? 'page' : undefined}>{c.name}</a>
       {/each}
       {#if mount && mount.path !== ''}
-        <span class="ml-1 rounded-full border border-border px-2 py-0.5 text-xs text-muted-foreground" title="Mounted from {mount.connection_name}">{mount.mode} · {mount.connection_name}</span>
+        <span class="ml-1 rounded-full border border-border px-2 py-0.5 text-xs text-muted-foreground" title="Mounted from {mount.connection_name}">{mount.mode} · {mount.connection_name}{mount.offline ? ' · offline' : ''}</span>
       {/if}
     </nav>
     <div class="flex w-full items-center gap-2 sm:w-auto">
@@ -497,6 +497,9 @@
     <input bind:this={fileInput} type="file" multiple hidden onchange={(e) => { enqueue(e.currentTarget.files!); e.currentTarget.value = ''; }} />
     <input bind:this={folderInput} type="file" webkitdirectory hidden onchange={(e) => { enqueue(e.currentTarget.files!); e.currentTarget.value = ''; }} />
   </header>
+  {#if mount?.offline}
+    <p class="border-b border-border px-4 py-2 text-sm text-muted-foreground" role="status">This storage is offline. Its files can't be opened or changed until it's back.</p>
+  {/if}
 
   {#if selection.size && !hits}
     <div class="flex items-center gap-2 border-b border-border bg-accent/60 px-4 py-1.5 text-sm" role="toolbar" aria-label="Selected items">
@@ -546,7 +549,7 @@
             <!-- Mouse convenience; keyboard users have the checkbox and name button. -->
             <!-- svelte-ignore a11y_click_events_have_key_events -->
             <div role="row" tabindex="-1" aria-rowindex={i + 2} aria-selected={on}
-              class={cn('group flex h-[52px] cursor-default items-center gap-3 border-b border-border px-4 select-none hover:bg-accent/70', on && 'bg-primary/10 hover:bg-primary/15')}
+              class={cn('group flex h-[52px] cursor-default items-center gap-3 border-b border-border px-4 select-none hover:bg-accent/70', on && 'bg-primary/10 hover:bg-primary/15', e.offline && 'opacity-50')}
               onclick={(ev) => activate(e, ev)}>
               <div role="cell" class="flex w-4 justify-center">{@render checkbox(e)}</div>
               <div role="cell" class="grid size-7 place-items-center">
@@ -558,9 +561,9 @@
                 <button type="button" class="truncate rounded-sm text-left text-foreground hover:underline focus-visible:outline-2 focus-visible:outline-ring"
                   onclick={(ev) => { ev.stopPropagation(); activate(e, ev); }}>{e.name}</button>
                 <span class="truncate text-xs text-muted-foreground sm:hidden">
-                  {e.mount_id ? 'Mount' : e.is_dir ? 'Folder' : bytes(e.size)} · {when(e.mtime)}
+                  {e.mount_id ? (e.offline ? 'Mount · offline' : 'Mount') : e.is_dir ? 'Folder' : bytes(e.size)} · {when(e.mtime)}
                 </span>
-                {#if e.mount_id}<span class="hidden text-xs text-muted-foreground sm:block">Mount</span>{/if}
+                {#if e.mount_id}<span class="hidden text-xs text-muted-foreground sm:block">{e.offline ? 'Mount · offline' : 'Mount'}</span>{/if}
               </div>
               <div role="cell" class="hidden w-20 text-right text-sm text-muted-foreground tabular-nums sm:block">{e.is_dir ? '' : bytes(e.size)}</div>
               <div role="cell" class="hidden w-28 text-right text-sm text-muted-foreground md:block">{when(e.mtime)}</div>
@@ -597,7 +600,7 @@
                   <div class="flex min-w-0 flex-1 flex-col">
                     <button type="button" class="truncate rounded-sm text-left text-sm font-medium text-foreground focus-visible:outline-2 focus-visible:outline-ring"
                       onclick={(ev) => { ev.stopPropagation(); activate(e, ev); }}>{e.name}</button>
-                    <span class="truncate text-xs text-muted-foreground">{e.mount_id ? 'Mount' : e.is_dir ? 'Folder' : bytes(e.size)}</span>
+                    <span class="truncate text-xs text-muted-foreground">{e.mount_id ? (e.offline ? 'Mount · offline' : 'Mount') : e.is_dir ? 'Folder' : bytes(e.size)}</span>
                   </div>
                   {@render moreButton(e, '-mr-1')}
                 </div>

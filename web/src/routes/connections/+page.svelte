@@ -12,7 +12,8 @@
 
   type Conn = {
     id: number; name: string; kind: string; config: Record<string, any>; capabilities: Record<string, any>;
-    is_default: boolean; health: string; health_error: string | null; health_checked_at: string | null;
+    is_default: boolean; health: string; health_reason: string | null; health_error: string | null;
+    health_latency_ms: number | null; health_checked_at: string | null;
   };
   let conns = $state<Conn[]>([]);
   let error = $state('');
@@ -68,14 +69,35 @@
     testResult = 'testing…';
     try {
       const r = await api('POST', '/api/connections/test', { config: clean(editing.config), id: editing.id });
-      testResult = r.ok ? '✓ reachable' : `✗ ${r.error}`;
+      testResult = r.ok ? (r.note ? `✓ ${r.note}` : '✓ reachable') : `✗ ${r.error ?? r.reason ?? 'failed'}`;
     } catch (err) { testResult = `✗ ${(err as Error).message}`; }
   }
   async function probe(c: Conn) {
     try { await api('POST', `/api/connections/${c.id}/probe`); } catch (e) { toastError(e); }
     await load();
   }
-  const health = (h: string) => cn(badgeClass, h === 'ok' && 'border-transparent bg-emerald-500/15 text-emerald-700 dark:text-emerald-400', h === 'error' && 'border-transparent bg-destructive/15 text-destructive');
+  const health = (h: string) => cn(badgeClass, h === 'ok' && 'border-transparent bg-emerald-500/15 text-emerald-700 dark:text-emerald-400', h === 'degraded' && 'border-transparent bg-amber-500/15 text-amber-700 dark:text-amber-400', h === 'offline' && 'border-transparent bg-destructive/15 text-destructive');
+  // Snapshot support, from either the current or the older capability shape.
+  const snapshots = (c: Conn): { kind: string; create: boolean } | null => {
+    const s = c.capabilities?.snapshots;
+    const kind = typeof s === 'string' ? s : s?.kind;
+    return kind && kind !== 'none' ? { kind, create: typeof s === 'object' ? !!s.create : false } : null;
+  };
+
+  // Live: health changes are pushed over the websocket.
+  $effect(() => {
+    let ws: WebSocket | null = null;
+    let closed = false;
+    const connect = () => {
+      ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/ws`);
+      ws.onmessage = (m) => {
+        try { if ('health' in JSON.parse(m.data)) load(); } catch {}
+      };
+      ws.onclose = () => { if (!closed) setTimeout(connect, 3000); };
+    };
+    connect();
+    return () => { closed = true; ws?.close(); };
+  });
   async function del(c: Conn) {
     const ok = await confirmDialog({ title: `Delete connection “${c.name}”?`, body: 'Unmounted hashed volumes on it lose their file index.', confirm: 'Delete', danger: true });
     if (!ok) return;
@@ -104,16 +126,19 @@
           <div class="flex flex-wrap items-center gap-1.5">
             <b class="mr-1 font-medium">{c.name}</b>
             <span class={badgeClass}>{c.kind}</span>
-            <span class={health(c.health)}>{c.health}</span>
+            <span class={health(c.health)} title={c.health_checked_at ? `checked ${new Date(c.health_checked_at).toLocaleString()}` : 'not checked yet'}>{c.health}</span>
+            {#if c.health_latency_ms != null && c.health !== 'offline'}<span class="text-xs text-muted-foreground">{c.health_latency_ms} ms</span>{/if}
             {#if c.is_default}<span class={badgeClass}>server default</span>{/if}
             {#if c.capabilities?.read_only}<span class={badgeClass}>read-only</span>{/if}
-            {#if c.capabilities?.snapshots && c.capabilities.snapshots !== 'none'}<span class={badgeClass}>snapshots: {c.capabilities.snapshots}</span>{/if}
+            {#if snapshots(c)}{@const s = snapshots(c)!}<span class={badgeClass}>snapshots: {s.kind}{s.create ? '' : ' (read-only)'}</span>{/if}
           </div>
           <div class="mt-1 truncate text-xs text-muted-foreground">
             {c.kind === 'local' ? `/${c.config.path}` : c.kind === 's3' ? `${c.config.endpoint ?? 'aws'} · ${c.config.bucket}${c.config.root ?? ''}` : c.config.endpoint}
             {#if c.capabilities?.fs_type} · {c.capabilities.fs_type}{/if}
           </div>
-          {#if c.health_error}<div class="mt-1 text-xs text-destructive">{c.health_error}</div>{/if}
+          {#if c.health !== 'ok' && (c.health_reason || c.health_error)}
+            <div class="mt-1 text-xs break-words text-destructive">{c.health_reason ?? ''}{#if c.health_error}: {c.health_error}{/if}</div>
+          {/if}
         </div>
         <div class="flex gap-1">
           <Button variant="ghost" size="sm" onclick={() => probe(c)}>Check</Button>

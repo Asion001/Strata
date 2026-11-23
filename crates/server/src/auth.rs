@@ -11,7 +11,7 @@ use axum::response::{IntoResponse, Response};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use strata_storage::{Capabilities, ConnectionConfig};
+use strata_storage::ConnectionConfig;
 
 use crate::error::{ApiError, ApiResult, bad, conflict};
 use crate::state::AppState;
@@ -339,17 +339,20 @@ async fn insert_local_connection(
     let cfg = ConnectionConfig::Local {
         path: path.to_string(),
     };
+    cfg.create_local_root(&st.cfg.local_base)?;
     let op = cfg.operator(&st.cfg.local_base)?;
-    let caps = Capabilities::detect(&cfg, &op, &st.cfg.local_base);
-    if is_default && caps.read_only {
+    if is_default && !op.info().capability().write {
         // Every user's private root is a hashed store here: it must be writable.
         return Err(ApiError::Internal(anyhow::anyhow!(
             "the default store folder {path:?} is read-only; mount it writable for the server user"
         )));
     }
+    // Capabilities come from the first probe ('{}': not detected yet); no
+    // detection inside this transaction.
+    let caps = serde_json::json!({});
     let enc = st.encrypt_config(&cfg)?;
     let (storage_id, storage_folder) = cfg.location(&st.cfg.local_base)?;
-    Ok(sqlx::query_scalar(
+    let id: i64 = sqlx::query_scalar(
         "INSERT INTO connections (owner_id, name, kind, config_enc, capabilities, is_default, storage_id, storage_folder)
          VALUES ($1, $2, 'local', $3, $4, $5, $6, $7) RETURNING id",
     )
@@ -361,7 +364,19 @@ async fn insert_local_connection(
     .bind(storage_id)
     .bind(storage_folder)
     .fetch_one(&mut **tx)
-    .await?)
+    .await?;
+    // The folder's marker (see `state::LocalRoot`), written with the row (a
+    // read-only folder can't take one; nothing is written there anyway).
+    if let Some(dir) = cfg.local_dir(&st.cfg.local_base)?
+        && op.info().capability().write
+    {
+        crate::state::LocalRoot::write_marker(dir, id).await?;
+        sqlx::query("UPDATE connections SET root_marker = TRUE WHERE id = $1")
+            .bind(id)
+            .execute(&mut **tx)
+            .await?;
+    }
+    Ok(id)
 }
 
 /// Create the first admin from STRATA_ADMIN_USER / STRATA_ADMIN_PASSWORD when

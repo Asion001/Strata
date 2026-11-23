@@ -33,6 +33,8 @@ pub struct Entry {
     pub etag: Option<String>,
     /// Set when this entry is a mount point.
     pub mount_id: Option<i64>,
+    /// A mount point whose storage is offline (it stays in the listing).
+    pub offline: bool,
 }
 
 #[derive(Clone, Debug, sqlx::FromRow)]
@@ -121,11 +123,18 @@ impl VolumeLock {
 
 /// A raw local mount never exposes `.strata-tmp` folders (where atomic writes
 /// are staged), at any depth; no local connection or mount may point into
-/// one either. The server's own state lives outside the storage base.
+/// one either. No raw mount exposes a `.strata-probe` folder (the health
+/// probes' folder, at any connection's root). The server's own state lives outside the
+/// storage base.
 pub fn is_reserved(m: &Mount, rel: &str) -> bool {
-    m.connection_kind == "local"
-        && !m.is_hashed()
-        && strata_storage::backend::has_reserved_component(&paths::join(&m.base_path, rel))
+    if m.is_hashed() {
+        return false;
+    }
+    let full = paths::join(&m.base_path, rel);
+    // The health probes' folder, on any backend and at any depth (another
+    // connection's root, with its marker, can be inside this one).
+    strata_storage::backend::has_probe_component(&full)
+        || (m.connection_kind == "local" && strata_storage::backend::has_reserved_component(&full))
 }
 
 pub async fn hashed_store(st: &AppState, m: &Mount) -> ApiResult<HashedStore> {
@@ -139,9 +148,12 @@ async fn op(st: &AppState, m: &Mount) -> ApiResult<Operator> {
     st.operator(m.connection_id).await
 }
 
-/// Refuse up front when a mount's storage cannot be written (a read-only
-/// local folder), before a multi-step operation leaves half its work behind.
+/// Refuse up front when a mount's storage cannot be written, before a
+/// multi-step operation leaves half its work behind: a read-only local
+/// folder, or storage that is offline (503, also for changes kept only in
+/// the database, such as folders, moves and deletes in a hashed mount).
 pub async fn ensure_writable(st: &AppState, m: &Mount) -> ApiResult<()> {
+    st.ensure_online(m.connection_id)?;
     if connection_writable(st, m.connection_id).await? {
         Ok(())
     } else {
@@ -256,12 +268,13 @@ pub async fn list(st: &AppState, user_id: i64, path: &str) -> ApiResult<(Mount, 
         maybe_scan(st, &m, &rel).await?;
     }
     let entries: Vec<Entry> = sqlx::query_as(
-        "SELECT n.name, n.is_dir, n.size, n.mtime, n.etag, NULL::bigint AS mount_id
+        "SELECT n.name, n.is_dir, n.size, n.mtime, n.etag, NULL::bigint AS mount_id, FALSE AS offline
          FROM nodes n
          WHERE n.volume_id = $1 AND n.parent = $2
            AND NOT EXISTS (SELECT 1 FROM mounts x WHERE x.owner_id = $3 AND x.parent_path = $4 AND x.name = n.name)
          UNION ALL
-         SELECT x.name, TRUE, 0, x.created_at, NULL, x.id FROM mounts x
+         SELECT x.name, TRUE, 0, x.created_at, NULL, x.id, c.health = 'offline'
+         FROM mounts x JOIN volumes v ON v.id = x.volume_id JOIN connections c ON c.id = v.connection_id
          WHERE x.owner_id = $3 AND x.parent_path = $4
          ORDER BY 2 DESC, 1",
     )
@@ -606,6 +619,9 @@ pub async fn mkdir_p(st: &AppState, user_id: i64, path: &str) -> ApiResult<()> {
 }
 
 pub async fn mkdir_in(st: &AppState, m: &Mount, rel: &str) -> ApiResult<()> {
+    // Offline storage refuses even walking (read-only storage may be walked,
+    // see below).
+    st.ensure_online(m.connection_id)?;
     // Ancestors including rel itself.
     let parts: Vec<&str> = rel.split('/').collect();
     let mut parents = Vec::new();
@@ -1036,6 +1052,7 @@ pub async fn put_hashed_file_if(
     mtime: Option<DateTime<Utc>>,
     expect: &Expect,
 ) -> ApiResult<(bool, Node)> {
+    ensure_writable(st, m).await?;
     let (parent, name) = paths::split(rel).ok_or_else(|| bad("cannot write to a mount point"))?;
     // Saving over an existing file needs no parent folders: if the file is
     // still there, so is its folder. Only plain writes and creations make
@@ -1120,6 +1137,7 @@ pub async fn write_stream_if(
     mut input: ByteStream,
     expect: &Expect,
 ) -> ApiResult<(Hash, Node)> {
+    ensure_writable(st, m).await?;
     // Refuse early (before writing anything, or creating parent folders)
     // when the precondition already fails; re-checked under the lock below.
     // Hashed: refuse early (a cheap DB lookup) before storing any blobs; the
@@ -1245,6 +1263,7 @@ pub async fn delete(st: &AppState, user_id: i64, path: &str) -> ApiResult<()> {
 }
 
 pub async fn delete_in(st: &AppState, m: &Mount, rel: &str) -> ApiResult<()> {
+    ensure_writable(st, m).await?;
     let lock = lock_volume(st, m.volume_id).await?;
     let node = stat(st, m, rel).await?;
     delete_locked(st, m, rel, &node).await?;
@@ -1259,6 +1278,7 @@ pub async fn delete_if_unchanged(
     rel: &str,
     expected: &Node,
 ) -> ApiResult<bool> {
+    ensure_writable(st, m).await?;
     let lock = lock_volume(st, m.volume_id).await?;
     let now = stat(st, m, rel).await?;
     if (now.size, &now.etag) != (expected.size, &expected.etag) {
