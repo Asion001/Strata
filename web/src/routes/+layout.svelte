@@ -45,7 +45,9 @@
       .catch((e) => {
         // Offline (no answer at all): carry on as whoever was signed in
         // here last, with what is cached. Anything else: sign in again.
-        const last = e instanceof ApiError ? null : lastUser();
+        // (A gateway answering for an unreachable server counts as no answer.)
+        const unreachable = !(e instanceof ApiError) || e.status >= 502;
+        const last = unreachable ? lastUser() : null;
         if (last) session.user = last;
         else goto('/login?next=' + encodeURIComponent(page.url.pathname + page.url.search));
       })

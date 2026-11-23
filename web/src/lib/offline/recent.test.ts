@@ -141,6 +141,22 @@ describe('recent files', () => {
     expect(await recent.pin(1, 'nothing', '"v"', '/c/x', false)).toBe(true);
   });
 
+  it('pinning a kept version still has to fit beside the other pins', async () => {
+    recent.setCapMb(1);
+    served['/c/p'] = { body: file(700 * 1024) };
+    served['/c/a'] = { body: file(500 * 1024) };
+    expect(await recent.pin(1, 'p', '"v"', '/c/p', true)).toBe(true);
+    recent.setCapMb(2);
+    await recent.remember(1, 'a', '"v"', '/c/a'); // kept, unpinned
+    recent.setCapMb(1);
+    expect(await recent.pin(1, 'a', '"v"', '/c/a', true)).toBe('too-big');
+  });
+
+  it('sign-out where there is no Cache Storage (plain http) still clears the rest', async () => {
+    vi.stubGlobal('caches', undefined);
+    await expect(recent.clearAll()).resolves.toBeUndefined();
+  });
+
   it('pinning: an already kept version, a new version, and what cannot fit', async () => {
     served['/c/a'] = { body: file(10, 1) };
     await recent.remember(1, 'a', '"v1"', '/c/a');

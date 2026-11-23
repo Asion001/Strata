@@ -26,8 +26,20 @@ export type Event =
   | { t: 'retry' }
   | { t: 'cancel' };
 
+// Membership sets for a job's arrays, kept beside them (a file can have
+// tens of thousands of chunks: no scanning the arrays for every event).
+const sets = new WeakMap<object, Set<string>>();
+function setOf(arr: string[]): Set<string>;
+function setOf(arr: Chunk[]): Set<string>;
+function setOf(arr: (string | Chunk)[]): Set<string> {
+  let s = sets.get(arr);
+  if (!s) sets.set(arr, (s = new Set(arr.map((x) => (typeof x === 'string' ? x : x.hash)))));
+  return s;
+}
+
 /** The queue's state machine: the job after `e`. A transition that doesn't
- *  apply leaves the job as it was (same object). */
+ *  apply leaves the job as it was (same object). A confirmed chunk is
+ *  appended to `sent` in place (the old job is not used again). */
 export function step(j: Job, e: Event): Job {
   switch (e.t) {
     case 'start':
@@ -41,15 +53,19 @@ export function step(j: Job, e: Event): Job {
       // What the server has: every chunk it doesn't list as missing.
       const missing = new Set(e.missing.map((i) => j.chunks![i]?.hash));
       const have = [...new Set(j.chunks.map((c) => c.hash).filter((h) => !missing.has(h)))];
-      const skipped = j.chunks.filter((c) => !missing.has(c.hash) && !j.sent.includes(c.hash)).reduce((a, c) => a + c.size, 0);
+      const sent = setOf(j.sent);
+      const skipped = j.chunks.filter((c) => !missing.has(c.hash) && !sent.has(c.hash)).reduce((a, c) => a + c.size, 0);
       return { ...j, session: e.id, sent: have, skipped: j.session === e.id ? j.skipped : skipped };
     }
     case 'sent':
-      if (j.state !== 'uploading' || j.sent.includes(e.hash) || !j.chunks?.some((c) => c.hash === e.hash)) return j;
-      return { ...j, sent: [...j.sent, e.hash] };
+      if (j.state !== 'uploading' || !j.chunks || setOf(j.sent).has(e.hash) || !setOf(j.chunks).has(e.hash)) return j;
+      setOf(j.sent).add(e.hash);
+      j.sent.push(e.hash);
+      return { ...j };
     case 'commit': {
       if (j.state !== 'uploading' || !j.chunks || !j.session) return j;
-      const all = j.chunks.every((c) => j.sent.includes(c.hash));
+      const sent = setOf(j.sent);
+      const all = j.chunks.every((c) => sent.has(c.hash));
       return all ? { ...j, state: 'committing' } : j;
     }
     case 'committed':
@@ -88,9 +104,6 @@ const inMemory = new Map<string, Blob>();
  *  kept in memory only (by the page that queued it). */
 type Stored = Blob | { parts: ArrayBuffer[]; type: string } | { memory: true };
 
-/** How long a new job's bytes may take to be stored before another
- *  context gives up on them. */
-export const STORING_GRACE = 60 * 60 * 1000;
 
 // Where IndexedDB can't be used at all (site data blocked), the queue
 // lives in this page's memory: uploads still run, they just can't outlive it.
@@ -154,11 +167,13 @@ export const waiting = (j: Job) => j.blob === NONE;
 
 /** With its bytes; a job whose bytes are gone (kept in memory only, and the
  *  page was reloaded) is failed for good, and saved so. */
-async function withBytes(j: Job, now = Date.now()): Promise<Job> {
+async function withBytes(j: Job): Promise<Job> {
+  if (!isActive(j)) return { ...j, blob: NONE }; // (no reading for finished jobs)
   const blob = await bytesOf(j.id);
   if (blob instanceof Blob) return { ...j, blob };
-  if (!isActive(j)) return { ...j, blob: NONE };
-  if (blob === 'pending' && now - j.created < STORING_GRACE) return { ...j, blob: NONE };
+  // Still being stored, or held in another tab's memory (maybe uploading
+  // there now): it waits, never failed from here; the user can cancel it.
+  if (blob === 'pending') return { ...j, blob: NONE };
   const lost: Job = { ...j, blob: new Blob([]), state: 'failed', error: GONE };
   await update(lost);
   return lost;
@@ -209,6 +224,13 @@ export async function remove(id: string) {
   await tx('jobs', 'readwrite', (s) => void s.delete(id));
   await tx('blobs', 'readwrite', (s) => void s.delete(id));
 }
+/** Is the job still queued (without reading its bytes)? */
+export async function exists(id: string): Promise<boolean> {
+  const m = await memory();
+  if (m) return m.has(id);
+  return (await tx<number>('jobs', 'readonly', (s) => s.count(id))) > 0;
+}
+
 export async function load(id: string): Promise<Job | undefined> {
   const m = await memory();
   const j = m ? m.get(id) : await tx<Job | undefined>('jobs', 'readonly', (s) => s.get(id));
@@ -257,6 +279,8 @@ class HttpError extends Error {
 
 const H = { 'x-strata': '1' };
 const RETRIES = 4;
+/** Gateway answers that mean the server itself can't be reached. */
+export const UNREACHABLE = new Set([502, 503, 504, 520, 521, 522, 523, 524, 525, 526, 530]);
 /** Chunks in flight at once. */
 const PARALLEL = 3;
 /** Confirmed chunks are saved at most this often (ms). */
@@ -277,6 +301,9 @@ async function call(d: Deps, url: string, init: RequestInit = {}): Promise<Respo
     }
     if (r.ok || r.status < 500 || attempt >= RETRIES) {
       if (r.ok) return r;
+      // A proxy answering for an unreachable server (restarting, a tunnel
+      // down): that is "offline" too; the job waits instead of failing.
+      if (UNREACHABLE.has(r.status)) throw new Offline(`HTTP ${r.status}`);
       const msg = await r
         .json()
         .then((b) => (b as { error?: string }).error)

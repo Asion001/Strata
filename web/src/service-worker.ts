@@ -61,6 +61,11 @@ async function listing(req: Request, user: string): Promise<Response> {
   const key = new URL(req.url).pathname + new URL(req.url).search;
   try {
     const r = await fetch(req);
+    // A gateway answering for an unreachable server: as good as offline.
+    if (r.status >= 502) {
+      const hit = await cache.match(key);
+      if (hit) return hit;
+    }
     if (r.ok) {
       const body = await r.clone().arrayBuffer();
       // Kept only when it is this user's (the server says whose it is: the
@@ -86,19 +91,30 @@ async function listing(req: Request, user: string): Promise<Response> {
 
 /** File bytes: the network; offline, the recent-files cache. */
 async function content(req: Request): Promise<Response> {
+  // The app storing a file for offline wants the server's bytes or nothing,
+  // never an older stored copy.
+  const own = req.headers.has(NETWORK_ONLY);
   try {
-    return await fetch(req);
+    const r = await fetch(req);
+    // (A gateway answering for an unreachable server: as good as offline.)
+    if (r.status >= 502 && !own) return (await offlineCopy(req)) ?? r;
+    return r;
   } catch (e) {
-    // The app storing a file for offline wants the server's bytes or
-    // nothing, never an older stored copy.
-    if (req.headers.has(NETWORK_ONLY)) throw e;
-    const user = await currentUser();
-    const path = new URL(req.url).searchParams.get('path');
-    if (user === null || path === null) throw e;
-    const hit = await lookup(user, path);
+    const hit = own ? null : await offlineCopy(req);
     if (!hit) throw e;
-    return ranged(asServed(hit, new URL(req.url), path), req.headers.get('range'));
+    return hit;
   }
+}
+
+/** This user's stored copy of the requested file, as the route serves it. */
+async function offlineCopy(req: Request): Promise<Response | null> {
+  const user = await currentUser();
+  const url = new URL(req.url);
+  const path = url.searchParams.get('path');
+  if (user === null || path === null) return null;
+  const hit = await lookup(user, path);
+  if (!hit) return null;
+  return ranged(asServed(hit, url, path), req.headers.get('range'));
 }
 
 /** The stored copy (from the content route) as this route would serve it:
@@ -152,7 +168,10 @@ sw.addEventListener('sync', ((event: SyncEvent) => {
     (async () => {
       // An open tab runs the queue itself (and shows its progress); the
       // app registers this sync again when it goes away or offline.
-      if ((await sw.clients.matchAll({ type: 'window', includeUncontrolled: true })).length) return;
+      // (A hidden or closing tab doesn't count: the lock keeps the two
+      // from running the queue at the same time.)
+      const tabs = await sw.clients.matchAll({ type: 'window', includeUncontrolled: true });
+      if (tabs.some((t) => (t as WindowClient).visibilityState === 'visible')) return;
       // The signed-in user, from the server (the queue only runs as them).
       const r = await fetch('/api/auth/me', { headers: { 'x-strata': '1' } });
       if (!r.ok) return;

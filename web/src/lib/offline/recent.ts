@@ -114,6 +114,9 @@ export async function pin(user: number, path: string, etag: string | null, url: 
   }
   if (!etag) return 'no-version';
   if (old?.etag === etag) {
+    // (Already kept: it must still fit beside the other pins.)
+    const others = (await list(user)).filter((r) => r.pinned && r.path !== path).reduce((a, r) => a + r.size, 0);
+    if (!admits(old.size, true, others, l)) return 'too-big';
     await put({ ...old, pinned: true, used: Date.now() });
     return true;
   }
@@ -135,7 +138,8 @@ export async function lookup(user: number, path: string): Promise<Response | und
 /** Sign-out: every user's cached files and listings, and the whole offline
  *  database (the upload queue too). */
 export async function clearAll(): Promise<void> {
-  for (const k of await caches.keys()) if (k.startsWith(FILES) || k.startsWith(LISTS)) await caches.delete(k);
+  // (No Cache Storage at all on a plain-http origin: nothing was cached.)
+  if (typeof caches !== 'undefined') for (const k of await caches.keys()) if (k.startsWith(FILES) || k.startsWith(LISTS)) await caches.delete(k);
   await wipe();
 }
 

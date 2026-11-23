@@ -58,7 +58,7 @@ export async function signOut(user: number | null, logout: () => Promise<unknown
   try {
     localStorage.removeItem(LAST_USER);
   } catch {}
-  await caches.delete(META).catch(() => false);
+  if (typeof caches !== 'undefined') await caches.delete(META).catch(() => false);
   await recent.clearAll().catch(() => {});
   uploads.jobs = [];
   return ended;
@@ -107,6 +107,7 @@ function changed(j: Job) {
 }
 
 let queueUser: number | null = null;
+let storing: Promise<unknown> = Promise.resolve();
 let draining: Promise<unknown> | null = null;
 let again = false;
 let onDone: ((j: Job) => void) | null = null;
@@ -118,7 +119,8 @@ const deps = (): Deps => ({
   online: () => navigator.onLine,
   changed: (j) => {
     changed(j);
-    if (j.state === 'done') onDone?.(j);
+    // (Failed and cancelled ones end too: the folder shows what is there.)
+    if (!isActive(j)) onDone?.(j);
   }
 });
 
@@ -168,6 +170,22 @@ export async function startQueue(user: number, done: (j: Job) => void) {
 }
 if (typeof window !== 'undefined') window.addEventListener('online', () => pump());
 
+/** Jobs finished or dropped elsewhere (another tab, the worker) leave this
+ *  tab's list when it comes back to the foreground. */
+async function refresh() {
+  const user = queueUser;
+  if (user === null) return;
+  const stored = new Set((await (await Queue()).jobs(user).catch(() => [] as Job[])).map((j) => j.id));
+  const gone = uploads.jobs.filter((j) => isActive(j) && !stored.has(j.id));
+  if (!gone.length) return;
+  uploads.jobs = uploads.jobs.filter((j) => !gone.includes(j));
+  for (const j of gone) onDone?.(j);
+}
+if (typeof document !== 'undefined')
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') void refresh();
+  });
+
 /** Queue files for upload. */
 export async function enqueue(user: number, items: { file: File; path: string }[]) {
   const queue = await Queue();
@@ -180,14 +198,14 @@ export async function enqueue(user: number, items: { file: File; path: string }[
     queue.holdBytes(j.id, file);
     await queue.save(j);
     changed(j);
-    keeping.push(
-      queue
-        .keepBytes(j.id, file)
-        .then(async () => {
-          if (!(await queue.load(j.id))) await queue.remove(j.id);
-        })
-        .catch(() => {})
-    );
+    // (One file at a time: storing as buffers reads a file into memory.)
+    storing = storing
+      .then(() => queue.keepBytes(j.id, file))
+      .then(async () => {
+        if (!(await queue.exists(j.id))) await queue.remove(j.id);
+      })
+      .catch(() => {});
+    keeping.push(storing);
   }
   pump();
   await Promise.all(keeping);
@@ -263,13 +281,20 @@ export async function watchUpdates() {
   reg.addEventListener('updatefound', () => follow(reg.installing));
   // A new worker took over (from this tab or another): reload, so no tab
   // keeps running the old app against the new worker and assets.
-  // (Not for the first worker claiming a fresh page, unless asked to.)
+  // The tab that asked reloads; any other tab (whose uploads must not be
+  // cut off) gets the banner, and reloads when its user says so. (The
+  // first worker claiming a fresh page is no new version.)
   const hadController = !!navigator.serviceWorker.controller;
   let reloading = false;
   navigator.serviceWorker.addEventListener('controllerchange', () => {
-    if (reloading || !(hadController || asked)) return;
-    reloading = true;
-    location.reload();
+    if (reloading) return;
+    if (asked) {
+      reloading = true;
+      location.reload();
+    } else if (hadController) {
+      waiting = null;
+      update.ready = true;
+    }
   });
   // Look for a new version when the app comes back to the foreground.
   document.addEventListener('visibilitychange', () => {

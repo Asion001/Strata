@@ -455,15 +455,22 @@ describe('stored bytes', () => {
     expect(await q.load('big')).toBeUndefined();
   });
 
-  it('a job whose bytes are gone (memory, after a reload) fails, and says why', async () => {
+  it('a job with no bytes here waits (another tab may hold them); never failed from here', async () => {
     const j = job({ id: 'lost' });
     await q.save(j);
     const back = (await q.load('lost'))!;
-    expect(back.state).toBe('failed');
-    expect(back.error).toMatch(/no longer available/);
+    expect(back.state).toBe('queued');
+    expect(q.waiting(back)).toBe(true);
     // A finished one is just listed.
     await q.save(job({ id: 'old', state: 'failed', error: 'x' }));
     expect((await q.load('old'))!.error).toBe('x');
+  });
+
+  it('exists: whether a job is still queued', async () => {
+    const j = await fresh();
+    expect(await q.exists(j.id)).toBe(true);
+    await q.remove(j.id);
+    expect(await q.exists(j.id)).toBe(false);
   });
 
   it('bytes held in memory for this page, and whether they are there', async () => {
@@ -519,11 +526,17 @@ describe('cancel from another tab, and sign-out', () => {
     expect(srv.log).toEqual([]);
   });
 
-  it('bytes kept in another page’s memory are gone here', async () => {
+  it('bytes kept in another page’s memory: the job waits here', async () => {
     const j = job({ id: 'elsewhere' });
     await q.save(j);
     await tx('blobs', 'readwrite', (st) => void st.put({ memory: true }, 'elsewhere'));
-    expect((await q.load('elsewhere'))!).toMatchObject({ state: 'failed', error: q.GONE });
+    const back = (await q.load('elsewhere'))!;
+    expect([back.state, q.waiting(back)]).toEqual(['queued', true]);
+  });
+
+  it('an unreachable server behind a proxy (502, 530…) is offline, not a failure', async () => {
+    srv.fail = (u, m) => (m === 'PUT' ? 502 : null);
+    await expect(q.run(await fresh(), deps())).rejects.toBeInstanceOf(q.Offline);
   });
 
   it('a new job whose bytes are still being stored waits (and the queue skips it)', async () => {

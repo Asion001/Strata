@@ -32,12 +32,14 @@ describe('queue without IndexedDB', () => {
     expect(puts).toEqual(['/api/uploads/s1/chunks/aa']);
     expect(await q.load(a.id)).toBeUndefined(); // done: removed
 
-    // A job whose bytes are gone (no page memory) fails.
+    // A job whose bytes are gone (no page memory) fails, and says why.
     const b = q.newJob(1, 'b.txt', new Blob(['b']));
     await q.save(b);
-    expect((await q.load(b.id))!.state).toBe('failed');
+    expect((await q.load(b.id))!).toMatchObject({ state: 'failed', error: q.GONE });
     // Not written back once removed (cancelled).
+    expect(await q.exists(b.id)).toBe(true);
     await q.remove(b.id);
+    expect(await q.exists(b.id)).toBe(false);
     expect(await q.update(b)).toBe(false);
   });
 });
