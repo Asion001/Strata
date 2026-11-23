@@ -3,7 +3,7 @@
   import { goto } from '$app/navigation';
   import { untrack } from 'svelte';
   import { api, contentUrl, previewUrl, thumbUrl, type Entry } from '$lib/api';
-  import { bytes, when, join, parent, isImage, isTextName } from '$lib/format';
+  import { bytes, when, join, parent, isImage, isBrowserImage, isTextName } from '$lib/format';
   import { cn } from '$lib/utils';
   import FileIcon from '$lib/components/files/FileIcon.svelte';
   import { Selection, loadPref, nextSort, savePref, sortEntries, type Sort, type SortKey } from '$lib/components/files/listing';
@@ -213,14 +213,23 @@
 
   const crumbs = $derived(path ? path.split('/').map((n, i, a) => ({ name: n, path: a.slice(0, i + 1).join('/') })) : []);
   const viewable = $derived(sorted.filter((e) => !e.is_dir));
-  let viewerItems = $state<{ name: string; size: number; src: string; download: string; path: string }[]>([]);
+  let viewerItems = $state<{ name: string; size: number; src: string; download: string; path: string; thumb?: string; poster?: string; mtime: string }[]>([]);
 
   function open(e: Entry) {
     if (e.is_dir) goto(`/?p=${encodeURIComponent(join(listedPath, e.name))}`);
     else {
       // A snapshot: a refresh (an upload landing, another device) must not
       // shift which file the open viewer shows.
-      viewerItems = viewable.map((v) => ({ name: v.name, size: v.size, src: previewUrl(join(listedPath, v.name)), download: contentUrl(join(listedPath, v.name), true), path: join(listedPath, v.name) }));
+      viewerItems = viewable.map((v) => {
+        const p = join(listedPath, v.name);
+        return {
+          name: v.name, size: v.size, mtime: v.mtime, path: p,
+          src: previewUrl(p), download: contentUrl(p, true),
+          // The list's own thumbnail URL: already in the cache, so it shows at once.
+          thumb: isImage(v.name) ? thumbUrl(p, v.etag) : undefined,
+          poster: isImage(v.name) && !isBrowserImage(v.name) ? thumbUrl(p, v.etag, 1024) : undefined
+        };
+      });
       viewerIndex = viewable.indexOf(e);
     }
   }
@@ -326,6 +335,19 @@
   }
 
   const removePicked = () => removeItems(picked);
+
+  /** Delete from the viewer: on to the next file, or closed after the last. */
+  async function viewerDelete(i: number) {
+    const it = viewerItems[i];
+    const e = byName.get(it.name);
+    if (!e) return;
+    await removeItems([e], false);
+    if (byName.has(it.name)) return; // cancelled or failed
+    const at = viewerItems.indexOf(it);
+    if (at < 0) return;
+    viewerItems = viewerItems.filter((x) => x !== it);
+    viewerIndex = viewerItems.length ? Math.min(at, viewerItems.length - 1) : -1;
+  }
 
   const waitForBusy = () => toast('Wait for the current action to finish.', 'info');
 
@@ -680,6 +702,8 @@
     items={viewerItems}
     bind:index={viewerIndex}
     onedit={(i) => { editing = viewerItems[i].path; viewerIndex = -1; }}
+    onshare={(i) => { const e = byName.get(viewerItems[i].name); if (e) void share(e); }}
+    ondelete={viewerDelete}
     onclose={() => (viewerIndex = -1)} />
   </div>
 {/if}
