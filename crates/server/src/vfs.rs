@@ -712,7 +712,8 @@ pub async fn read_stream(
                     })
                 }.map_err(io::Error::other)?;
                 if data.len() as u64 != r.end - r.start {
-                    Err(io::Error::new(io::ErrorKind::UnexpectedEof, "chunk shorter than recorded"))?;
+                    // (Damage, not a change: an internal error.)
+                    Err(io::Error::other("stored chunk shorter than recorded"))?;
                 }
                 yield data;
             }
@@ -946,7 +947,7 @@ async fn digest_node(st: &AppState, m: &Mount, rel: &str, node: &Node) -> ApiRes
     let mut s = read_stream(st, m, rel, node, 0, node.size as u64).await?;
     let mut h = blake3::Hasher::new();
     while let Some(b) = s.next().await {
-        h.update(&b.map_err(|e| ApiError::Internal(e.into()))?);
+        h.update(&b.map_err(crate::error::read_error)?);
     }
     Ok(Hash(*h.finalize().as_bytes()))
 }
@@ -1000,7 +1001,12 @@ async fn recheck_raw_base(
         if let Expect::Etag {
             base: Some(base), ..
         } = expect
-            && digest_node(st, m, rel, b).await? != *base
+            && match digest_node(st, m, rel, b).await {
+                Ok(h) => h != *base,
+                // It changed again while being read: not the base either.
+                Err(ApiError::Conflict(_)) => true,
+                Err(e) => return Err(e),
+            }
         {
             return Err(ApiError::PreconditionFailed(Some(etag_for(b))));
         }

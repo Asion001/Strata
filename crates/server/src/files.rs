@@ -129,7 +129,9 @@ pub async fn serve(
     // download there gets the whole file, never a splice of two versions.
     // (Media players send a plain Range, which still works.)
     let etag_now = etag.clone().unwrap_or_default();
-    let vouches = !(vfs::is_coarse(node) && headers.contains_key(header::IF_RANGE));
+    // (Nor does a weak backend validator: If-Range needs a strong one.)
+    let weak = node.etag.as_deref().is_some_and(|t| t.starts_with("W/"));
+    let vouches = !((vfs::is_coarse(node) || weak) && headers.contains_key(header::IF_RANGE));
     let range = if vouches
         && range::if_range_allows(
             headers
@@ -196,10 +198,14 @@ pub async fn serve(
                 }
             }
             let class = classify_head(st, m, rel, node, &head);
+            if (head.len() as u64) < end.min(full_head) {
+                // Shorter than its stat: it changed since.
+                return Err(ApiError::Conflict(
+                    "the file changed while being read; try again".into(),
+                ));
+            }
             let stream: vfs::ByteStream = if end < full_head {
-                // (The file may have turned out shorter than its stat.)
-                let n = (end as usize).min(head.len());
-                let part = bytes::Bytes::from(head).slice(..n);
+                let part = bytes::Bytes::from(head).slice(..end as usize);
                 Box::pin(futures::stream::once(async move { Ok(part) }))
             } else {
                 let replay = futures::stream::iter(peeked.into_iter().map(Ok));

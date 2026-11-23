@@ -83,7 +83,7 @@ pub async fn thumbnail(
             let mut s = vfs::read_stream(st, m, rel, node, 0, node.size as u64).await?;
             let mut src = Vec::with_capacity(node.size as usize);
             while let Some(b) = s.next().await {
-                src.extend_from_slice(&b.map_err(|e| ApiError::Internal(e.into()))?);
+                src.extend_from_slice(&b.map_err(crate::error::read_error)?);
             }
             let out = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<u8>> {
                 let img = image::load_from_memory(&src)?;
