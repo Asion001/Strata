@@ -2,6 +2,7 @@
 name = "strata-sync"
 description = "Placeholder for the Strata desktop/mobile sync engine (phase 3)."
 version.workspace = true
+publish = false
 edition.workspace = true
 license.workspace = true
 
