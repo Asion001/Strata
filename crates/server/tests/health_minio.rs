@@ -63,7 +63,11 @@ async fn minio_offline_and_back() {
         .local_addr()
         .unwrap()
         .port();
+    // The official MinIO images are no longer published on Docker Hub or
+    // quay.io; Chainguard's build (with `mc`) is, pinned by digest.
     let minio = match MinIO::default()
+        .with_name("cgr.dev/chainguard/minio")
+        .with_tag("latest@sha256:304e0bbeb70a9aa0c40ff26d5a9c0a24296019c6d326ba8b75214fb73441d6e9")
         .with_mapped_port(port, 9000.tcp())
         .start()
         .await
