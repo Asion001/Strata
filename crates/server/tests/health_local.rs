@@ -161,6 +161,15 @@ async fn an_empty_mount_point_left_by_an_unmounted_disk_is_not_the_folder() {
         0,
         "something was written to the empty mount point"
     );
+    // "Test" on the unchanged config agrees with the probes.
+    let tested = t
+        .ok(
+            "POST",
+            "/api/connections/test",
+            json!({"id": id, "config": {"kind": "local", "path": "disk"}}),
+        )
+        .await;
+    assert_eq!(tested["ok"], false, "{tested}");
 
     // Mounted again.
     std::fs::remove_dir(&dir).unwrap();
@@ -275,4 +284,22 @@ async fn busy_folders_repoints_and_nested_markers() {
             .join(format!("x/b/.strata-probe/conn-{id}"))
             .exists()
     );
+}
+
+#[tokio::test]
+async fn deleting_a_local_connection_removes_its_marker() {
+    let Some(t) = app().await else { return };
+    let c = t
+        .ok(
+            "POST",
+            "/api/connections",
+            json!({"name": "tmp", "config": {"kind": "local", "path": "tmp"}}),
+        )
+        .await;
+    let id = c["id"].as_i64().unwrap();
+    let dir = t.st.cfg.local_base.join("tmp");
+    assert!(dir.join(format!(".strata-probe/conn-{id}")).exists());
+    t.ok("DELETE", &format!("/api/connections/{id}"), json!({}))
+        .await;
+    assert!(!dir.join(".strata-probe").exists(), "marker left behind");
 }

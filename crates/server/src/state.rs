@@ -146,7 +146,7 @@ impl AppState {
         // A local folder that is gone (an unmounted disk) is refused at once,
         // not only after three failed probes: a write would otherwise create
         // the folder again on the disk underneath.
-        let (op, root, fresh) = self.operator_and_root(connection_id).await?;
+        let (op, root, fresh) = self.operator_and_root(connection_id, true).await?;
         if let Some(root) = root
             && !fresh
         {
@@ -171,9 +171,15 @@ impl AppState {
         self.offline.contains_key(&connection_id)
     }
 
-    /// The operator whatever the connection's health (for probes).
+    /// The operator whatever the connection's health.
     pub async fn operator_unchecked(&self, connection_id: i64) -> ApiResult<Operator> {
-        Ok(self.operator_and_root(connection_id).await?.0)
+        Ok(self.operator_and_root(connection_id, true).await?.0)
+    }
+
+    /// Like `operator_unchecked`, for a caller that has just checked the
+    /// local folder itself (a health probe, with its longer time limit).
+    pub async fn operator_after_check(&self, connection_id: i64) -> ApiResult<Operator> {
+        Ok(self.operator_and_root(connection_id, false).await?.0)
     }
 
     /// The (cached) operator and local folder; `fresh` when just built (its
@@ -181,6 +187,7 @@ impl AppState {
     async fn operator_and_root(
         &self,
         connection_id: i64,
+        check: bool,
     ) -> ApiResult<(Operator, Option<LocalRoot>, bool)> {
         if let Some(e) = self.ops.get(&connection_id) {
             let (op, root) = e.clone();
@@ -191,7 +198,9 @@ impl AppState {
         // A local folder is checked before its operator is built (building
         // one would create a missing folder).
         let root = self.local_root(connection_id, &cfg).await?;
-        if let Some(r) = &root {
+        if let Some(r) = &root
+            && check
+        {
             self.check_root(connection_id, r.clone(), Duration::from_secs(5))
                 .await
                 .map_err(|_| missing_folder())?;
@@ -333,10 +342,11 @@ impl AppState {
     }
 
     /// Is a local connection's folder there (and the right one)? Checked off
-    /// the async threads within `wait`. Checks of one connection run side by
-    /// side (busy folders get many requests at once), but at most
-    /// `ROOT_CHECKS` at a time: on a hung network mount, stuck threads can't
-    /// pile up beyond that, and further requests get 503 at once.
+    /// the async threads within `wait`. Checks of one connection run one at
+    /// a time; requests that arrived before a check started share its result
+    /// (a busy folder costs a couple of stats per burst). On a hung network
+    /// mount at most `BLOCKED_MAX` stuck checks are left behind; after that,
+    /// requests get 503 at once.
     pub async fn check_root(
         &self,
         connection_id: i64,

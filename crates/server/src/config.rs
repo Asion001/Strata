@@ -65,7 +65,7 @@ impl Config {
                 .unwrap_or(30),
             probe_secs: env("STRATA_PROBE_SECS")
                 .and_then(|v| v.parse().ok())
-                .filter(|&s: &u64| s >= 5)
+                .map(|s: u64| s.max(5))
                 .unwrap_or(60),
             data_dir,
         }

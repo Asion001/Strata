@@ -185,8 +185,13 @@ async fn probe_inner(st: &AppState, id: i64, counted: bool) -> anyhow::Result<Op
     let mut caps: Option<Capabilities> = None;
     // The full check runs on the first probe, after ten minutes, whenever
     // the last state wasn't ok, and for manual checks.
+    // (A connection degraded by a failed write test, with reads working,
+    // waits the ten minutes too: on read-only credentials every probe would
+    // otherwise repeat billed requests that can only fail.)
     let full = !counted
-        || prev != State::Ok
+        || prev == State::Unknown
+        || prev == State::Offline
+        || failures > 0
         || prev_caps.is_none()
         || st
             .full_checks
@@ -219,7 +224,8 @@ async fn probe_inner(st: &AppState, id: i64, counted: bool) -> anyhow::Result<Op
                         marker = Some(crate::state::LocalRoot::marker_path(&root.dir, id));
                     }
                 }
-                st.operator_unchecked(id).await.map_err(Ok)
+                // (No second, shorter folder check: it was just checked.)
+                st.operator_after_check(id).await.map_err(Ok)
             }
             .await
             {
@@ -228,7 +234,7 @@ async fn probe_inner(st: &AppState, id: i64, counted: bool) -> anyhow::Result<Op
                     Found::Down,
                     None,
                     Some(probe::Failure {
-                        reason: Reason::Misconfigured,
+                        reason: Reason::Failed,
                         detail: probe::sanitize(&e.to_string(), &[]),
                     }),
                 ),
@@ -346,7 +352,12 @@ async fn probe_inner(st: &AppState, id: i64, counted: bool) -> anyhow::Result<Op
     // only if it holds something: an empty folder may be the bare mount
     // point of a disk that isn't mounted right now, and marking that would
     // make it "the" folder.
-    let read_only = caps.as_ref().is_some_and(|c| c.read_only);
+    // (From this probe's detection, else the last one: probes between full
+    // checks detect nothing.)
+    let read_only = caps
+        .as_ref()
+        .or(prev_caps.as_ref())
+        .is_some_and(|c| c.read_only);
     if found == Found::Ok
         && !read_only
         && let Some(dir) = marker

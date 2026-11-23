@@ -406,6 +406,12 @@ pub async fn delete(
             "this connection holds hashed volumes with files; mount them again and delete the files first",
         ));
     }
+    // A local connection's marker goes with it (best effort, below).
+    let local_dir = st
+        .connection_config(id)
+        .await
+        .ok()
+        .and_then(|c| c.local_dir(&st.cfg.local_base).ok().flatten());
     let mut tx = st.db.begin().await?;
     sqlx::query("DELETE FROM volumes WHERE connection_id = $1")
         .bind(id)
@@ -417,6 +423,17 @@ pub async fn delete(
         .await?;
     tx.commit().await?;
     st.forget_connection(id);
+    if let Some(dir) = local_dir {
+        let marker = crate::state::LocalRoot::marker_path(&dir, id);
+        let _ = tokio::task::spawn_blocking(move || {
+            let _ = std::fs::remove_file(&marker);
+            // The probe folder too, if nothing else is in it.
+            if let Some(p) = marker.parent() {
+                let _ = std::fs::remove_dir(p);
+            }
+        })
+        .await;
+    }
     Ok(Json(json!({})))
 }
 
@@ -457,6 +474,21 @@ pub async fn test(
             .is_ok_and(|c| c == req.config),
         None => false,
     };
+    // A saved local folder is checked like the probes do (marker included):
+    // an empty mount point left by an unmounted disk isn't "reachable".
+    if unchanged
+        && let Some(id) = req.id
+        && let Some(root) = st.local_root(id, &req.config).await?
+        && let Err(detail) = st
+            .check_root(id, root, std::time::Duration::from_secs(20))
+            .await
+    {
+        return Ok(Json(json!({
+            "ok": false,
+            "reason": "not found",
+            "error": if u.is_admin { Some(detail) } else { None },
+        })));
+    }
     if let Some(dir) = req
         .config
         .local_dir(&st.cfg.local_base)
