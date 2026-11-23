@@ -173,15 +173,23 @@ async fn write_test(op: &Operator) -> Result<Option<bool>, StepError> {
         if back != data {
             return Err(StepError::Mismatch);
         }
-        // A read from an offset: a backend that ignores it (or refuses)
-        // can't serve byte ranges directly.
-        Ok(match op.read_with(&path).range(5..11).await {
-            Ok(b) => Some(b.to_vec() == data[5..11]),
-            Err(e) if e.kind() == opendal::ErrorKind::Unsupported => Some(false),
-            Err(_) => None,
-        })
+        Ok(())
     })
     .await;
+    // A read from an offset, on its own clock (it never fails the write
+    // test): a backend that ignores the offset or refuses it (FTP without
+    // REST) can't serve byte ranges directly. A timeout or a temporary
+    // error doesn't tell.
+    let ranges = match res {
+        Err(_) => None,
+        Ok(()) => {
+            match tokio::time::timeout(STEP_TIMEOUT, op.read_with(&path).range(5..11)).await {
+                Ok(Ok(b)) => Some(b.to_vec() == data[5..11]),
+                Ok(Err(e)) if !e.is_temporary() => Some(false),
+                _ => None,
+            }
+        }
+    };
     // Always delete, whatever happened above (a timed-out write may still
     // have landed).
     let del = step(async { Ok(op.delete(&path).await?) }).await;
@@ -197,7 +205,7 @@ async fn write_test(op: &Operator) -> Result<Option<bool>, StepError> {
     if empty {
         let _ = step(async { Ok(op.delete(&dir).await?) }).await;
     }
-    res.and_then(|r| del.map(|()| r))
+    res.and(del).map(|()| ranges)
 }
 
 /// Remove probe files an interrupted probe left behind.

@@ -57,10 +57,8 @@ pub async fn user_mounts(st: &AppState, user_id: i64) -> ApiResult<Arc<Vec<Mount
         return Ok(m.clone());
     }
     // A drop between this read and the insert below means the rows may be
-    // from before the change: they are used, but not cached. (One counter
-    // for all users: a drop for one user only skips caching others' loads
-    // that were in flight.)
-    let r#gen = st.mounts_gen.load(Ordering::SeqCst);
+    // from before the change: they are used, but not cached.
+    let r#gen = generation(st, user_id);
     let mut v: Vec<Mount> = sqlx::query_as(&format!("{SELECT} WHERE m.owner_id = $1"))
         .bind(user_id)
         .fetch_all(&st.db)
@@ -68,16 +66,24 @@ pub async fn user_mounts(st: &AppState, user_id: i64) -> ApiResult<Arc<Vec<Mount
     v.sort_by_key(|m| std::cmp::Reverse(m.path.len()));
     let v = Arc::new(v);
     if let dashmap::Entry::Vacant(e) = st.mounts.entry(user_id)
-        && st.mounts_gen.load(Ordering::SeqCst) == r#gen
+        && generation(st, user_id) == r#gen
     {
         e.insert(v.clone());
     }
     Ok(v)
 }
 
+/// Where a user's cached mounts are in their drops: (all users', theirs).
+fn generation(st: &AppState, user_id: i64) -> (u64, u64) {
+    (
+        st.mounts_gen.load(Ordering::SeqCst),
+        st.user_mounts_gen.get(&user_id).map_or(0, |g| *g),
+    )
+}
+
 /// Drop one user's cached mounts.
 pub fn invalidate(st: &AppState, user_id: i64) {
-    st.mounts_gen.fetch_add(1, Ordering::SeqCst);
+    *st.user_mounts_gen.entry(user_id).or_insert(0) += 1;
     st.mounts.remove(&user_id);
 }
 
