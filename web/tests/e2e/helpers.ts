@@ -2,6 +2,8 @@ import { expect, type Browser, type BrowserContext, type Page } from '@playwrigh
 import { blake3 } from 'hash-wasm';
 
 export const enabled = !!process.env.STRATA_E2E_PASSWORD;
+// In CI the tests must run: a missing server password would only skip them.
+if (process.env.CI && !enabled) throw new Error('STRATA_E2E_PASSWORD is not set in CI');
 
 export async function login(page: Page) {
   await page.goto('/login');
@@ -43,9 +45,8 @@ export async function readFile(page: Page, path: string): Promise<string> {
 /** Open a file in the editor from the folder listing. */
 export async function openEditor(page: Page, dir: string, name: string) {
   await page.goto(`/?p=${encodeURIComponent(dir)}`);
-  const row = page.locator('.entry', { hasText: name });
-  await row.getByRole('button', { name: 'Actions' }).click();
-  await page.getByRole('button', { name: 'Edit' }).click();
+  await page.getByRole('button', { name: `Actions for ${name}`, exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Edit', exact: true }).click();
   await expect(page.locator('.cm-content')).toBeVisible();
 }
 
@@ -86,5 +87,6 @@ export function makePdf(pageTexts: string[]): string {
 /** Open a file in the preview viewer from the folder listing. */
 export async function openPreview(page: Page, dir: string, name: string) {
   await page.goto(`/?p=${encodeURIComponent(dir)}`);
-  await page.locator('.entry', { hasText: name }).click();
+  // The row's name button opens the file (the row itself also selects).
+  await page.getByRole('row').filter({ hasText: name }).getByRole('button', { name, exact: true }).click();
 }
