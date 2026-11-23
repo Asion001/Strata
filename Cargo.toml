@@ -22,6 +22,14 @@ hex = "0.4"
 rand = "0.8"
 opendal = { version = "0.59", default-features = false, features = ["services-fs", "services-s3", "services-ftp", "executors-tokio", "http-transport-reqwest", "layers-retry", "layers-timeout"] }
 
+# Password hashing and content hashing stay fast in debug builds too (tests
+# and the CI e2e server sign in often).
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake3]
+opt-level = 3
+
 [profile.release]
 lto = "thin"
 codegen-units = 4
