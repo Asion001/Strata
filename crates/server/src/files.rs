@@ -122,13 +122,17 @@ pub async fn serve(
         );
         return Ok(resp);
     }
-    // A range only for the version the client has (If-Range), and only a
-    // strong one: a coarse raw version can miss a change.
+    // A range only for the version the client has (If-Range: an exact match
+    // of the current ETag; a header that can't be read counts as no match).
+    // A coarse raw version can miss a same-second rewrite, but refusing
+    // If-Range there would make every resumed download and media seek on
+    // such storage start over from byte 0, so an exact match is honoured.
     let etag_now = etag.clone().unwrap_or_default();
     let range = if range::if_range_allows(
-        headers.get(header::IF_RANGE).and_then(|v| v.to_str().ok()),
+        headers
+            .get(header::IF_RANGE)
+            .map(|v| v.to_str().unwrap_or("")),
         &etag_now,
-        !vfs::is_coarse(node),
     ) {
         range::parse(
             headers.get(header::RANGE).and_then(|v| v.to_str().ok()),
@@ -183,7 +187,9 @@ pub async fn serve(
             }
             let class = classify_head(st, m, rel, node, &head);
             let stream: vfs::ByteStream = if end < full_head {
-                let part = bytes::Bytes::from(head).slice(..(end as usize).min(full_head as usize));
+                // (The file may have turned out shorter than its stat.)
+                let n = (end as usize).min(head.len());
+                let part = bytes::Bytes::from(head).slice(..n);
                 Box::pin(futures::stream::once(async move { Ok(part) }))
             } else {
                 let replay = futures::stream::iter(peeked.into_iter().map(Ok));

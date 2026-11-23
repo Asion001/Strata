@@ -34,6 +34,15 @@ describe('media positions', () => {
     expect(Object.keys(JSON.parse(localStorage.getItem('strata-media-positions')!)).length).toBe(200);
   });
 
+  it('drops malformed entries and stores', () => {
+    localStorage.setItem('strata-media-positions', '[]');
+    remember('a.mp4', 50);
+    expect(resumeAt('a.mp4', 100)).toBe(50);
+    localStorage.setItem('strata-media-positions', JSON.stringify({ x: { t: 5 }, y: 'z', 'a.mp4': { t: 50, at: 1 } }));
+    expect(resumeAt('a.mp4', 100)).toBe(50);
+    expect(resumeAt('x', 100)).toBe(0);
+  });
+
   it('survives a broken store', () => {
     localStorage.setItem('strata-media-positions', '{not json');
     expect(resumeAt('a.mp4', 100)).toBe(0);

@@ -345,8 +345,9 @@ async fn probe_inner(st: &AppState, id: i64, counted: bool) -> anyhow::Result<Op
     }
     // Mounts carry `range_read` from the capabilities: cached mounts are
     // dropped when it changed.
-    if let (Some(new), Some(old)) = (&caps, &prev_caps)
-        && new.range_read != old.range_read
+    // (No earlier detection: mounts were cached as range_read = true.)
+    if let Some(new) = &caps
+        && new.range_read != prev_caps.as_ref().is_none_or(|c| c.range_read)
     {
         st.mounts.clear();
     }

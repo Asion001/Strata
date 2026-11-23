@@ -12,10 +12,23 @@ type Store = Record<string, { t: number; at: number }>;
 function load(): Store {
   try {
     const v = JSON.parse(localStorage.getItem(KEY) ?? '{}');
-    return v && typeof v === 'object' ? v : {};
+    if (!v || typeof v !== 'object' || Array.isArray(v)) return {};
+    // Only well-formed entries (a hand edit or another format is dropped).
+    const s: Store = {};
+    for (const [k, e] of Object.entries(v as Record<string, { t?: unknown; at?: unknown }>)) {
+      if (e && Number.isFinite(e.t) && Number.isFinite(e.at)) s[k] = { t: e.t as number, at: e.at as number };
+    }
+    return s;
   } catch {
     return {};
   }
+}
+
+/** Forget every position (on sign-out: they name private paths). */
+export function clearPositions() {
+  try {
+    localStorage.removeItem(KEY);
+  } catch {}
 }
 
 function save(s: Store) {

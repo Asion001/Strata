@@ -83,12 +83,12 @@ pub fn parse(header: Option<&str>, size: u64) -> Range {
 }
 
 /// Does an `If-Range` precondition let a range through? Only an exact match
-/// with the current strong ETag does; a weak tag, a date (we send no
-/// Last-Modified) or a version that can miss changes means the whole file.
-pub fn if_range_allows(if_range: Option<&str>, etag: &str, strong: bool) -> bool {
+/// with the current ETag does; a weak tag or a date (we send no
+/// Last-Modified) means the whole file.
+pub fn if_range_allows(if_range: Option<&str>, etag: &str) -> bool {
     match if_range.map(str::trim) {
         None => true,
-        Some(v) if v.starts_with('"') => strong && v == etag,
+        Some(v) if v.starts_with('"') => v == etag,
         Some(_) => false,
     }
 }
@@ -217,17 +217,12 @@ mod tests {
     #[test]
     fn if_range() {
         let et = "\"r3-abc\"";
-        assert!(if_range_allows(None, et, true));
-        assert!(if_range_allows(Some(et), et, true));
-        assert!(!if_range_allows(Some("\"r3-old\""), et, true));
-        assert!(!if_range_allows(Some("W/\"r3-abc\""), et, true));
-        assert!(!if_range_allows(
-            Some("Tue, 15 Nov 1994 08:12:31 GMT"),
-            et,
-            true
-        ));
-        // a version that can miss changes can't vouch for a range
-        assert!(!if_range_allows(Some(et), et, false));
+        assert!(if_range_allows(None, et));
+        assert!(if_range_allows(Some(et), et));
+        assert!(!if_range_allows(Some("\"r3-old\""), et));
+        assert!(!if_range_allows(Some("W/\"r3-abc\""), et));
+        assert!(!if_range_allows(Some("Tue, 15 Nov 1994 08:12:31 GMT"), et));
+        assert!(!if_range_allows(Some(""), et)); // unreadable header
     }
 
     #[test]

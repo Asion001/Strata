@@ -4,10 +4,17 @@
   // The rest streams in byte ranges as it plays or seeks.
   import { onDestroy } from 'svelte';
   import { forget, remember, resumeAt } from './positions';
+  import { isSignedIn } from '../editor/drafts';
 
-  /** `file`: the key its position is kept under (null: not kept, e.g. on a
-   *  public share page). */
-  let { kind, src, file, name }: { kind: 'video' | 'audio'; src: string; file: string | null; name: string } = $props();
+  /** `file`: the key its position is kept under, for user `owner` (null:
+   *  not kept, e.g. on a public share page). */
+  let {
+    kind,
+    src,
+    file,
+    owner,
+    name
+  }: { kind: 'video' | 'audio'; src: string; file: string | null; owner: number | null; name: string } = $props();
 
   let el = $state<HTMLMediaElement>();
   let lastSaved = 0;
@@ -26,6 +33,8 @@
   }
   function save(force = false) {
     if (!file || !el || !restored || ended || !Number.isFinite(el.currentTime)) return;
+    // Not after a sign-out (here or in another tab): positions name paths.
+    if (owner === null || !isSignedIn(owner)) return;
     const now = Date.now();
     if (!force && now - lastSaved < 2000) return;
     lastSaved = now;

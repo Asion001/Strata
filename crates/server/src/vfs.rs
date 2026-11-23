@@ -711,12 +711,17 @@ pub async fn read_stream(
         if start >= end {
             return Ok(Box::pin(futures::stream::empty()));
         }
-        let reader = op
-            .reader_with(&backend_path(m, rel, false))
-            .chunk(4 << 20)
-            .await?;
-        if m.range_read || start == 0 {
+        let path = backend_path(m, rel, false);
+        if m.range_read {
+            let reader = op.reader_with(&path).chunk(4 << 20).await?;
             let s = reader.into_bytes_stream(start..end).await?;
+            return Ok(Box::pin(s));
+        }
+        // No chunking here: a chunked reader reads at offsets, which this
+        // backend can't do; one plain read from the start.
+        let reader = op.reader_with(&path).await?;
+        if start == 0 {
+            let s = reader.into_bytes_stream(0..end).await?;
             return Ok(Box::pin(s));
         }
         // A backend that can't read from an offset: read from the start and

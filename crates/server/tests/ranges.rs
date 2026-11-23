@@ -36,10 +36,8 @@ async fn get(
     .await
 }
 
-/// Check every interesting range of `path` against `data`. `strong`: the
-/// backend's version is exact (else If-Range never lets a range through:
-/// a coarse version can miss a change).
-async fn check_ranges(t: &TestApp, path: &str, data: &[u8], chunk_bounds: &[usize], strong: bool) {
+/// Check every interesting range of `path` against `data`.
+async fn check_ranges(t: &TestApp, path: &str, data: &[u8], chunk_bounds: &[usize]) {
     let n = data.len() as u64;
     let (s, body, h) = get(t, path, &[]).await;
     assert_eq!(s, StatusCode::OK);
@@ -122,11 +120,7 @@ async fn check_ranges(t: &TestApp, path: &str, data: &[u8], chunk_bounds: &[usiz
     }
     // If-Range: the current ETag gets the range, anything else the file
     let (s, body, _) = get(t, path, &[("range", "bytes=0-9"), ("if-range", &etag)]).await;
-    if strong {
-        assert_eq!((s, body.len()), (StatusCode::PARTIAL_CONTENT, 10));
-    } else {
-        assert_eq!((s, body.len() as u64), (StatusCode::OK, n));
-    }
+    assert_eq!((s, body.len()), (StatusCode::PARTIAL_CONTENT, 10));
     for other in ["\"r3-old\"", "W/\"x\"", "Tue, 15 Nov 1994 08:12:31 GMT"] {
         let (s, body, _) = get(t, path, &[("range", "bytes=0-9"), ("if-range", other)]).await;
         assert_eq!((s, body.len() as u64), (StatusCode::OK, n), "{other}");
@@ -151,7 +145,7 @@ async fn hashed_and_raw_local() {
     t.upload("big.bin", &d).await;
     let lens = strata_storage::chunker::chunk_lengths(&d);
     assert!(lens.len() > 1, "want several chunks");
-    check_ranges(&t, "big.bin", &d, &bounds(&lens), true).await;
+    check_ranges(&t, "big.bin", &d, &bounds(&lens)).await;
 
     let c = t
         .ok(
@@ -168,7 +162,7 @@ async fn hashed_and_raw_local() {
     .await;
     let d = data(1 << 20, 2);
     t.upload("disk/raw.bin", &d).await;
-    check_ranges(&t, "disk/raw.bin", &d, &[], true).await;
+    check_ranges(&t, "disk/raw.bin", &d, &[]).await;
 }
 
 fn require_docker(e: impl std::fmt::Debug, what: &str) -> Option<()> {
@@ -226,7 +220,7 @@ async fn raw_on_minio() {
     .await;
     let d = data(1 << 20, 3);
     t.upload("s3/raw.bin", &d).await;
-    check_ranges(&t, "s3/raw.bin", &d, &[], true).await;
+    check_ranges(&t, "s3/raw.bin", &d, &[]).await;
 }
 
 #[tokio::test]
@@ -288,8 +282,7 @@ async fn raw_on_ftp() {
     .await;
     let d = data(256 << 10, 4);
     t.upload("ftp/raw.bin", &d).await;
-    // FTP versions are mtime-based, seconds at best.
-    check_ranges(&t, "ftp/raw.bin", &d, &[], false).await;
+    check_ranges(&t, "ftp/raw.bin", &d, &[]).await;
 }
 
 /// A range in the middle of a large hashed file reads only the chunks that

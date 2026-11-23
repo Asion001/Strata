@@ -125,6 +125,7 @@
       <!-- Keyed by file: each one gets a fresh player and its own position. -->
       {#key item.src}
         <MediaPlayer kind={isVideo(item.name) ? 'video' : 'audio'} src={item.src} name={item.name}
+          owner={session.user?.id ?? null}
           file={session.user && !item.src.startsWith('/api/public/') ? `${session.user.id}|${item.src}` : null} />
       {/key}
     {:else if text !== null}
