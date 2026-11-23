@@ -69,6 +69,8 @@ async fn minio_offline_and_back() {
         .await
     {
         Ok(c) => c,
+        // In CI it must run: a skip there would hide the whole test.
+        Err(e) if std::env::var_os("CI").is_some() => panic!("can't start MinIO: {e:?}"),
         Err(e) => {
             eprintln!("skipping: can't start MinIO (Docker running?): {e}");
             return;
