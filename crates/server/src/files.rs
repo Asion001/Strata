@@ -124,16 +124,19 @@ pub async fn serve(
     }
     // A range only for the version the client has (If-Range: an exact match
     // of the current ETag; a header that can't be read counts as no match).
-    // A coarse raw version can miss a same-second rewrite, but refusing
-    // If-Range there would make every resumed download and media seek on
-    // such storage start over from byte 0, so an exact match is honoured.
+    // A coarse raw version (no backend etag, seconds-only mtime) can stay
+    // the same across a rewrite, so it never vouches for a range: a resumed
+    // download there gets the whole file, never a splice of two versions.
+    // (Media players send a plain Range, which still works.)
     let etag_now = etag.clone().unwrap_or_default();
-    let range = if range::if_range_allows(
-        headers
-            .get(header::IF_RANGE)
-            .map(|v| v.to_str().unwrap_or("")),
-        &etag_now,
-    ) {
+    let vouches = !(vfs::is_coarse(node) && headers.contains_key(header::IF_RANGE));
+    let range = if vouches
+        && range::if_range_allows(
+            headers
+                .get(header::IF_RANGE)
+                .map(|v| v.to_str().unwrap_or("")),
+            &etag_now,
+        ) {
         range::parse(
             headers.get(header::RANGE).and_then(|v| v.to_str().ok()),
             size,

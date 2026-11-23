@@ -361,6 +361,8 @@ pub async fn update(
         // A new target starts over: not offline, a fresh failure count, and
         // (local) its own folder marker.
         st.offline.remove(&id);
+        // Cached mounts carry the old target's capabilities (range_read).
+        st.mounts.clear();
         if req.config.kind() == "local"
             && let Err(e) = st.mark_root(id, None).await
         {

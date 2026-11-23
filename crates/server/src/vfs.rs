@@ -717,21 +717,21 @@ pub async fn read_stream(
             let s = reader.into_bytes_stream(start..end).await?;
             return Ok(Box::pin(s));
         }
-        // No chunking here: a chunked reader reads at offsets, which this
-        // backend can't do; one plain read from the start.
-        let reader = op.reader_with(&path).await?;
-        if start == 0 {
-            let s = reader.into_bytes_stream(0..end).await?;
-            return Ok(Box::pin(s));
+        // A backend that can't read ranges: one plain, unbounded read from
+        // the start (no chunking, which reads at offsets), dropping what
+        // comes before the range and stopping after it. Slow for late
+        // offsets, so it is logged once per connection.
+        static WARNED: std::sync::LazyLock<dashmap::DashSet<i64>> =
+            std::sync::LazyLock::new(dashmap::DashSet::new);
+        if start > 0 && WARNED.insert(m.connection_id) {
+            tracing::warn!(
+                "connection {}: no range reads; ranges are read from the start",
+                m.connection_id
+            );
         }
-        // A backend that can't read from an offset: read from the start and
-        // drop what comes before the range (slow for late offsets).
-        tracing::warn!(
-            "connection {}: no range reads; reading {start} bytes to discard them",
-            m.connection_id
-        );
-        let s = reader.into_bytes_stream(0..end).await?;
-        Ok(Box::pin(skip_bytes(s, start)))
+        let reader = op.reader_with(&path).await?;
+        let s = reader.into_bytes_stream(..).await?;
+        Ok(Box::pin(take_bytes(skip_bytes(s, start), end - start)))
     }
 }
 
@@ -1023,6 +1023,26 @@ async fn overlapping_raw_volumes(st: &AppState, m: &Mount) -> ApiResult<Vec<i64>
         }
     }
     Ok(out)
+}
+
+/// The first `n` bytes of a byte stream; it ends there, without waiting for
+/// (or reading) anything after them.
+fn take_bytes(
+    s: impl Stream<Item = io::Result<Bytes>> + Send + 'static,
+    n: u64,
+) -> impl Stream<Item = io::Result<Bytes>> + Send + 'static {
+    futures::stream::unfold((Box::pin(s), n), |(mut s, left)| async move {
+        if left == 0 {
+            return None;
+        }
+        match s.next().await? {
+            Ok(b) => {
+                let keep = (b.len() as u64).min(left);
+                Some((Ok(b.slice(..keep as usize)), (s, left - keep)))
+            }
+            Err(e) => Some((Err(e), (s, 0))),
+        }
+    })
 }
 
 /// Drop the first `n` bytes of a byte stream.
@@ -1773,6 +1793,27 @@ pub async fn search(st: &AppState, user_id: i64, q: &str, limit: i64) -> ApiResu
 #[cfg(test)]
 mod skip_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn take_bytes_stops_exactly() {
+        let parts = || {
+            futures::stream::iter(
+                ["abc", "", "defg", "h"].map(|s| Ok::<_, io::Error>(Bytes::from(s))),
+            )
+        };
+        for n in 0..=9u64 {
+            let got: Vec<u8> = take_bytes(parts(), n)
+                .map(|b| b.unwrap().to_vec())
+                .concat()
+                .await;
+            assert_eq!(got, &b"abcdefgh"[..(n as usize).min(8)], "take {n}");
+        }
+        let got: Vec<u8> = take_bytes(skip_bytes(parts(), 2), 4)
+            .map(|b| b.unwrap().to_vec())
+            .concat()
+            .await;
+        assert_eq!(got, b"cdef");
+    }
 
     #[tokio::test]
     async fn skip_bytes_drops_exactly_the_prefix() {

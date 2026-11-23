@@ -178,8 +178,9 @@ single byte range (RFC 9110).
   sniff.
 * **Raw mounts.** The backend reads the range itself (local, S3 and FTP
   all can). A backend whose capabilities say it can't (`range_read:
-  false`; none of the current ones) is read from the start, and the bytes
-  before the range are dropped, with a warning.
+  false`; none of the current ones) is read in one plain read from the
+  start, dropping the bytes before the range and stopping after it (logged
+  once per connection).
 * **Playback.** Opening a file starts playback, from where it stopped last
   time.
 * **Memory.** Responses stream with backpressure, so memory per download
