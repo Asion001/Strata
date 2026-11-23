@@ -7,7 +7,7 @@
 // confirmed, written after every chunk: a resumed upload asks the server
 // what is still missing and sends only that, never a finished chunk again.
 
-import { byUser, tx } from './idb';
+import { byUser, db, tx } from './idb';
 import { isActive, type Chunk, type Job, type State } from './jobs';
 
 export * from './jobs';
@@ -92,8 +92,25 @@ type Stored = Blob | { parts: ArrayBuffer[]; type: string } | { memory: true };
  *  context gives up on them. */
 export const STORING_GRACE = 60 * 60 * 1000;
 
+// Where IndexedDB can't be used at all (site data blocked), the queue
+// lives in this page's memory: uploads still run, they just can't outlive it.
+let memJobs: Map<string, Job> | null = null;
+let probing: Promise<boolean> | null = null;
+async function memory(): Promise<Map<string, Job> | null> {
+  probing ??= db().then(
+    () => false,
+    () => true
+  );
+  if (await probing) memJobs ??= new Map();
+  return memJobs;
+}
+
 /** Keep a job's bytes. Resolves how: 'blob', 'buffers' or 'memory'. */
 export async function keepBytes(id: string, blob: Blob): Promise<'blob' | 'buffers' | 'memory'> {
+  if (await memory()) {
+    inMemory.set(id, blob);
+    return 'memory';
+  }
   try {
     await tx('blobs', 'readwrite', (s) => void s.put(blob, id));
     return 'blob';
@@ -119,11 +136,14 @@ export async function keepBytes(id: string, blob: Blob): Promise<'blob' | 'buffe
 async function bytesOf(id: string): Promise<Blob | 'pending' | null> {
   const m = inMemory.get(id);
   if (m) return m;
+  if (await memory()) return null;
   const s = await tx<Stored | undefined>('blobs', 'readonly', (st) => st.get(id));
   if (!s) return 'pending';
   if (s instanceof Blob) return s;
   if ('parts' in s) return new Blob(s.parts, { type: s.type });
-  return null; // (in another page's memory, which is gone or elsewhere)
+  // In some page's memory: maybe another tab uploading it now. It waits
+  // like a pending one, and is given up after the same grace.
+  return 'pending';
 }
 
 export const GONE = 'The file is no longer available here; add it again.';
@@ -152,15 +172,26 @@ export const hasBytes = async (id: string) => (await bytesOf(id)) instanceof Blo
 export const holdBytes = (id: string, blob: Blob) => void inMemory.set(id, blob);
 
 export async function jobs(user: number): Promise<Job[]> {
-  const all = await byUser<Job>('jobs', user);
+  const m = await memory();
+  const all = m ? [...m.values()].filter((j) => j.user === user) : await byUser<Job>('jobs', user);
   return Promise.all(all.sort((a, b) => a.created - b.created).map(withBytes));
 }
 /** Save a job's state (never its bytes: see `keepBytes`). */
-export const save = (j: Job) => tx('jobs', 'readwrite', (s) => void s.put({ ...j, blob: undefined }));
+export async function save(j: Job) {
+  const m = await memory();
+  if (m) m.set(j.id, j);
+  else await tx('jobs', 'readwrite', (s) => void s.put({ ...j, blob: undefined }));
+}
 
 /** Save a job's state only if it is still queued: one cancelled (from any
  *  tab) is never written back. Resolves whether it was. */
 export async function update(j: Job): Promise<boolean> {
+  const m = await memory();
+  if (m) {
+    if (!m.has(j.id)) return false;
+    m.set(j.id, j);
+    return true;
+  }
   let there = false;
   await tx('jobs', 'readwrite', (s) => {
     const g = s.get(j.id);
@@ -173,11 +204,14 @@ export async function update(j: Job): Promise<boolean> {
 }
 export async function remove(id: string) {
   inMemory.delete(id);
+  const m = await memory();
+  if (m) return void m.delete(id);
   await tx('jobs', 'readwrite', (s) => void s.delete(id));
   await tx('blobs', 'readwrite', (s) => void s.delete(id));
 }
 export async function load(id: string): Promise<Job | undefined> {
-  const j = await tx<Job | undefined>('jobs', 'readonly', (s) => s.get(id));
+  const m = await memory();
+  const j = m ? m.get(id) : await tx<Job | undefined>('jobs', 'readonly', (s) => s.get(id));
   return j && withBytes(j);
 }
 
@@ -324,7 +358,8 @@ export async function run(job: Job, d: Deps, signal?: AbortSignal, restarts = 0)
       }
       // Send what the server is missing, each distinct chunk once, a few
       // at a time; each is recorded as soon as the server confirms it.
-      const todo = j.chunks!.filter((c, i, all) => !j.sent.includes(c.hash) && all.findIndex((x) => x.hash === c.hash) === i);
+      const have = new Set(j.sent);
+      const todo = j.chunks!.filter((c) => !have.has(c.hash) && (have.add(c.hash), true));
       const session = j.session;
       let next = 0;
       let lost = false;

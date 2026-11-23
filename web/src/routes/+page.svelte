@@ -207,7 +207,7 @@
       }
       mount = r.mount;
     } catch (e) {
-      if (my === seq) { error = (e as Error).message; entries = []; }
+      if (my === seq) { error = (e as Error).message; entries = []; offlineAt = null; }
     } finally {
       if (my === seq) loading = false;
     }
@@ -446,7 +446,7 @@
   }
   // Back online: the folder again (and no "offline" banner).
   $effect(() => {
-    const back = () => { if (offlineAt) load(); };
+    const back = () => { if (offlineAt || error) load(); };
     window.addEventListener('online', back);
     return () => window.removeEventListener('online', back);
   });

@@ -5,6 +5,7 @@
 
 import { byUser, tx, wipe } from './idb';
 import { admits, evictions, limits, type Limits } from './lru';
+import { NETWORK_ONLY } from './keys';
 
 export interface Recent {
   /** `${user}|${path}` */
@@ -61,7 +62,7 @@ export async function trim(user: number, l: Limits = limits(capMb())) {
 /** Store a file's bytes (fetched from `url`) under its version. */
 async function store(user: number, path: string, etag: string, url: string, pinned: boolean, l: Limits): Promise<Recent | 'unreadable' | 'too-big'> {
   const others = (await list(user)).filter((r) => r.pinned && r.path !== path).reduce((a, r) => a + r.size, 0);
-  const r = await fetch(url, { credentials: 'same-origin' });
+  const r = await fetch(url, { credentials: 'same-origin', headers: { [NETWORK_ONLY]: '1' } });
   if (!r.ok) return 'unreadable';
   const declared = Number(r.headers.get('content-length') ?? NaN);
   // Too big: don't even read it.

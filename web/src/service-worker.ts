@@ -17,7 +17,7 @@ import { build, files, version } from '$service-worker';
 import { LISTS, lookup } from '$lib/offline/recent';
 import { drain } from '$lib/offline/queue';
 import { chunkFile } from '$lib/offline/chunks';
-import { USER_KEY, META, OFFLINE_AT, SYNC_TAG } from '$lib/offline/keys';
+import { USER_KEY, META, OFFLINE_AT, SYNC_TAG, NETWORK_ONLY } from '$lib/offline/keys';
 import { ranged } from '$lib/offline/range';
 
 const sw = self as unknown as ServiceWorkerGlobalScope;
@@ -63,7 +63,15 @@ async function listing(req: Request, user: string): Promise<Response> {
     const r = await fetch(req);
     if (r.ok) {
       const body = await r.clone().arrayBuffer();
-      await cache.put(key, new Response(body, { headers: { 'content-type': 'application/json', [OFFLINE_AT]: new Date().toISOString() } }));
+      // Kept only when it is this user's (the server says whose it is: the
+      // tab's idea of who is signed in can be stale).
+      let owner: unknown = null;
+      try {
+        owner = JSON.parse(new TextDecoder().decode(body)).user;
+      } catch {}
+      if (String(owner) === user) {
+        await cache.put(key, new Response(body, { headers: { 'content-type': 'application/json', [OFFLINE_AT]: new Date().toISOString() } }));
+      } else await cache.delete(key);
     } else if (r.status === 401 || r.status === 403) {
       // Not this user's (any more): nothing of it stays.
       await cache.delete(key);
@@ -81,6 +89,9 @@ async function content(req: Request): Promise<Response> {
   try {
     return await fetch(req);
   } catch (e) {
+    // The app storing a file for offline wants the server's bytes or
+    // nothing, never an older stored copy.
+    if (req.headers.has(NETWORK_ONLY)) throw e;
     const user = await currentUser();
     const path = new URL(req.url).searchParams.get('path');
     if (user === null || path === null) throw e;
@@ -139,9 +150,9 @@ sw.addEventListener('sync', ((event: SyncEvent) => {
   if (event.tag !== SYNC_TAG) return;
   event.waitUntil(
     (async () => {
-      // An open tab runs the queue itself (and shows its progress): fail
-      // this attempt, so the browser tries again later, maybe tab-less.
-      if ((await sw.clients.matchAll({ type: 'window', includeUncontrolled: true })).length) throw new Error('a tab is running the queue');
+      // An open tab runs the queue itself (and shows its progress); the
+      // app registers this sync again when it goes away or offline.
+      if ((await sw.clients.matchAll({ type: 'window', includeUncontrolled: true })).length) return;
       // The signed-in user, from the server (the queue only runs as them).
       const r = await fetch('/api/auth/me', { headers: { 'x-strata': '1' } });
       if (!r.ok) return;

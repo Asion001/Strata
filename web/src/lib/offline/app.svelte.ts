@@ -158,9 +158,12 @@ let retryDelay = 15_000;
 export async function startQueue(user: number, done: (j: Job) => void) {
   queueUser = user;
   onDone = done;
-  uploads.jobs = await Queue()
+  const loaded = await Queue()
     .then((queue) => queue.jobs(user))
-    .catch(() => []);
+    .catch(() => [] as Job[]);
+  // (Merged: files added while this was loading stay listed.)
+  const known = new Set(uploads.jobs.map((j) => j.id));
+  uploads.jobs = [...uploads.jobs, ...loaded.filter((j) => !known.has(j.id))];
   pump();
 }
 if (typeof window !== 'undefined') window.addEventListener('online', () => pump());
@@ -187,12 +190,25 @@ export async function enqueue(user: number, items: { file: File; path: string }[
     );
   }
   pump();
-  // Where the browser can, finish even if the tab is closed.
+  await Promise.all(keeping);
+}
+
+/** Background Sync (where the browser has it): asked for when this page
+ *  goes away or offline with uploads left, so the worker finishes them
+ *  without a tab. (While a tab is open, it runs the queue itself.) */
+async function askForSync() {
+  if (!uploads.jobs.some(isActive)) return;
   try {
     const reg = await navigator.serviceWorker?.ready;
     await (reg as ServiceWorkerRegistration & { sync?: { register(t: string): Promise<void> } })?.sync?.register(SYNC_TAG);
   } catch {}
-  await Promise.all(keeping);
+}
+if (typeof window !== 'undefined') {
+  window.addEventListener('offline', () => void askForSync());
+  window.addEventListener('pagehide', () => void askForSync());
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') void askForSync();
+  });
 }
 
 export async function cancelUpload(id: string) {
@@ -247,10 +263,11 @@ export async function watchUpdates() {
   reg.addEventListener('updatefound', () => follow(reg.installing));
   // A new worker took over (from this tab or another): reload, so no tab
   // keeps running the old app against the new worker and assets.
+  // (Not for the first worker claiming a fresh page, unless asked to.)
   const hadController = !!navigator.serviceWorker.controller;
   let reloading = false;
   navigator.serviceWorker.addEventListener('controllerchange', () => {
-    if (reloading || !hadController) return;
+    if (reloading || !(hadController || asked)) return;
     reloading = true;
     location.reload();
   });
@@ -260,7 +277,9 @@ export async function watchUpdates() {
   });
 }
 
+let asked = false;
 export function applyUpdate() {
+  asked = true;
   if (!waiting) return location.reload();
   waiting.postMessage('skip-waiting');
 }

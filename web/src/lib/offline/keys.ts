@@ -7,3 +7,5 @@ export const USER_KEY = '/__offline/user';
 export const OFFLINE_AT = 'x-strata-offline-at';
 /** Background Sync tag for the upload queue. */
 export const SYNC_TAG = 'strata-uploads';
+/** On a request: the network's answer or none, never an offline copy. */
+export const NETWORK_ONLY = 'x-strata-network-only';

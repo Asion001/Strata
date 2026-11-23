@@ -17,9 +17,11 @@
     busy = true;
     error = '';
     try {
+      // A sign-out that couldn't reach the server ends that session first.
+      const offline = await import('$lib/offline/app.svelte');
+      await offline.finishPendingLogout(() => api('POST', '/api/auth/logout'));
       const r = await api('POST', '/api/auth/login', { username, password });
-      // (A sign-out that couldn't reach the server is moot now.)
-      (await import('$lib/offline/app.svelte')).clearPendingLogout();
+      offline.clearPendingLogout();
       session.user = r.user;
       session.checked = true;
       // Unsaved drafts of anyone else who used this browser go away.
