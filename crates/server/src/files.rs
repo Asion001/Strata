@@ -48,7 +48,7 @@ async fn head_bytes(st: &AppState, m: &Mount, rel: &str, node: &Node) -> ApiResu
     let mut s = vfs::read_stream(st, m, rel, node, 0, n).await?;
     let mut out = Vec::with_capacity(n as usize);
     while let Some(b) = s.next().await {
-        out.extend_from_slice(&b.map_err(|e| ApiError::Internal(e.into()))?);
+        out.extend_from_slice(&b.map_err(crate::error::read_error)?);
     }
     Ok(out)
 }
@@ -191,7 +191,7 @@ pub async fn serve(
                         head.extend_from_slice(&b[..take]);
                         peeked.push(b);
                     }
-                    Some(Err(e)) => return Err(ApiError::Internal(e.into())),
+                    Some(Err(e)) => return Err(crate::error::read_error(e)),
                     None => break,
                 }
             }

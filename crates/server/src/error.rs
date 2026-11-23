@@ -73,6 +73,21 @@ impl From<opendal::Error> for ApiError {
     }
 }
 
+/// An error while reading a file's stream, before anything was sent: a
+/// file that changed since it was stat'ed (a pinned read found a newer
+/// version, or it ended early) is a 409; anything else is internal.
+pub fn read_error(e: std::io::Error) -> ApiError {
+    let changed = e.kind() == std::io::ErrorKind::UnexpectedEof
+        || e.get_ref()
+            .and_then(|i| i.downcast_ref::<opendal::Error>())
+            .is_some_and(|o| o.kind() == opendal::ErrorKind::ConditionNotMatch);
+    if changed {
+        ApiError::Conflict("the file changed while being read; try again".into())
+    } else {
+        ApiError::Internal(e.into())
+    }
+}
+
 /// A filesystem error from direct local access (outside OpenDAL).
 pub fn io_error(e: std::io::Error) -> ApiError {
     if e.kind() == std::io::ErrorKind::ReadOnlyFilesystem {
@@ -121,5 +136,21 @@ impl IntoResponse for ApiError {
             return resp;
         }
         (status, Json(json!({ "error": msg }))).into_response()
+    }
+}
+
+#[cfg(test)]
+mod read_error_tests {
+    use super::*;
+
+    #[test]
+    fn changed_files_are_conflicts() {
+        let stale = opendal::Error::new(opendal::ErrorKind::ConditionNotMatch, "412");
+        let e = std::io::Error::other(stale);
+        assert!(matches!(read_error(e), ApiError::Conflict(_)));
+        let short = std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "short");
+        assert!(matches!(read_error(short), ApiError::Conflict(_)));
+        let other = std::io::Error::other(opendal::Error::new(opendal::ErrorKind::Unexpected, "x"));
+        assert!(matches!(read_error(other), ApiError::Internal(_)));
     }
 }
