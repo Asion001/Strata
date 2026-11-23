@@ -41,5 +41,6 @@ cookie = "0.18"
 
 [dev-dependencies]
 tempfile = "3"
+testcontainers-modules = { version = "0.15", features = ["minio"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"

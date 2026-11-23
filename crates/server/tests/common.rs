@@ -83,6 +83,7 @@ pub async fn app() -> Option<TestApp> {
         session_days: 1,
         gc_grace_hours: 24,
         raw_ttl_secs: 0,
+        probe_secs: 60,
     };
     let pool = sqlx::PgPool::connect(&url).await.unwrap();
     let st = AppState::with_pool(cfg, pool).await.unwrap();

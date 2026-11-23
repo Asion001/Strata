@@ -126,6 +126,8 @@ async fn insert(st: &AppState, scope: Scope, changes: &[Change]) -> ApiResult<()
     let _ = st.events.send(ChangeEvent {
         volume_id: vid,
         user_id: uid,
+        connection_id: None,
+        audience: None,
     });
     Ok(())
 }
@@ -496,6 +498,8 @@ pub fn spawn_listener(st: AppState) {
                         let _ = st.events.send(ChangeEvent {
                             volume_id: None,
                             user_id: None,
+                            connection_id: None,
+                            audience: None,
                         });
                         backoff = std::time::Duration::from_secs(1);
                         fresh = false;
@@ -514,6 +518,8 @@ pub fn spawn_listener(st: AppState) {
                     let _ = st.events.send(ChangeEvent {
                         volume_id: vid,
                         user_id: uid,
+                        connection_id: None,
+                        audience: None,
                     });
                 }
                 #[allow(unreachable_code)]
@@ -569,6 +575,13 @@ async fn ws_loop(st: AppState, user_id: i64, mut socket: WebSocket) {
     loop {
         tokio::select! {
             ev = rx.recv() => match ev {
+                Ok(ChangeEvent { connection_id: Some(c), audience, .. }) => {
+                    // Health changes go out at once: `{"health": <connection id>}`.
+                    if audience.is_some_and(|a| a.contains(&user_id)) {
+                        let msg = json!({ "health": c }).to_string();
+                        if socket.send(Message::Text(msg.into())).await.is_err() { return; }
+                    }
+                }
                 Ok(ev) => {
                     if !pending && relevant(&st, user_id, &ev).await {
                         pending = true;

@@ -51,6 +51,17 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # A btrfs loop device for the capability-detection test (snapshots on
+      # btrfs); the MinIO tests use the runner's Docker.
+      - name: btrfs test filesystem
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq btrfs-progs
+          truncate -s 300M "$RUNNER_TEMP/btrfs.img"
+          mkfs.btrfs -q "$RUNNER_TEMP/btrfs.img"
+          sudo mkdir -p /mnt/btrfs
+          sudo mount -o loop,user_subvol_rm_allowed "$RUNNER_TEMP/btrfs.img" /mnt/btrfs
+          sudo chown "$(id -u):$(id -g)" /mnt/btrfs
+          echo "STRATA_TEST_BTRFS_DIR=/mnt/btrfs" >> "$GITHUB_ENV"
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace

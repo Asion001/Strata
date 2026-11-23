@@ -1,14 +1,11 @@
 //! Connections CRUD and health probes.
 
-use std::time::Duration;
-
 use axum::Json;
 use axum::extract::{Path, State};
 use chrono::{DateTime, Utc};
-use opendal::Operator;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use strata_storage::{Capabilities, ConnectionConfig, paths};
+use strata_storage::{ConnectionConfig, paths};
 
 use crate::auth::{AuthUser, User};
 use crate::error::{ApiError, ApiResult, bad, conflict};
@@ -23,8 +20,14 @@ pub struct ConnectionView {
     pub config: ConnectionConfig,
     pub capabilities: serde_json::Value,
     pub is_default: bool,
+    /// ok | degraded | offline | unknown (not probed yet)
     pub health: String,
+    /// Why the last probe failed, in plain words anyone may see.
+    pub health_reason: Option<String>,
+    /// The backend's own (sanitized) message: admins only, since it can
+    /// name hosts and paths.
     pub health_error: Option<String>,
+    pub health_latency_ms: Option<i32>,
     pub health_checked_at: Option<DateTime<Utc>>,
 }
 
@@ -38,14 +41,16 @@ struct Row {
     capabilities: serde_json::Value,
     is_default: bool,
     health: String,
+    health_reason: Option<String>,
     health_error: Option<String>,
+    health_latency_ms: Option<i32>,
     health_checked_at: Option<DateTime<Utc>>,
 }
 
-const COLS: &str = "id, owner_id, name, kind, config_enc, capabilities, is_default, health, health_error, health_checked_at";
+const COLS: &str = "id, owner_id, name, kind, config_enc, capabilities, is_default, health, health_reason, health_error, health_latency_ms, health_checked_at";
 
 impl Row {
-    fn view(self, st: &AppState) -> ApiResult<ConnectionView> {
+    fn view(self, st: &AppState, admin: bool) -> ApiResult<ConnectionView> {
         let cfg = st.decrypt_config(&self.config_enc)?;
         Ok(ConnectionView {
             id: self.id,
@@ -56,7 +61,9 @@ impl Row {
             capabilities: self.capabilities,
             is_default: self.is_default,
             health: self.health,
-            health_error: self.health_error,
+            health_reason: self.health_reason,
+            health_error: if admin { self.health_error } else { None },
+            health_latency_ms: self.health_latency_ms,
             health_checked_at: self.health_checked_at,
         })
     }
@@ -171,7 +178,7 @@ pub async fn list(
     .await?;
     Ok(Json(
         rows.into_iter()
-            .map(|r| r.view(&st))
+            .map(|r| r.view(&st, u.is_admin))
             .collect::<ApiResult<_>>()?,
     ))
 }
@@ -182,83 +189,21 @@ pub struct UpsertReq {
     pub config: ConnectionConfig,
 }
 
-/// Probe a backend: list its root, with a timeout.
-pub async fn probe_operator(op: &Operator) -> Result<(), String> {
-    match tokio::time::timeout(Duration::from_secs(20), op.list("/")).await {
-        Ok(Ok(_)) => Ok(()),
-        Ok(Err(e)) => Err(e.to_string()),
-        Err(_) => Err("timed out after 20s".into()),
-    }
-}
-
-/// Probe a connection and store what it can do now. A local folder may have
-/// been remounted read-only (or writable) since its operator was cached, so
-/// a fresh operator is built off the async workers, with a timeout (a hung
-/// network mount must not stall the server), and replaces the cached one when
-/// writability changed.
-async fn probe_fresh(st: &AppState, id: i64) -> Result<(), String> {
-    let cached = st.operator(id).await.map_err(|e| e.to_string())?;
-    probe_operator(&cached).await?;
-    let Ok(cfg) = st.connection_config(id).await else {
-        return Ok(());
-    };
-    let caps = if cfg.kind() == "local" {
-        let base = st.cfg.local_base.clone();
-        let c = cfg.clone();
-        let build = tokio::task::spawn_blocking(move || {
-            c.operator(&base)
-                .map(|op| Capabilities::detect(&c, &op, &base))
-        });
-        match tokio::time::timeout(Duration::from_secs(20), build).await {
-            Ok(Ok(Ok(caps))) => caps,
-            // The cached operator just listed the folder, so the connection
-            // is healthy; only the capability refresh is skipped this time.
-            other => {
-                tracing::warn!("connection {id}: capability refresh failed: {other:?}");
-                return Ok(());
-            }
-        }
-    } else {
-        Capabilities::detect(&cfg, &cached, &st.cfg.local_base)
-    };
-    // An admin may have saved a new config meanwhile; its capabilities win.
-    if st.connection_config(id).await.ok().as_ref() != Some(&cfg) {
-        return Ok(());
-    }
-    if caps.read_only == cached.info().capability().write {
-        st.forget_operator(id);
-    }
-    let _ = sqlx::query("UPDATE connections SET capabilities = $2 WHERE id = $1")
-        .bind(id)
-        .bind(sqlx::types::Json(caps))
-        .execute(&st.db)
-        .await;
-    Ok(())
-}
-
-async fn store_probe(st: &AppState, id: i64, res: &Result<(), String>) -> ApiResult<()> {
-    sqlx::query(
-        "UPDATE connections SET health = $2, health_error = $3, health_checked_at = now() WHERE id = $1",
-    )
-    .bind(id)
-    .bind(if res.is_ok() { "ok" } else { "error" })
-    .bind(res.as_ref().err())
-    .execute(&st.db)
-    .await?;
-    Ok(())
-}
-
 pub async fn create(
     State(st): State<AppState>,
     AuthUser(u): AuthUser,
     Json(req): Json<UpsertReq>,
 ) -> ApiResult<Json<ConnectionView>> {
     validate(&u, &req.name, &req.config)?;
-    let op = req
-        .config
+    req.config
+        .create_local_root(&st.cfg.local_base)
+        .map_err(|e| bad(format!("invalid config: {e}")))?;
+    req.config
         .operator(&st.cfg.local_base)
         .map_err(|e| bad(format!("invalid config: {e}")))?;
-    let caps = Capabilities::detect(&req.config, &op, &st.cfg.local_base);
+    // Capabilities come from the first probe, right after the insert
+    // ('{}': not detected yet).
+    let caps = serde_json::json!({});
     let enc = st.encrypt_config(&req.config)?;
     let (sid, sfolder) = req
         .config
@@ -272,22 +217,28 @@ pub async fn create(
     .bind(req.name.trim())
     .bind(req.config.kind())
     .bind(enc)
-    .bind(sqlx::types::Json(caps))
+    .bind(caps)
     .bind(sid)
     .bind(sfolder)
     .fetch_one(&st.db)
     .await?;
-    let res = probe_operator(&op).await;
-    store_probe(&st, id, &res).await?;
-    get_view(&st, id).await.map(Json)
+    // A local folder gets its marker now (see `state::LocalRoot`).
+    // (A read-only folder can't take one; nothing is written there anyway.)
+    if req.config.kind() == "local"
+        && let Err(e) = st.mark_root(id, None).await
+    {
+        tracing::warn!("connection {id}: no folder marker: {e}");
+    }
+    crate::health::probe_soon(&st, id).await;
+    get_view(&st, &u, id).await.map(Json)
 }
 
-async fn get_view(st: &AppState, id: i64) -> ApiResult<ConnectionView> {
+async fn get_view(st: &AppState, u: &User, id: i64) -> ApiResult<ConnectionView> {
     let r: Row = sqlx::query_as(&format!("SELECT {COLS} FROM connections WHERE id = $1"))
         .bind(id)
         .fetch_one(&st.db)
         .await?;
-    r.view(st)
+    r.view(st, u.is_admin)
 }
 
 pub async fn get(
@@ -296,7 +247,7 @@ pub async fn get(
     Path(id): Path<i64>,
 ) -> ApiResult<Json<ConnectionView>> {
     check_access(&st, &u, id).await?;
-    get_view(&st, id).await.map(Json)
+    get_view(&st, &u, id).await.map(Json)
 }
 
 pub async fn update(
@@ -321,25 +272,33 @@ pub async fn update(
         bad("the stored settings of this connection can't be read (wrong server key, or an unknown format)")
     })?;
     req.config.merge_secrets(&old);
-    let op = req
-        .config
-        .operator(&st.cfg.local_base)
-        .map_err(|e| bad(format!("invalid config: {e}")))?;
-    let caps = Capabilities::detect(&req.config, &op, &st.cfg.local_base);
-    if caps.read_only && req.config != old {
-        // Hashed volumes (and the default store, which holds every user's
-        // root) must keep storing blobs.
-        let needs_writes: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM volumes WHERE connection_id = $1 AND mode = 'hashed')
-             OR EXISTS (SELECT 1 FROM connections WHERE id = $1 AND is_default)",
-        )
-        .bind(id)
-        .fetch_one(&st.db)
-        .await?;
-        if needs_writes {
-            return Err(conflict(
-                "that folder is read-only, but this connection holds hashed storage that needs writing",
-            ));
+    // Only a re-pointed connection gets its folder made, a fresh failure
+    // count and capabilities to detect: a rename never touches the storage
+    // (an unmounted disk's folder must not be created again).
+    let repointed = req.config != old;
+    if repointed {
+        req.config
+            .create_local_root(&st.cfg.local_base)
+            .map_err(|e| bad(format!("invalid config: {e}")))?;
+        let op = req
+            .config
+            .operator(&st.cfg.local_base)
+            .map_err(|e| bad(format!("invalid config: {e}")))?;
+        if !op.info().capability().write {
+            // Hashed volumes (and the default store, which holds every
+            // user's root) must keep storing blobs.
+            let needs_writes: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM volumes WHERE connection_id = $1 AND mode = 'hashed')
+                 OR EXISTS (SELECT 1 FROM connections WHERE id = $1 AND is_default)",
+            )
+            .bind(id)
+            .fetch_one(&st.db)
+            .await?;
+            if needs_writes {
+                return Err(conflict(
+                    "that folder is read-only, but this connection holds hashed storage that needs writing",
+                ));
+            }
         }
     }
     let (sid, sfolder) = req
@@ -374,23 +333,45 @@ pub async fn update(
     let enc = st.encrypt_config(&req.config)?;
     // Config and location change together, in one statement.
     sqlx::query(
-        "UPDATE connections SET name = $2, config_enc = $3, capabilities = $4,
-                storage_id = $5, storage_folder = $6 WHERE id = $1",
+        // A re-pointed connection starts a fresh failure count, and its
+        // capabilities come from the probe below.
+        "UPDATE connections SET name = $2, config_enc = $3, storage_id = $4, storage_folder = $5,
+                health_failures = CASE WHEN $6 THEN 0 ELSE health_failures END,
+                health = CASE WHEN $6 THEN 'unknown' ELSE health END,
+                health_reason = CASE WHEN $6 THEN NULL ELSE health_reason END,
+                health_error = CASE WHEN $6 THEN NULL ELSE health_error END,
+                health_latency_ms = CASE WHEN $6 THEN NULL ELSE health_latency_ms END,
+                health_checked_at = CASE WHEN $6 THEN NULL ELSE health_checked_at END,
+                root_marker = CASE WHEN $6 THEN FALSE ELSE root_marker END,
+                capabilities = CASE WHEN $6 THEN '{}'::jsonb ELSE capabilities END
+         WHERE id = $1",
     )
     .bind(id)
     .bind(req.name.trim())
     .bind(enc)
-    .bind(sqlx::types::Json(caps))
     .bind(&sid)
     .bind(&sfolder)
+    .bind(repointed)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
     drop(layout);
     st.forget_operator(id);
-    let res = probe_operator(&op).await;
-    store_probe(&st, id, &res).await?;
-    get_view(&st, id).await.map(Json)
+    if repointed {
+        // A new target starts over: not offline, a fresh failure count, and
+        // (local) its own folder marker.
+        st.offline.remove(&id);
+        if req.config.kind() == "local"
+            && let Err(e) = st.mark_root(id, None).await
+        {
+            tracing::warn!("connection {id}: no folder marker: {e}");
+        }
+        // Probed again at once: it may come back online, and goes offline
+        // only after three failed probes as usual. (A rename touches no
+        // storage, so it isn't probed.)
+        crate::health::probe_soon(&st, id).await;
+    }
+    get_view(&st, &u, id).await.map(Json)
 }
 
 pub async fn delete(
@@ -425,6 +406,12 @@ pub async fn delete(
             "this connection holds hashed volumes with files; mount them again and delete the files first",
         ));
     }
+    // A local connection's marker goes with it (best effort, below).
+    // (Its operator, rooted at the folder, built before the row goes.)
+    let local_op = match st.connection_config(id).await {
+        Ok(c) if c.kind() == "local" => st.operator_unchecked(id).await.ok(),
+        _ => None,
+    };
     let mut tx = st.db.begin().await?;
     sqlx::query("DELETE FROM volumes WHERE connection_id = $1")
         .bind(id)
@@ -435,7 +422,10 @@ pub async fn delete(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
-    st.forget_operator(id);
+    st.forget_connection(id);
+    if let Some(op) = local_op {
+        crate::state::LocalRoot::remove_marker(&op, id).await;
+    }
     Ok(Json(json!({})))
 }
 
@@ -445,9 +435,8 @@ pub async fn probe(
     Path(id): Path<i64>,
 ) -> ApiResult<Json<ConnectionView>> {
     check_access(&st, &u, id).await?;
-    let res = probe_fresh(&st, id).await;
-    store_probe(&st, id, &res).await?;
-    get_view(&st, id).await.map(Json)
+    crate::health::probe_soon(&st, id).await;
+    get_view(&st, &u, id).await.map(Json)
 }
 
 #[derive(Deserialize)]
@@ -467,28 +456,66 @@ pub async fn test(
         check_access(&st, &u, id).await?;
         req.config.merge_secrets(&st.connection_config(id).await?);
     }
+    // A new local folder is made when the connection is saved; testing
+    // must not make it (or fail because it isn't there yet). An existing
+    // connection's unchanged folder isn't made by saving, so it is tested.
+    let unchanged = match req.id {
+        Some(id) => st
+            .connection_config(id)
+            .await
+            .is_ok_and(|c| c == req.config),
+        None => false,
+    };
+    // A saved local folder is checked like the probes do (marker included):
+    // an empty mount point left by an unmounted disk isn't "reachable".
+    if unchanged
+        && let Some(id) = req.id
+        && let Some(root) = st.local_root(id, &req.config).await?
+        && let Err(detail) = st
+            .check_root(id, root, std::time::Duration::from_secs(20))
+            .await
+    {
+        return Ok(Json(json!({
+            "ok": false,
+            "reason": "not found",
+            "error": if u.is_admin { Some(detail) } else { None },
+        })));
+    }
+    if let Some(dir) = req
+        .config
+        .local_dir(&st.cfg.local_base)
+        .map_err(|e| bad(format!("invalid config: {e}")))?
+        && !dir.exists()
+    {
+        return Ok(Json(if unchanged {
+            // Saving won't make it: report it like a probe would.
+            json!({
+                "ok": false,
+                "reason": "not found",
+                "error": if u.is_admin { Some("the connection's folder is missing") } else { None },
+            })
+        } else {
+            json!({ "ok": true, "error": null, "reason": null, "note": "the folder will be created" })
+        }));
+    }
     let op = req
         .config
         .operator(&st.cfg.local_base)
         .map_err(|e| bad(format!("invalid config: {e}")))?;
-    let res = probe_operator(&op).await;
-    Ok(Json(json!({ "ok": res.is_ok(), "error": res.err() })))
-}
-
-/// Background: probe every connection.
-pub async fn probe_all(st: &AppState) {
-    let ids: Vec<i64> = match sqlx::query_scalar("SELECT id FROM connections")
-        .fetch_all(&st.db)
-        .await
-    {
-        Ok(v) => v,
-        Err(e) => return tracing::warn!("probe: {e}"),
-    };
-    for id in ids {
-        let res = probe_fresh(st, id).await;
-        if let Err(e) = &res {
-            tracing::warn!("connection {id} unhealthy: {e}");
+    let secrets = crate::health::secrets(&req.config);
+    let secrets: Vec<&str> = secrets.iter().map(String::as_str).collect();
+    let root = req.config.local_dir(&st.cfg.local_base).ok().flatten();
+    // Read only: this config isn't saved yet, so nothing is written to it.
+    let p = strata_storage::probe::probe(&op, root.as_deref(), false, &secrets).await;
+    Ok(Json(match p.outcome {
+        strata_storage::probe::Outcome::Ok => json!({ "ok": true, "error": null, "reason": null }),
+        strata_storage::probe::Outcome::Down(f) | strata_storage::probe::Outcome::ReadOnly(f) => {
+            json!({
+                "ok": false,
+                "reason": f.reason.as_str(),
+                // The backend's own message names hosts: admins only.
+                "error": if u.is_admin { Some(f.detail) } else { None },
+            })
         }
-        let _ = store_probe(st, id, &res).await;
-    }
+    }))
 }

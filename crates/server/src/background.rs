@@ -1,24 +1,16 @@
 //! Background jobs: blob garbage collection, upload/staging cleanup and
-//! connection health probes.
+//! connection health probes (`health`).
 
 use std::time::Duration;
 
 use strata_storage::Hash;
 
-use crate::connections;
 use crate::mounts::Mount;
 use crate::state::AppState;
 use crate::vfs;
 
 pub fn spawn(st: AppState) {
-    let s = st.clone();
-    tokio::spawn(async move {
-        let mut t = tokio::time::interval(Duration::from_secs(600));
-        loop {
-            t.tick().await;
-            connections::probe_all(&s).await;
-        }
-    });
+    tokio::spawn(crate::health::run(st.clone()));
     tokio::spawn(async move {
         let mut t = tokio::time::interval(Duration::from_secs(3600));
         loop {
