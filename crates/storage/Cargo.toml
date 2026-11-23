@@ -2,6 +2,7 @@
 name = "strata-storage"
 description = "Connections, mounts and the content-addressed hashed store for Strata."
 version.workspace = true
+publish = false
 edition.workspace = true
 license.workspace = true
 

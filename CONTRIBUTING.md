@@ -36,6 +36,7 @@ For UI work, `cd web && npm run dev` runs Vite with hot reload.
 | What                       | Command                                                       |
 | -------------------------- | ------------------------------------------------------------- |
 | Rust format and lints      | `cargo fmt --all --check` and `cargo clippy --workspace --all-targets -- -D warnings` |
+| Dependency policy          | `cargo deny check` (licenses, advisories, sources; see `deny.toml`) |
 | Rust unit and integration  | `cargo test --workspace` (needs `STRATA_TEST_DATABASE_URL`)   |
 | S3 backend tests           | set `STRATA_TEST_S3_ENDPOINT` (for example a local MinIO), then `cargo test --workspace` |
 | Web type check             | `cd web && npm run check`                                     |

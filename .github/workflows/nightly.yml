@@ -1,0 +1,74 @@
+name: Nightly
+
+# Slower checks that don't need to block every pull request: fresh advisory
+# scans (new advisories appear without code changes) and a coverage report.
+
+on:
+  schedule:
+    - cron: "41 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - name: Rust advisories
+        run: cargo deny --locked check advisories
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: npm advisories (runtime dependencies)
+        working-directory: web
+        run: npm audit --omit=dev --audit-level=high
+
+  coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: strata
+          POSTGRES_PASSWORD: strata
+          POSTGRES_DB: strata
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U strata" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      STRATA_TEST_DATABASE_URL: postgres://strata:strata@localhost:5432/strata
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - name: Rust coverage
+        run: |
+          cargo llvm-cov --workspace --lcov --output-path lcov.info
+          {
+            echo '## Rust coverage'
+            echo '```'
+            cargo llvm-cov report --summary-only
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rust-lcov
+          path: lcov.info
+          retention-days: 14

@@ -2,6 +2,7 @@
 name = "strata-server"
 description = "Strata self-hosted file cloud: HTTP API and web UI host."
 version.workspace = true
+publish = false
 edition.workspace = true
 license.workspace = true
 
