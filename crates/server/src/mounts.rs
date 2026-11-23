@@ -1,6 +1,7 @@
 //! Mounts: show a volume (connection + folder + mode) at a folder of a user's tree.
 
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -55,18 +56,33 @@ pub async fn user_mounts(st: &AppState, user_id: i64) -> ApiResult<Arc<Vec<Mount
     if let Some(m) = st.mounts.get(&user_id) {
         return Ok(m.clone());
     }
+    // A drop between this read and the insert below means the rows may be
+    // from before the change: they are used, but not cached.
+    let r#gen = st.mounts_gen.load(Ordering::SeqCst);
     let mut v: Vec<Mount> = sqlx::query_as(&format!("{SELECT} WHERE m.owner_id = $1"))
         .bind(user_id)
         .fetch_all(&st.db)
         .await?;
     v.sort_by_key(|m| std::cmp::Reverse(m.path.len()));
     let v = Arc::new(v);
-    st.mounts.insert(user_id, v.clone());
+    if let dashmap::Entry::Vacant(e) = st.mounts.entry(user_id)
+        && st.mounts_gen.load(Ordering::SeqCst) == r#gen
+    {
+        e.insert(v.clone());
+    }
     Ok(v)
 }
 
+/// Drop one user's cached mounts.
 pub fn invalidate(st: &AppState, user_id: i64) {
+    st.mounts_gen.fetch_add(1, Ordering::SeqCst);
     st.mounts.remove(&user_id);
+}
+
+/// Drop every user's cached mounts.
+pub fn invalidate_all(st: &AppState) {
+    st.mounts_gen.fetch_add(1, Ordering::SeqCst);
+    st.mounts.clear();
 }
 
 /// Find the mount that holds `path` (normalised) and the path inside it.

@@ -494,7 +494,7 @@ pub fn spawn_listener(st: AppState) {
                     if fresh {
                         // (Re)connected: notifications may have been lost while
                         // we were away. Forget cached mounts, tell sockets.
-                        st.mounts.clear();
+                        crate::mounts::invalidate_all(&st);
                         let _ = st.events.send(ChangeEvent {
                             volume_id: None,
                             user_id: None,

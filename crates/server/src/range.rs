@@ -47,7 +47,8 @@ pub fn parse(header: Option<&str>, size: u64) -> Range {
         (true, false) => match number(b) {
             None => Range::Full,
             Some(0) => Range::Unsatisfiable,
-            Some(_) if size == 0 => Range::Unsatisfiable,
+            // satisfiable (RFC 9110 §14.1.1), but there is nothing to slice
+            Some(_) if size == 0 => Range::Full,
             Some(n) => Range::Part {
                 start: size - n.min(size),
                 end: size,
@@ -159,7 +160,9 @@ mod tests {
         assert_eq!(p("bytes=100-200"), Unsatisfiable);
         assert_eq!(p("bytes=-0"), Unsatisfiable);
         assert_eq!(parse(Some("bytes=0-"), 0), Unsatisfiable);
-        assert_eq!(parse(Some("bytes=-5"), 0), Unsatisfiable);
+        assert_eq!(parse(Some("bytes=-0"), 0), Unsatisfiable);
+        // a non-zero suffix of an empty file: the (empty) file
+        assert_eq!(parse(Some("bytes=-5"), 0), Full);
     }
 
     #[test]

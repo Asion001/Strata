@@ -349,7 +349,7 @@ async fn probe_inner(st: &AppState, id: i64, counted: bool) -> anyhow::Result<Op
     if let Some(new) = &caps
         && new.range_read != prev_caps.as_ref().is_none_or(|c| c.range_read)
     {
-        st.mounts.clear();
+        crate::mounts::invalidate_all(st);
     }
     if full && found != Found::Down {
         st.full_checks.insert(id, Instant::now());

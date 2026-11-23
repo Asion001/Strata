@@ -51,6 +51,8 @@ pub struct Inner {
     pub full_checks: DashMap<i64, std::time::Instant>,
     /// user id -> that user's mounts, longest path first
     pub mounts: DashMap<i64, Arc<Vec<Mount>>>,
+    /// Bumped by every drop from `mounts` (see `mounts::user_mounts`).
+    pub mounts_gen: std::sync::atomic::AtomicU64,
     pub events: broadcast::Sender<ChangeEvent>,
     /// Cache of file classifications (see `files::serve`).
     pub decisions: quick_cache::sync::Cache<String, crate::safe::Class>,
@@ -107,6 +109,7 @@ impl AppState {
             root_gates: DashMap::new(),
             full_checks: DashMap::new(),
             mounts: DashMap::new(),
+            mounts_gen: Default::default(),
             events,
             decisions: quick_cache::sync::Cache::new(100_000),
             volume_locks: DashMap::new(),

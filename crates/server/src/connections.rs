@@ -362,7 +362,7 @@ pub async fn update(
         // (local) its own folder marker.
         st.offline.remove(&id);
         // Cached mounts carry the old target's capabilities (range_read).
-        st.mounts.clear();
+        crate::mounts::invalidate_all(&st);
         if req.config.kind() == "local"
             && let Err(e) = st.mark_root(id, None).await
         {

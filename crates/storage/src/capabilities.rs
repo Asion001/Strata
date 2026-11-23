@@ -31,11 +31,17 @@ pub struct Snapshots {
     pub create: bool,
 }
 
+fn yes() -> bool {
+    true
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(default)]
 pub struct Capabilities {
     pub snapshots: Snapshots,
     pub rename: bool,
+    /// Missing in stored JSON counts as true, as mounts read it.
+    #[serde(default = "yes")]
     pub range_read: bool,
     /// A write becomes visible all at once (never half-written).
     pub atomic_write: bool,
