@@ -51,6 +51,13 @@ const press = (key: string, opts: KeyboardEventInit = {}) => {
   flushSync();
 };
 
+// (jsdom has no ResizeObserver; the viewer only uses it to re-fit.)
+globalThis.ResizeObserver ??= class {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+} as unknown as typeof ResizeObserver;
+
 beforeEach(() => {
   nav.state = {};
   nav.pushes = 0;
@@ -77,7 +84,7 @@ describe('Viewer', () => {
     expect(dialog.getAttribute('aria-modal')).toBe('true');
     expect(dialog.getAttribute('aria-label')).toBe('Preview of a.jpg');
     expect(dialog.contains(document.activeElement)).toBe(true);
-    expect(nav.state.viewer).toBe(true);
+    expect(typeof nav.state.viewer).toBe('number');
     // Focus goes back where it was on close.
     unmount(comp!);
     comp = null;
@@ -138,6 +145,14 @@ describe('Viewer', () => {
     expect(history.back).toHaveBeenCalled();
     flushSync();
     expect(p.onclose).toHaveBeenCalledTimes(1);
+  });
+
+  it('a held Escape goes back only once', () => {
+    vi.spyOn(history, 'back').mockImplementation(() => {}); // popstate comes later
+    open([img('a.jpg')]);
+    press('Escape');
+    press('Escape');
+    expect(history.back).toHaveBeenCalledTimes(1);
   });
 
   it('Escape first closes the details panel', () => {

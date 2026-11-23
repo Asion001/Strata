@@ -46,8 +46,10 @@
   }
   const bound = (s: number) => Math.min(MAX, Math.max(MIN, s));
   // A view set from outside (the zoom buttons and keys) is kept in bounds too.
+  let stageW = $state(0), stageH = $state(0);
   $effect(() => {
     const v = view;
+    void stageW, stageH; // (and again when the stage changes size)
     if (!stage) return;
     const { w, h } = shown();
     if (!(w > 0 && h > 0)) return; // not laid out yet
@@ -125,6 +127,14 @@
       } else lastTap = t;
     }
   }
+  // A cancelled touch (palm, a system gesture) is never a swipe or a tap.
+  function pointercancel(e: PointerEvent) {
+    pointers.delete(e.pointerId);
+    if (pointers.size < 2) pinch = null;
+    if (pointers.size === 0) gesturing = false;
+    down = null;
+    lastTap = null;
+  }
   function dblclick(e: MouseEvent) {
     // Touch double taps are handled above; browsers send a dblclick for
     // them too, which would undo the zoom.
@@ -135,14 +145,24 @@
   // Wheel (and trackpad pinch, which arrives as a wheel with ctrlKey).
   // Not passive: the page itself must not scroll or zoom.
   function wheel(node: HTMLElement) {
+    let idle: ReturnType<typeof setTimeout>;
     const on = (e: WheelEvent) => {
       e.preventDefault();
+      // A wheel or trackpad pinch is a gesture: follow it without easing.
+      gesturing = true;
+      clearTimeout(idle);
+      idle = setTimeout(() => (gesturing = false), 150);
       const { px, py } = rel(e.clientX, e.clientY);
       const k = Math.exp(-e.deltaY * (e.ctrlKey ? 0.02 : 0.002));
       set(zoomAt(view, bound(view.s * k), px, py));
     };
     node.addEventListener('wheel', on, { passive: false });
-    return { destroy: () => node.removeEventListener('wheel', on) };
+    return {
+      destroy: () => {
+        clearTimeout(idle);
+        node.removeEventListener('wheel', on);
+      }
+    };
   }
 
   function full(e: Event) {
@@ -153,8 +173,8 @@
   }
 </script>
 
-<div class="stage" bind:this={stage} use:wheel role="group" aria-label="{name}, zoom {Math.round(view.s * 100)}%"
-  onpointerdown={pointerdown} onpointermove={pointermove} onpointerup={pointerup} onpointercancel={pointerup}
+<div class="stage" bind:this={stage} bind:clientWidth={stageW} bind:clientHeight={stageH} use:wheel role="group" aria-label="{name}, zoom {Math.round(view.s * 100)}%"
+  onpointerdown={pointerdown} onpointermove={pointermove} onpointerup={pointerup} onpointercancel={pointercancel}
   ondblclick={dblclick}>
   <div class="frame" class:still={!gesturing}
     style="transform: translate({view.x}px, {view.y}px) scale({view.s})">

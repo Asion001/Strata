@@ -344,12 +344,16 @@
     if (!e) return toast(`“${it.name}” is no longer in this folder.`, 'info');
     const failed = await removeItems([e], false);
     if (!failed || failed.length) return; // cancelled, busy or failed
-    // (The viewer may have been closed while the dialog was open.)
-    if (viewerIndex < 0) return;
-    const at = viewerItems.indexOf(it);
+    // (By path: the viewer may have been closed, or reopened on a newer
+    // snapshot, while the dialog and the delete ran.)
+    const at = viewerItems.findIndex((x) => x.path === it.path);
     if (at < 0) return;
-    viewerItems = viewerItems.filter((x) => x !== it);
-    viewerIndex = viewerItems.length ? Math.min(at, viewerItems.length - 1) : -1;
+    const open = viewerIndex >= 0;
+    const current = viewerItems[viewerIndex]?.path;
+    viewerItems = viewerItems.filter((x) => x.path !== it.path);
+    if (!open) return;
+    const still = viewerItems.findIndex((x) => x.path === current);
+    viewerIndex = !viewerItems.length ? -1 : still >= 0 ? still : Math.min(at, viewerItems.length - 1);
   }
 
   const waitForBusy = () => toast('Wait for the current action to finish.', 'info');

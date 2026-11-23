@@ -1,7 +1,7 @@
 <script lang="ts">
   import { page } from '$app/state';
   import { api, pickPreview, type Entry } from '$lib/api';
-  import { bytes, when, join, isImage, isSvg } from '$lib/format';
+  import { bytes, when, join, isImage, isBrowserImage, isSvg } from '$lib/format';
   import { cn } from '$lib/utils';
   import Viewer from '$lib/Viewer.svelte';
   import Button, { buttonClass } from '$lib/components/ui/button/button.svelte';
@@ -98,7 +98,15 @@
 <!-- The viewer isn't rebuilt yet: it keeps the old styles. -->
 {#if viewerIndex >= 0}
   <div class="legacy contents">
-  <Viewer items={files.map((f: Entry) => ({ name: f.name, size: f.size, src: pickPreview(f.name, fileUrl(join(sub, f.name)), imgUrl(join(sub, f.name))), download: fileUrl(join(sub, f.name), true) }))}
+  <Viewer items={files.map((f: Entry) => {
+    const p = join(sub, f.name);
+    return {
+      name: f.name, size: f.size, mtime: f.mtime,
+      src: pickPreview(f.name, fileUrl(p), imgUrl(p)), download: fileUrl(p, true),
+      thumb: isImage(f.name) ? shareUrl('thumb', p, '&size=128') : undefined,
+      poster: isImage(f.name) && !isBrowserImage(f.name) ? shareUrl('thumb', p, '&size=1024') : undefined
+    };
+  })}
     bind:index={viewerIndex} onclose={() => (viewerIndex = -1)} />
   </div>
 {/if}

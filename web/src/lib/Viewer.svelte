@@ -69,26 +69,33 @@
   let shownImage = $derived(item ? imageSrc(item) : null);
   let anImage = $derived(item ? isBrowserImage(item.name) || isImage(item.name) : false);
 
-  // Back closes the viewer: it is a (shallow) history entry of its own.
+  // Back closes the viewer: it is a (shallow) history entry of its own,
+  // tagged with this viewer's id (an entry left by an earlier viewer, e.g.
+  // after Back then Forward, isn't ours).
+  const id = Date.now() + Math.random();
   let pushed = false;
+  let closing = false;
+  const ours = () => page.state.viewer === id;
   onMount(() => {
-    pushState('', { ...page.state, viewer: true });
+    pushState('', { ...page.state, viewer: id });
     pushed = true;
   });
   $effect(() => {
-    if (pushed && !page.state.viewer) {
+    if (pushed && !ours()) {
       pushed = false;
       onclose();
     }
   });
   function close() {
-    if (pushed && page.state.viewer) history.back(); // the effect above closes
+    if (closing) return; // (a held Escape must not go back twice)
+    closing = true;
+    if (pushed && ours()) history.back(); // the effect above closes
     else onclose();
   }
   onDestroy(() => {
     // Closed another way (edit, the last file deleted): drop our entry, but
     // not when leaving for another page (that back would undo it).
-    if (pushed && page.state.viewer && !navigating.to) history.back();
+    if (pushed && ours() && !closing && !navigating.to) history.back();
     pushed = false;
     preload.clear();
   });
@@ -166,7 +173,7 @@
   function key(e: KeyboardEvent) {
     const t = e.target as HTMLElement | null;
     // Keys in a dialog over the viewer (delete, share) are that dialog's.
-    if (t && t !== document.body && !root.contains(t)) return;
+    if (t?.closest('dialog[open]')) return;
     if (e.key === 'Escape') {
       e.preventDefault();
       if (info) info = false;
@@ -196,7 +203,7 @@
   ontouchend={(e) => {
     // Images swipe in their own view (which knows about zoom); a PDF scrolls.
     const t = e.target as HTMLElement | null;
-    if (anImage || isPdf(item.name) || t?.closest('video, audio, header, aside')) return;
+    if (shownImage || isPdf(item.name) || t?.closest('video, audio, header, aside')) return;
     const dx = e.changedTouches[0].clientX - touchX;
     if (Math.abs(dx) > 60) step(dx < 0 ? 1 : -1);
   }}>
@@ -211,7 +218,7 @@
     {/if}
     {#if anImage}
       <Button variant="ghost" size="icon" class={cn(dark, info && 'bg-white/15')} onclick={() => (info = !info)}
-        aria-label="Details" aria-expanded={info} aria-controls="viewer-info"><InfoIcon /></Button>
+        aria-label="Details" aria-expanded={info} aria-controls={info ? 'viewer-info' : undefined}><InfoIcon /></Button>
     {/if}
     {#if onedit && isTextName(item.name)}
       <Button variant="ghost" size="sm" class={dark} onclick={() => onedit(index)}><PencilIcon /><span class="max-sm:sr-only">Edit</span></Button>
