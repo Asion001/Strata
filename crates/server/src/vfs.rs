@@ -689,21 +689,32 @@ pub async fn read_stream(
         let store = hashed_store(st, m).await?;
         let chunks = node.chunks.clone().unwrap_or_default();
         let sizes = node.chunk_sizes.clone().unwrap_or_default();
+        // Only the chunks covering the range are read, one at a time (the
+        // first and last sliced): never the whole file.
+        let sizes: Vec<u64> = sizes.iter().map(|&s| s.max(0) as u64).collect();
+        let parts = crate::range::covering(&sizes, start, end);
+        // (Where offset reads don't work, a partial chunk is read whole and
+        // sliced: chunks are small.)
+        let ranged = m.range_read;
         let s = async_stream::try_stream! {
-            let mut off = 0u64;
-            for (c, sz) in chunks.iter().zip(sizes.iter()) {
-                let sz = *sz as u64;
-                let (cs, ce) = (off, off + sz);
-                off = ce;
-                if ce <= start || cs >= end { continue; }
+            for (i, r) in parts {
+                let c = chunks.get(i).ok_or_else(|| io::Error::other("chunk list too short"))?;
                 let h = Hash::from_slice(c).ok_or_else(|| io::Error::other("bad chunk hash"))?;
-                let a = start.saturating_sub(cs);
-                let b = end.min(ce) - cs;
-                let data = if a == 0 && b == sz {
+                let whole = r.start == 0 && r.end == sizes[i];
+                let data = if whole {
                     store.get(&h).await
+                } else if ranged {
+                    store.get_range(&h, r.clone()).await
                 } else {
-                    store.get_range(&h, a..b).await
+                    store.get(&h).await.map(|b| {
+                        let e = (r.end as usize).min(b.len());
+                        b.slice((r.start as usize).min(e)..e)
+                    })
                 }.map_err(io::Error::other)?;
+                if data.len() as u64 != r.end - r.start {
+                    // (Damage, not a change: an internal error.)
+                    Err(io::Error::other("stored chunk shorter than recorded"))?;
+                }
                 yield data;
             }
         };
@@ -713,12 +724,44 @@ pub async fn read_stream(
         if start >= end {
             return Ok(Box::pin(futures::stream::empty()));
         }
-        let reader = op
-            .reader_with(&backend_path(m, rel, false))
-            .chunk(4 << 20)
-            .await?;
-        let s = reader.into_bytes_stream(start..end).await?;
-        Ok(Box::pin(s))
+        let path = backend_path(m, rel, false);
+        // Pinned to the version that was stat'ed, where the backend can: a
+        // change mid-read (between chunk reads, or since an If-Range check)
+        // fails the read instead of mixing two versions.
+        let pin = node
+            .etag
+            .as_deref()
+            .filter(|t| t.starts_with('"') && op.info().capability().read_with_if_match);
+        let reader = |chunked: bool| {
+            let mut r = op.reader_with(&path);
+            if chunked {
+                r = r.chunk(4 << 20);
+            }
+            if let Some(t) = pin {
+                r = r.if_match(t);
+            }
+            r
+        };
+        if m.range_read {
+            let reader = reader(true).await?;
+            let s = reader.into_bytes_stream(start..end).await?;
+            return Ok(Box::pin(s));
+        }
+        // A backend that can't read ranges: one plain, unbounded read from
+        // the start (no chunking, which reads at offsets), dropping what
+        // comes before the range and stopping after it. Slow for late
+        // offsets, so it is logged once per connection.
+        static WARNED: std::sync::LazyLock<dashmap::DashSet<i64>> =
+            std::sync::LazyLock::new(dashmap::DashSet::new);
+        if start > 0 && WARNED.insert(m.connection_id) {
+            tracing::warn!(
+                "connection {}: no range reads; ranges are read from the start",
+                m.connection_id
+            );
+        }
+        let reader = reader(false).await?;
+        let s = reader.into_bytes_stream(..).await?;
+        Ok(Box::pin(take_bytes(skip_bytes(s, start), end - start)))
     }
 }
 
@@ -904,7 +947,7 @@ async fn digest_node(st: &AppState, m: &Mount, rel: &str, node: &Node) -> ApiRes
     let mut s = read_stream(st, m, rel, node, 0, node.size as u64).await?;
     let mut h = blake3::Hasher::new();
     while let Some(b) = s.next().await {
-        h.update(&b.map_err(|e| ApiError::Internal(e.into()))?);
+        h.update(&b.map_err(crate::error::read_error)?);
     }
     Ok(Hash(*h.finalize().as_bytes()))
 }
@@ -958,7 +1001,12 @@ async fn recheck_raw_base(
         if let Expect::Etag {
             base: Some(base), ..
         } = expect
-            && digest_node(st, m, rel, b).await? != *base
+            && match digest_node(st, m, rel, b).await {
+                Ok(h) => h != *base,
+                // It changed again while being read: not the base either.
+                Err(ApiError::Conflict(_)) => true,
+                Err(e) => return Err(e),
+            }
         {
             return Err(ApiError::PreconditionFailed(Some(etag_for(b))));
         }
@@ -1010,6 +1058,60 @@ async fn overlapping_raw_volumes(st: &AppState, m: &Mount) -> ApiResult<Vec<i64>
         }
     }
     Ok(out)
+}
+
+/// The first `n` bytes of a byte stream; it ends there, without waiting for
+/// (or reading) anything after them.
+fn take_bytes(
+    s: impl Stream<Item = io::Result<Bytes>> + Send + 'static,
+    n: u64,
+) -> impl Stream<Item = io::Result<Bytes>> + Send + 'static {
+    futures::stream::unfold((Box::pin(s), n), |(mut s, left)| async move {
+        if left == 0 {
+            return None;
+        }
+        let Some(item) = s.next().await else {
+            // Ended before the promised length: an error, so the response
+            // is aborted rather than ending cleanly short.
+            return Some((
+                Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "file shorter than expected",
+                )),
+                (s, 0),
+            ));
+        };
+        match item {
+            Ok(b) => {
+                let keep = (b.len() as u64).min(left);
+                Some((Ok(b.slice(..keep as usize)), (s, left - keep)))
+            }
+            Err(e) => Some((Err(e), (s, 0))),
+        }
+    })
+}
+
+/// Drop the first `n` bytes of a byte stream.
+fn skip_bytes(
+    s: impl Stream<Item = io::Result<Bytes>> + Send + 'static,
+    n: u64,
+) -> impl Stream<Item = io::Result<Bytes>> + Send + 'static {
+    let mut left = n;
+    s.filter_map(move |item| {
+        let out = match item {
+            Ok(b) if left >= b.len() as u64 => {
+                left -= b.len() as u64;
+                None
+            }
+            Ok(b) => {
+                let b = b.slice(left as usize..);
+                left = 0;
+                Some(Ok(b))
+            }
+            Err(e) => Some(Err(e)),
+        };
+        futures::future::ready(out)
+    })
 }
 
 /// Current state of a file for a precondition check (None if missing).
@@ -1732,4 +1834,50 @@ pub async fn search(st: &AppState, user_id: i64, q: &str, limit: i64) -> ApiResu
     .fetch_all(&st.db)
     .await?;
     Ok(hits)
+}
+
+#[cfg(test)]
+mod skip_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn take_bytes_stops_exactly() {
+        let parts = || {
+            futures::stream::iter(
+                ["abc", "", "defg", "h"].map(|s| Ok::<_, io::Error>(Bytes::from(s))),
+            )
+        };
+        for n in 0..=8u64 {
+            let got: Vec<u8> = take_bytes(parts(), n)
+                .map(|b| b.unwrap().to_vec())
+                .concat()
+                .await;
+            assert_eq!(got, &b"abcdefgh"[..n as usize], "take {n}");
+        }
+        // a stream shorter than promised ends in an error, not quietly
+        let items: Vec<_> = take_bytes(parts(), 9).collect().await;
+        let last = items.last().unwrap().as_ref().unwrap_err();
+        assert_eq!(last.kind(), io::ErrorKind::UnexpectedEof);
+        let got: Vec<u8> = take_bytes(skip_bytes(parts(), 2), 4)
+            .map(|b| b.unwrap().to_vec())
+            .concat()
+            .await;
+        assert_eq!(got, b"cdef");
+    }
+
+    #[tokio::test]
+    async fn skip_bytes_drops_exactly_the_prefix() {
+        let parts = || {
+            futures::stream::iter(
+                ["abc", "", "defg", "h"].map(|s| Ok::<_, io::Error>(Bytes::from(s))),
+            )
+        };
+        for n in 0..=9u64 {
+            let got: Vec<u8> = skip_bytes(parts(), n)
+                .map(|b| b.unwrap().to_vec())
+                .concat()
+                .await;
+            assert_eq!(got, &b"abcdefgh"[(n as usize).min(8)..], "skip {n}");
+        }
+    }
 }

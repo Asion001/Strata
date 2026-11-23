@@ -91,3 +91,33 @@ export async function openPreview(page: Page, dir: string, name: string) {
   // nothing is selected).
   await page.getByRole('row').filter({ hasText: name }).getByRole('button', { name, exact: true }).click();
 }
+
+/** Create a binary file through the API (as the logged-in page). */
+export async function putBytes(page: Page, path: string, bytes: Uint8Array) {
+  const status = await page.evaluate(
+    async ([p, b64]) => {
+      const bin = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+      const r = await fetch(`/api/files/content?path=${encodeURIComponent(p)}`, {
+        method: 'PUT',
+        headers: { 'x-strata': '1', 'if-none-match': '*' },
+        body: bin
+      });
+      return r.status;
+    },
+    [path, Buffer.from(bytes).toString('base64')] as const
+  );
+  expect(status).toBe(200);
+}
+
+/** Mount a fresh local folder (admin only) in raw mode at `at`. */
+export async function rawLocalMount(page: Page, at: string) {
+  const status = await page.evaluate(async (at) => {
+    const h = { 'content-type': 'application/json', 'x-strata': '1' };
+    const c = await (
+      await fetch('/api/connections', { method: 'POST', headers: h, body: JSON.stringify({ name: at, config: { kind: 'local', path: at } }) })
+    ).json();
+    const r = await fetch('/api/mounts', { method: 'POST', headers: h, body: JSON.stringify({ path: at, connection_id: c.id, base_path: '', mode: 'raw' }) });
+    return r.status;
+  }, at);
+  expect(status).toBe(200);
+}

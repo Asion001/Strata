@@ -277,13 +277,24 @@ async fn probe_inner(st: &AppState, id: i64, counted: bool) -> anyhow::Result<Op
                             // A write test only where a delete leaves nothing
                             // behind (not on a versioned bucket, nor where that
                             // can't be confirmed).
+                            // Offset reads are only measured by the write
+                            // test below; until then the last answer stays.
+                            // (Kept before the write test, so a probe that
+                            // runs out of time there still saves them.)
+                            let mut c = c;
+                            c.range_read = prev_caps.as_ref().is_none_or(|p| p.range_read);
                             let write = c.clean_deletes;
                             caps = Some(c);
                             if !write {
                                 (Found::Ok, Some(p.latency), None)
                             } else {
                                 match probe::write_check(&op, &secrets).await {
-                                    Ok(()) => (Found::Ok, Some(p.latency), None),
+                                    Ok(ranges) => {
+                                        if let (Some(r), Some(c)) = (ranges, caps.as_mut()) {
+                                            c.range_read = r;
+                                        }
+                                        (Found::Ok, Some(p.latency), None)
+                                    }
                                     Err(f) => (Found::ReadOnly, Some(p.latency), Some(f)),
                                 }
                             }
@@ -342,6 +353,25 @@ async fn probe_inner(st: &AppState, id: i64, counted: bool) -> anyhow::Result<Op
         // The connection was edited (or deleted) while we probed: this
         // result is about the old config, so it is dropped.
         return Ok(None);
+    }
+    // Mounts carry `range_read` from the capabilities: cached mounts that
+    // disagree with it are dropped. (Checked against this instance's cache,
+    // not the stored value, which another instance may have updated.)
+    if let Some(new) = &caps {
+        // A change always drops them (also catching a load in flight that
+        // read the old value); so does a cached value that disagrees, which
+        // another instance may have changed. (Decided first: the cache's
+        // read locks are released before the drop takes its write locks.)
+        let changed = prev_caps.as_ref().is_none_or(|p| p.range_read) != new.range_read;
+        let stale = changed
+            || st.mounts.iter().any(|e| {
+                e.value()
+                    .iter()
+                    .any(|m| m.connection_id == id && m.range_read != new.range_read)
+            });
+        if stale {
+            crate::mounts::invalidate_all(st);
+        }
     }
     if full && found != Found::Down {
         st.full_checks.insert(id, Instant::now());

@@ -113,7 +113,7 @@ pub async fn probe(
         };
     }
     let outcome = match write_check(op, secrets).await {
-        Ok(()) => Outcome::Ok,
+        Ok(_) => Outcome::Ok,
         Err(f) => Outcome::ReadOnly(f),
     };
     Probe { outcome, latency }
@@ -121,7 +121,10 @@ pub async fn probe(
 
 /// The write half of a probe on its own: write, read back and delete one
 /// small file under the probe folder.
-pub async fn write_check(op: &Operator, secrets: &[&str]) -> Result<(), Failure> {
+///
+/// On success, whether a read from an offset returned the right bytes:
+/// `None` when that read failed in a way that doesn't tell (a timeout).
+pub async fn write_check(op: &Operator, secrets: &[&str]) -> Result<Option<bool>, Failure> {
     write_test(op).await.map_err(|e| {
         let mut f = failure(e, secrets);
         if f.reason == Reason::Failed {
@@ -158,7 +161,7 @@ fn probe_name(name: &str) -> bool {
         .is_some_and(|h| h.len() == 16 && h.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
-async fn write_test(op: &Operator) -> Result<(), StepError> {
+async fn write_test(op: &Operator) -> Result<Option<bool>, StepError> {
     let dir = format!("{PROBE_DIR}/");
     sweep(op, &dir).await;
     let tag: u64 = rand::random();
@@ -173,6 +176,33 @@ async fn write_test(op: &Operator) -> Result<(), StepError> {
         Ok(())
     })
     .await;
+    // A read from an offset, on its own clock (it never fails the write
+    // test): a backend that ignores the offset or refuses it (FTP without
+    // REST) can't serve byte ranges directly. A timeout or a temporary
+    // error doesn't tell, and an error counts only when a second try fails
+    // the same way (not a one-off dropped connection).
+    let ranges = match res {
+        Err(_) => None,
+        Ok(()) => {
+            let mut ranges = None;
+            // (A short clock: this runs inside the whole probe's time limit.)
+            for _ in 0..2 {
+                let limit = Duration::from_secs(5);
+                match tokio::time::timeout(limit, op.read_with(&path).range(5..11)).await {
+                    Ok(Ok(b)) => {
+                        ranges = Some(b.to_vec() == data[5..11]);
+                        break;
+                    }
+                    Ok(Err(e)) if !e.is_temporary() => ranges = Some(false),
+                    _ => {
+                        ranges = None;
+                        break;
+                    }
+                }
+            }
+            ranges
+        }
+    };
     // Always delete, whatever happened above (a timed-out write may still
     // have landed).
     let del = step(async { Ok(op.delete(&path).await?) }).await;
@@ -188,7 +218,7 @@ async fn write_test(op: &Operator) -> Result<(), StepError> {
     if empty {
         let _ = step(async { Ok(op.delete(&dir).await?) }).await;
     }
-    res.and(del)
+    res.and(del).map(|()| ranges)
 }
 
 /// Remove probe files an interrupted probe left behind.

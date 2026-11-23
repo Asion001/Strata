@@ -1,6 +1,7 @@
 //! Mounts: show a volume (connection + folder + mode) at a folder of a user's tree.
 
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -33,6 +34,10 @@ pub struct Mount {
     /// Journal entries of the volume up to this seq predate the mount.
     pub journal_from: i64,
     pub created_at: DateTime<Utc>,
+    /// The backend reads byte ranges itself (capabilities; true until the
+    /// first detection says otherwise).
+    #[serde(skip)]
+    pub range_read: bool,
 }
 
 impl Mount {
@@ -42,7 +47,8 @@ impl Mount {
 }
 
 const SELECT: &str = "SELECT m.id, m.owner_id, m.path, m.volume_id, v.connection_id, c.name AS connection_name,
-    c.kind AS connection_kind, v.base_path, v.mode, m.journal_from, m.created_at
+    c.kind AS connection_kind, v.base_path, v.mode, m.journal_from, m.created_at,
+    COALESCE((c.capabilities->>'range_read')::boolean, TRUE) AS range_read
     FROM mounts m JOIN volumes v ON v.id = m.volume_id JOIN connections c ON c.id = v.connection_id";
 
 /// A user's mounts, longest path first (cached).
@@ -50,18 +56,41 @@ pub async fn user_mounts(st: &AppState, user_id: i64) -> ApiResult<Arc<Vec<Mount
     if let Some(m) = st.mounts.get(&user_id) {
         return Ok(m.clone());
     }
+    // A drop between this read and the insert below means the rows may be
+    // from before the change: they are used, but not cached.
+    let r#gen = generation(st, user_id);
     let mut v: Vec<Mount> = sqlx::query_as(&format!("{SELECT} WHERE m.owner_id = $1"))
         .bind(user_id)
         .fetch_all(&st.db)
         .await?;
     v.sort_by_key(|m| std::cmp::Reverse(m.path.len()));
     let v = Arc::new(v);
-    st.mounts.insert(user_id, v.clone());
+    if let dashmap::Entry::Vacant(e) = st.mounts.entry(user_id)
+        && generation(st, user_id) == r#gen
+    {
+        e.insert(v.clone());
+    }
     Ok(v)
 }
 
+/// Where a user's cached mounts are in their drops: (all users', theirs).
+fn generation(st: &AppState, user_id: i64) -> (u64, u64) {
+    (
+        st.mounts_gen.load(Ordering::SeqCst),
+        st.user_mounts_gen.get(&user_id).map_or(0, |g| *g),
+    )
+}
+
+/// Drop one user's cached mounts.
 pub fn invalidate(st: &AppState, user_id: i64) {
+    *st.user_mounts_gen.entry(user_id).or_insert(0) += 1;
     st.mounts.remove(&user_id);
+}
+
+/// Drop every user's cached mounts.
+pub fn invalidate_all(st: &AppState) {
+    st.mounts_gen.fetch_add(1, Ordering::SeqCst);
+    st.mounts.clear();
 }
 
 /// Find the mount that holds `path` (normalised) and the path inside it.

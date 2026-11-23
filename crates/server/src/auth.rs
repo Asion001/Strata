@@ -470,7 +470,7 @@ pub async fn admin_delete_user(
         return Err(ApiError::NotFound);
     }
     tx.commit().await?;
-    st.mounts.remove(&id);
+    crate::mounts::invalidate(&st, id);
     Ok(Json(json!({})))
 }
 

@@ -1,4 +1,5 @@
 // Unsaved editor drafts in IndexedDB, so a crash or closed tab loses nothing.
+import { clearPositions } from '../media/positions';
 
 export interface Draft {
   key: string;
@@ -206,6 +207,8 @@ export function markSignedOut() {
     localStorage.removeItem(SEEN_KEY);
     localStorage.removeItem(ALIVE_KEY);
   } catch {}
+  // Playback positions name private paths too.
+  clearPositions();
 }
 
 /** Who is signed in here (null: no one; undefined: no storage at all, so

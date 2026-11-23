@@ -85,8 +85,8 @@ jobs:
       - run: npm run build
       - run: npm run size
 
-  # Browser tests against a real server built from this commit (Chromium
-  # only for now), so UI changes can't silently break them.
+  # Browser tests against a real server built from this commit (Chromium,
+  # plus WebKit for media playback), so UI changes can't silently break them.
   e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -118,9 +118,9 @@ jobs:
         run: npm ci && npm run build
       - name: Build the server
         run: cargo build --locked -p strata-server
-      - name: Install Chromium for Playwright
+      - name: Install Chromium and WebKit for Playwright
         working-directory: web
-        run: npx playwright install --with-deps chromium
+        run: npx playwright install --with-deps chromium webkit
       - name: Start the server
         run: |
           pw=$(openssl rand -hex 16)
@@ -146,14 +146,14 @@ jobs:
           done
           cat "$RUNNER_TEMP/strata.log"
           exit 1
-      - name: Playwright (Chromium)
+      - name: Playwright (Chromium; WebKit for media playback)
         working-directory: web
         env:
           STRATA_E2E_URL: http://127.0.0.1:8080
           STRATA_E2E_USER: admin
         run: |
           STRATA_E2E_PASSWORD=$(cat "$RUNNER_TEMP/e2e-password") \
-            npx playwright test --project=chromium --trace retain-on-failure --reporter=list,html
+            npx playwright test --project=chromium --project=webkit-media --trace retain-on-failure --reporter=list,html
       - name: Server log
         if: failure()
         run: cat "$RUNNER_TEMP/strata.log"

@@ -163,6 +163,7 @@ fn fake_mount(volume_id: i64, connection_id: i64, base: &str) -> Mount {
         mode: "hashed".into(),
         journal_from: 0,
         created_at: chrono::Utc::now(),
+        range_read: true,
     }
 }
 

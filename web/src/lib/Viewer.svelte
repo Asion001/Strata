@@ -3,6 +3,7 @@
   import { isAudio, isImage, isPdf, isSvg, isTextName, isVideo, bytes } from './format';
   import { staleApp } from './lazy';
   import { cn } from './utils';
+  import { session } from './session.svelte';
   import Button, { buttonClass } from './components/ui/button/button.svelte';
   import XIcon from '@lucide/svelte/icons/x';
   import DownloadIcon from '@lucide/svelte/icons/download';
@@ -32,6 +33,13 @@
   $effect(() => {
     if (!Pdf && isPdf(item.name))
       import('./pdf/PdfViewer.svelte').then((m) => (Pdf = m.default), staleApp);
+  });
+
+  // The media player, likewise (it stays out of the startup bundle).
+  let Player = $state<typeof import('./media/MediaPlayer.svelte').default>();
+  $effect(() => {
+    if (!Player && (isVideo(item.name) || isAudio(item.name)))
+      import('./media/MediaPlayer.svelte').then((m) => (Player = m.default), staleApp);
   });
 
   $effect(() => {
@@ -85,7 +93,8 @@
     // Typing in a field (e.g. the PDF viewer's find box) isn't navigation.
     if (e.key === 'Escape') return onclose();
     const t = e.target as HTMLElement | null;
-    if (t?.closest('input, textarea, select, [contenteditable]')) return;
+    // (Nor are arrow keys on a focused player: they seek.)
+    if (t?.closest('input, textarea, select, [contenteditable], video, audio')) return;
     // In a PDF the arrow keys scroll the pages.
     if (isPdf(item.name)) return;
     if (e.key === 'ArrowRight') step(1);
@@ -98,7 +107,7 @@
 
 <div class="viewer" role="dialog" aria-modal="true" tabindex="-1"
   ontouchstart={(e) => (touchX = e.touches[0].clientX)}
-  ontouchend={(e) => { if (zoom === 1 && !isPdf(item.name)) { const dx = e.changedTouches[0].clientX - touchX; if (Math.abs(dx) > 60) step(dx < 0 ? 1 : -1); } }}>
+  ontouchend={(e) => { if (zoom === 1 && !isPdf(item.name) && !(e.target as HTMLElement | null)?.closest('video, audio')) { const dx = e.changedTouches[0].clientX - touchX; if (Math.abs(dx) > 60) step(dx < 0 ? 1 : -1); } }}>
   <header>
     <div class="min-w-0 flex-1">
       <div class="truncate text-sm font-semibold">{item.name}</div>
@@ -118,11 +127,13 @@
     {:else if isPdf(item.name)}
       <!-- pdf.js loads only now, in its own chunks. -->
       {#if Pdf}{#key item.src}<Pdf src={item.src} download={item.download} name={item.name} />{/key}{/if}
-    {:else if isVideo(item.name)}
-      <!-- svelte-ignore a11y_media_has_caption -->
-      <video src={item.src} controls autoplay playsinline></video>
-    {:else if isAudio(item.name)}
-      <audio src={item.src} controls autoplay></audio>
+    {:else if isVideo(item.name) || isAudio(item.name)}
+      <!-- Keyed by file: each one gets a fresh player and its own position. -->
+      {#if Player}{#key item.src}
+        <Player kind={isVideo(item.name) ? 'video' : 'audio'} src={item.src} name={item.name}
+          owner={session.user?.id ?? null}
+          file={session.user && !item.src.startsWith('/api/public/') ? `${session.user.id}|${item.src}` : null} />
+      {/key}{/if}
     {:else if text !== null}
       <pre>{text}</pre>
     {:else}
@@ -137,7 +148,7 @@
   .viewer { position: fixed; inset: 0; background: #0a0a0a; z-index: 50; display: flex; flex-direction: column; color: #e5e7eb; }
   header { display: flex; gap: 4px; align-items: center; padding: 8px 8px 8px 16px; padding-top: max(8px, env(safe-area-inset-top)); }
   .stage { flex: 1; min-height: 0; display: grid; place-items: center; overflow: auto; padding: 8px; position: relative; }
-  img, video { max-width: 100%; max-height: 100%; object-fit: contain; transition: transform .15s; touch-action: pinch-zoom; }
+  img { max-width: 100%; max-height: 100%; object-fit: contain; transition: transform .15s; touch-action: pinch-zoom; }
   pre { background: #0b1120; color: #e5e7eb; padding: 16px; border-radius: 8px; width: min(1000px, 100%); height: 100%; overflow: auto; margin: 0; white-space: pre-wrap; word-break: break-word; }
   .none { color: #94a3b8; }
   .viewer :global(.nav) { position: absolute; top: 50%; transform: translateY(-50%); }
