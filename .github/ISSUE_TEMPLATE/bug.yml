@@ -1,0 +1,58 @@
+name: Bug report
+description: Something in Strata doesn't work as expected.
+title: "bug: "
+labels: ["type: bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! Please don't include passwords, tokens, host names or other private data.
+        Security problems go through [private vulnerability reporting](https://github.com/Asion001/Strata/security/advisories/new) instead.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Strata version, container image tag, or commit SHA.
+      placeholder: "0.1.0 / ghcr.io/…:main / abc1234"
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options: [Web app, Server / API, Storage connection, Sync, Deployment, Other]
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Mount an S3 connection at /Photos
+        2. Upload a 2 GB file
+        3. …
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Server log lines or browser console output around the failure. Remove anything private.
+      render: text
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, browser, storage backend (local, S3, FTP), how Strata is deployed.

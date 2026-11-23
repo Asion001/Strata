@@ -1,0 +1,23 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended", ":semanticCommits", ":dependencyDashboard"],
+  "schedule": ["before 6am on monday"],
+  "timezone": "UTC",
+  "labels": ["type: chore"],
+  "rangeStrategy": "bump",
+  "lockFileMaintenance": { "enabled": true, "schedule": ["before 6am on monday"] },
+  "packageRules": [
+    { "matchManagers": ["cargo"], "groupName": "Rust crates" },
+    { "matchManagers": ["npm"], "groupName": "web dependencies" },
+    { "matchManagers": ["github-actions"], "groupName": "GitHub Actions" },
+    { "matchManagers": ["dockerfile", "docker-compose"], "groupName": "container images" },
+    {
+      "matchManagers": ["npm"],
+      "matchDepTypes": ["devDependencies"],
+      "matchUpdateTypes": ["patch"],
+      "groupName": "web dev dependencies (patch)",
+      "automerge": true
+    },
+    { "matchPackageNames": ["pdfjs-dist"], "groupName": "pdf.js", "automerge": false }
+  ]
+}

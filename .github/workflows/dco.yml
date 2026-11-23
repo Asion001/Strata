@@ -1,0 +1,37 @@
+name: DCO
+
+# Every commit in a pull request must carry a Signed-off-by line that matches
+# its author (see CONTRIBUTING.md). Bot commits are exempt.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  dco:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check sign-off
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          status=0
+          for c in $(git rev-list --no-merges "$BASE..$HEAD"); do
+            author_email=$(git log -1 --format='%ae' "$c")
+            case "$author_email" in
+              *'[bot]@users.noreply.github.com') continue ;;
+            esac
+            if ! git log -1 --format='%(trailers:key=Signed-off-by,valueonly)' "$c" \
+                | grep -qiF "<$author_email>"; then
+              echo "::error::Commit ${c:0:12} has no Signed-off-by line matching its author (use git commit -s)"
+              status=1
+            fi
+          done
+          exit $status
