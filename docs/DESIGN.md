@@ -161,6 +161,32 @@ Blob names are the plain BLAKE3 hash today. The store's naming function
 already accepts a per-connection key (BLAKE3 keyed mode) for when encryption
 at rest arrives, so the backend will not learn content hashes.
 
+## Downloads and media
+File contents (`/api/files/content`, and the public share route) support a
+single byte range (RFC 9110).
+* **Range forms.** `bytes=a-b`, `a-` and `-n` get 206 with Content-Range,
+  and a range past the end gets 416 with `Content-Range: bytes */size`.
+  Several ranges, another unit or a malformed header get the whole file.
+* **If-Range.** It lets a range through only on an exact match with the
+  current strong ETag. A coarse raw version (seconds-only mtime) never
+  matches, since it can miss a change.
+* **Accept-Ranges and HEAD.** Responses carry `Accept-Ranges: bytes`. HEAD
+  gives size, type and ETag with no body.
+* **Hashed mounts.** The range maps to the chunks covering it, using the
+  stored chunk sizes. Only those are read, one at a time, with the first
+  and last sliced; the file's first bytes are also read once for the type
+  sniff.
+* **Raw mounts.** The backend reads the range itself. One whose
+  capabilities say it can't (`range_read: false`) is read from the start
+  and the bytes before the range are dropped, with a warning.
+* **Memory.** Responses stream with backpressure, so memory per download
+  is bounded: ten parallel 1 GB downloads stayed flat at about 200 MB.
+
+Video and audio play in the native elements (`preload="metadata"`,
+`playsinline`), so seeking is ranged reads. The preview viewer steps to the
+next or previous file in the folder, and each file's playback position is
+remembered in this browser (`localStorage`, the 200 most recent).
+
 ## Text editor
 Text, Markdown and code open in a CodeMirror 6 editor that loads lazily,
 with language modes loaded per file extension. Markdown gets a live preview
