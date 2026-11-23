@@ -7,7 +7,10 @@ const FOCUSABLE =
 
 export function focusables(root: HTMLElement): HTMLElement[] {
   return [...root.querySelectorAll<HTMLElement>(FOCUSABLE)].filter(
-    (el) => !el.closest('[inert], [hidden]') && getComputedStyle(el).visibility !== 'hidden'
+    (el) =>
+      !el.closest('[inert], [hidden]') &&
+      // Rendered and visible (display: none too, e.g. buttons hidden on touch screens).
+      (el.checkVisibility ? el.checkVisibility({ visibilityProperty: true }) : getComputedStyle(el).visibility !== 'hidden')
   );
 }
 
@@ -17,6 +20,8 @@ export function trapFocus(node: HTMLElement) {
   if (!node.contains(document.activeElement)) node.focus({ preventScroll: true });
   const key = (e: KeyboardEvent) => {
     if (e.key !== 'Tab') return;
+    // (A modal dialog over the overlay keeps its own focus.)
+    if (document.querySelector('dialog[open]')) return;
     const all = focusables(node);
     if (!all.length) {
       e.preventDefault();
@@ -33,10 +38,12 @@ export function trapFocus(node: HTMLElement) {
       first.focus();
     }
   };
-  node.addEventListener('keydown', key);
+  // On the document (capturing): focus can fall to <body> when the focused
+  // control goes away (Next on the last file), and Tab must still wrap.
+  document.addEventListener('keydown', key, true);
   return {
     destroy() {
-      node.removeEventListener('keydown', key);
+      document.removeEventListener('keydown', key, true);
       if (before?.isConnected) before.focus({ preventScroll: true });
     }
   };

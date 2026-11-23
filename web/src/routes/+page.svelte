@@ -324,6 +324,7 @@
       selection.clear();
       for (const n of failed) if (byName.has(n)) selection.toggle(n);
     }
+    return failed;
   }
 
   /** Mounts are moved and removed on the Mounts page, never as files. */
@@ -340,9 +341,11 @@
   async function viewerDelete(i: number) {
     const it = viewerItems[i];
     const e = byName.get(it.name);
-    if (!e) return;
-    await removeItems([e], false);
-    if (byName.has(it.name)) return; // cancelled or failed
+    if (!e) return toast(`“${it.name}” is no longer in this folder.`, 'info');
+    const failed = await removeItems([e], false);
+    if (!failed || failed.length) return; // cancelled, busy or failed
+    // (The viewer may have been closed while the dialog was open.)
+    if (viewerIndex < 0) return;
     const at = viewerItems.indexOf(it);
     if (at < 0) return;
     viewerItems = viewerItems.filter((x) => x !== it);
@@ -351,10 +354,14 @@
 
   const waitForBusy = () => toast('Wait for the current action to finish.', 'info');
 
-  async function removeItems(all: Entry[], fromSelection = true) {
-    if (busy) return waitForBusy();
+  /** The names that failed; null when nothing was tried (busy, cancelled). */
+  async function removeItems(all: Entry[], fromSelection = true): Promise<string[] | null> {
+    if (busy) {
+      waitForBusy();
+      return null;
+    }
     const items = withoutMounts(all, 'remove');
-    if (!items.length) return;
+    if (!items.length) return null;
     const dir = listedPath;
     const ok = await confirmDialog({
       title: `Delete ${names(items)}?`,
@@ -364,9 +371,12 @@
       confirm: 'Delete',
       danger: true
     });
-    if (!ok) return;
-    if (busy) return waitForBusy();
-    await each(items, 'delete', (e) => api('POST', '/api/files/delete', { paths: [join(dir, e.name)] }), fromSelection);
+    if (!ok) return null;
+    if (busy) {
+      waitForBusy();
+      return null;
+    }
+    return each(items, 'delete', (e) => api('POST', '/api/files/delete', { paths: [join(dir, e.name)] }), fromSelection);
   }
 
   async function transferPicked(copy: boolean) {

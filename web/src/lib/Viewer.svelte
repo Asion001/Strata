@@ -4,7 +4,7 @@
   // it is a history entry, so Back closes it.
   import { onDestroy, onMount } from 'svelte';
   import { pushState } from '$app/navigation';
-  import { page } from '$app/state';
+  import { navigating, page } from '$app/state';
   import { isAudio, isBrowserImage, isImage, isPdf, isTextName, isVideo, bytes } from './format';
   import { trapFocus } from './focus';
   import { Preloader } from './image/preload';
@@ -86,8 +86,9 @@
     else onclose();
   }
   onDestroy(() => {
-    // Closed another way (edit, the last file deleted): drop our entry.
-    if (pushed && page.state.viewer) history.back();
+    // Closed another way (edit, the last file deleted): drop our entry, but
+    // not when leaving for another page (that back would undo it).
+    if (pushed && page.state.viewer && !navigating.to) history.back();
     pushed = false;
     preload.clear();
   });
@@ -178,6 +179,8 @@
     if (isPdf(item.name)) return;
     if (e.key === 'ArrowRight') step(1);
     if (e.key === 'ArrowLeft') step(-1);
+    // (With Ctrl/Cmd these zoom the page itself.)
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
     if (shownImage && (e.key === '+' || e.key === '=')) zoomBy(1.5);
     if (shownImage && e.key === '-') zoomBy(1 / 1.5);
     if (shownImage && e.key === '0') view = fit;
@@ -223,7 +226,7 @@
           {#key item.src}
             <!-- SVG is shown only through <img> (the image route), which never runs scripts. -->
             <ImageView src={shownImage} thumb={item.thumb ?? null} name={item.name} bind:view
-              onswipe={step} onsize={(w, h) => (dims = { w, h })} />
+              onswipe={step} onsize={(w, h) => { if (isBrowserImage(item.name)) dims = { w, h }; }} />
           {/key}
           {#if !isBrowserImage(item.name)}
             <p class="note">A preview: this format can't be shown in full here. <a href={item.download}>Download it</a>.</p>

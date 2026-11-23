@@ -121,7 +121,7 @@ test('swipe moves between images; double tap and pinch zoom', async ({ browser }
   // A two-finger pinch (real touch events, through the DevTools protocol).
   const cdp = await ctx.newCDPSession(page);
   const cx = box.x + box.width / 2;
-  const touch = (type: string, d: number) =>
+  const touch = (type: 'touchStart' | 'touchMove' | 'touchEnd', d: number) =>
     cdp.send('Input.dispatchTouchEvent', {
       type,
       touchPoints: type === 'touchEnd' ? [] : [

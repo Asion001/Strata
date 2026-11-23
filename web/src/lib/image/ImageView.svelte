@@ -3,7 +3,7 @@
   // it), the full image over it when that has loaded, both filling the same
   // box so nothing moves. Pinch, wheel and double-tap zoom; drag to pan when
   // zoomed; a horizontal swipe at fit size moves to the next or previous.
-  import { clamp, fit, toggle, zoomAt, type View } from './zoom';
+  import { clamp, fit, toggle, zoomAt, MAX, MIN, type View } from './zoom';
 
   let {
     src,
@@ -34,7 +34,8 @@
   /** The image's size on screen at scale 1 (contained in the stage). */
   function shown() {
     const r = stage.getBoundingClientRect();
-    if (!natural) return { w: r.width, h: r.height };
+    // (An SVG without a size reports 0 × 0: then the stage's size.)
+    if (!natural?.w || !natural.h) return { w: r.width, h: r.height };
     // (object-fit: contain, so a small image is scaled up to fit too.)
     const k = Math.min((r.width - 16) / natural.w, (r.height - 16) / natural.h);
     return { w: natural.w * k, h: natural.h * k };
@@ -43,6 +44,16 @@
     const { w, h } = shown();
     view = clamp(v, w, h);
   }
+  const bound = (s: number) => Math.min(MAX, Math.max(MIN, s));
+  // A view set from outside (the zoom buttons and keys) is kept in bounds too.
+  $effect(() => {
+    const v = view;
+    if (!stage) return;
+    const { w, h } = shown();
+    if (!(w > 0 && h > 0)) return; // not laid out yet
+    const c = clamp(v, w, h);
+    if (c.s !== v.s || c.x !== v.x || c.y !== v.y) view = c;
+  });
   /** A point from the stage's centre. */
   function rel(x: number, y: number) {
     const r = stage.getBoundingClientRect();
@@ -63,7 +74,9 @@
     return rel((a.x + b.x) / 2, (a.y + b.y) / 2);
   };
 
+  let lastType = 'mouse';
   function pointerdown(e: PointerEvent) {
+    lastType = e.pointerType;
     if (e.button !== 0) return;
     stage.setPointerCapture?.(e.pointerId);
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -80,7 +93,7 @@
     const dx = e.clientX - p.x, dy = e.clientY - p.y;
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (pinch && pointers.size === 2) {
-      const s = pinch.v.s * (dist() / Math.max(1, pinch.d));
+      const s = bound(pinch.v.s * (dist() / Math.max(1, pinch.d)));
       const m = mid();
       // Zoom about where the pinch started, and follow the fingers' midpoint.
       const z = zoomAt(pinch.v, s, pinch.px, pinch.py);
@@ -113,6 +126,9 @@
     }
   }
   function dblclick(e: MouseEvent) {
+    // Touch double taps are handled above; browsers send a dblclick for
+    // them too, which would undo the zoom.
+    if (lastType !== 'mouse') return;
     const { px, py } = rel(e.clientX, e.clientY);
     set(toggle(view, px, py));
   }
@@ -123,7 +139,7 @@
       e.preventDefault();
       const { px, py } = rel(e.clientX, e.clientY);
       const k = Math.exp(-e.deltaY * (e.ctrlKey ? 0.02 : 0.002));
-      set(zoomAt(view, view.s * k, px, py));
+      set(zoomAt(view, bound(view.s * k), px, py));
     };
     node.addEventListener('wheel', on, { passive: false });
     return { destroy: () => node.removeEventListener('wheel', on) };
@@ -151,7 +167,7 @@
         data-testid="viewer-image" onload={full} onerror={() => (failed = true)} />
     {/if}
   </div>
-  {#if failed && !thumb}
+  {#if failed}
     <div class="failed" role="status">This image couldn't be shown.</div>
   {/if}
 </div>
@@ -165,7 +181,7 @@
      blurry for a moment, then replaced in place. */
   .full { opacity: 0; transition: opacity .15s; }
   .full.shown { opacity: 1; }
-  .failed { position: absolute; inset: 0; display: grid; place-items: center; color: #94a3b8; }
+  .failed { position: absolute; inset: auto 0 16px; text-align: center; color: #e5e7eb; text-shadow: 0 1px 2px #000; }
   @media (prefers-reduced-motion: reduce) {
     .frame.still, .full { transition: none; }
   }

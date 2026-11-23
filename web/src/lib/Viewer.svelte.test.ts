@@ -6,6 +6,7 @@ import { flushSync, mount, unmount } from 'svelte';
 vi.mock('$app/state', async () => {
   const { nav } = await import('./testing/nav.svelte');
   return {
+    navigating: { to: null },
     page: {
       get state() {
         return nav.state;
@@ -165,6 +166,11 @@ describe('Viewer', () => {
     expect(document.activeElement).toBe(all[0]);
     press('Tab', { shiftKey: true });
     expect(document.activeElement).toBe(all[all.length - 1]);
+    // Focus that fell to <body> (its button went away) comes back in.
+    (document.activeElement as HTMLElement).blur();
+    expect(document.activeElement).toBe(document.body);
+    press('Tab');
+    expect(dialog.contains(document.activeElement)).toBe(true);
   });
 
   it('labels every icon-only button', () => {
