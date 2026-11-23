@@ -367,11 +367,9 @@ async fn insert_local_connection(
     .await?;
     // The folder's marker (see `state::LocalRoot`), written with the row (a
     // read-only folder can't take one; nothing is written there anyway).
-    if let Some(dir) = cfg.local_dir(&st.cfg.local_base)?
-        && op.info().capability().write
-    {
+    if op.info().capability().write {
         // Best effort: without it, a later probe adopts the folder.
-        match crate::state::LocalRoot::write_marker(&st.cfg.local_base, dir, id).await {
+        match crate::state::LocalRoot::write_marker(&op, id).await {
             Ok(()) => {
                 sqlx::query("UPDATE connections SET root_marker = TRUE WHERE id = $1")
                     .bind(id)

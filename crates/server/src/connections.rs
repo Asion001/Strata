@@ -224,8 +224,8 @@ pub async fn create(
     .await?;
     // A local folder gets its marker now (see `state::LocalRoot`).
     // (A read-only folder can't take one; nothing is written there anyway.)
-    if let Some(dir) = req.config.local_dir(&st.cfg.local_base).ok().flatten()
-        && let Err(e) = st.mark_root(id, dir, None).await
+    if req.config.kind() == "local"
+        && let Err(e) = st.mark_root(id, None).await
     {
         tracing::warn!("connection {id}: no folder marker: {e}");
     }
@@ -361,8 +361,8 @@ pub async fn update(
         // A new target starts over: not offline, a fresh failure count, and
         // (local) its own folder marker.
         st.offline.remove(&id);
-        if let Some(dir) = req.config.local_dir(&st.cfg.local_base).ok().flatten()
-            && let Err(e) = st.mark_root(id, dir, None).await
+        if req.config.kind() == "local"
+            && let Err(e) = st.mark_root(id, None).await
         {
             tracing::warn!("connection {id}: no folder marker: {e}");
         }
@@ -407,11 +407,11 @@ pub async fn delete(
         ));
     }
     // A local connection's marker goes with it (best effort, below).
-    let local_dir = st
-        .connection_config(id)
-        .await
-        .ok()
-        .and_then(|c| c.local_dir(&st.cfg.local_base).ok().flatten());
+    // (Its operator, rooted at the folder, built before the row goes.)
+    let local_op = match st.connection_config(id).await {
+        Ok(c) if c.kind() == "local" => st.operator_unchecked(id).await.ok(),
+        _ => None,
+    };
     let mut tx = st.db.begin().await?;
     sqlx::query("DELETE FROM volumes WHERE connection_id = $1")
         .bind(id)
@@ -423,17 +423,8 @@ pub async fn delete(
         .await?;
     tx.commit().await?;
     st.forget_connection(id);
-    if let Some(dir) = local_dir
-        && let Ok(marker) = crate::state::LocalRoot::marker_within(&st.cfg.local_base, &dir, id)
-    {
-        let _ = tokio::task::spawn_blocking(move || {
-            let _ = std::fs::remove_file(&marker);
-            // The probe folder too, if nothing else is in it.
-            if let Some(p) = marker.parent() {
-                let _ = std::fs::remove_dir(p);
-            }
-        })
-        .await;
+    if let Some(op) = local_op {
+        crate::state::LocalRoot::remove_marker(&op, id).await;
     }
     Ok(Json(json!({})))
 }

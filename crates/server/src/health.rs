@@ -381,7 +381,7 @@ async fn probe_inner(st: &AppState, id: i64, counted: bool) -> anyhow::Result<Op
         .unwrap_or(false);
         if has_content {
             // Only for the config this probe saw (see above).
-            if let Err(e) = st.mark_root(id, dir.to_path_buf(), Some(&enc)).await {
+            if let Err(e) = st.mark_root(id, Some(&enc)).await {
                 tracing::warn!("connection {id}: can't write its folder marker: {e}");
             }
         }

@@ -271,41 +271,36 @@ impl LocalRoot {
             .join(format!("conn-{connection_id}"))
     }
 
-    /// The marker path, only if `dir` lies inside the storage base (as
-    /// `ConnectionConfig::local_dir` guarantees; checked again right where
-    /// files are touched).
-    pub fn marker_within(
-        base: &std::path::Path,
-        dir: &std::path::Path,
-        connection_id: i64,
-    ) -> ApiResult<PathBuf> {
-        let inside = dir.starts_with(base)
-            && dir.strip_prefix(base).is_ok_and(|rel| {
-                rel.components()
-                    .all(|c| matches!(c, std::path::Component::Normal(_)))
-            });
-        if !inside {
-            return Err(ApiError::Internal(anyhow::anyhow!(
-                "a connection folder outside the storage base"
-            )));
-        }
-        Ok(Self::marker_path(dir, connection_id))
+    /// The marker's path inside the connection (for its operator).
+    pub fn marker_key(connection_id: i64) -> String {
+        format!(
+            "{}/conn-{connection_id}",
+            strata_storage::backend::PROBE_DIR
+        )
     }
 
-    /// Write the marker file (off the async threads).
-    pub async fn write_marker(
-        base: &std::path::Path,
-        dir: PathBuf,
-        connection_id: i64,
-    ) -> ApiResult<()> {
-        let m = Self::marker_within(base, &dir, connection_id)?;
-        tokio::task::spawn_blocking(move || {
-            std::fs::create_dir_all(m.parent().unwrap())?;
-            std::fs::write(&m, b"strata connection folder marker\n")
-        })
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))?
-        .map_err(|e| ApiError::Internal(e.into()))
+    /// Write the marker through the connection's own operator (rooted at its
+    /// folder, so nothing outside it can be touched).
+    pub async fn write_marker(op: &Operator, connection_id: i64) -> ApiResult<()> {
+        op.write(
+            &Self::marker_key(connection_id),
+            b"strata connection folder marker\n".to_vec(),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Remove the marker (and the probe folder if nothing else is in it).
+    pub async fn remove_marker(op: &Operator, connection_id: i64) {
+        let _ = op.delete(&Self::marker_key(connection_id)).await;
+        let dir = format!("{}/", strata_storage::backend::PROBE_DIR);
+        if op
+            .list(&dir)
+            .await
+            .is_ok_and(|l| l.iter().all(|e| e.path() == dir))
+        {
+            let _ = op.delete(&dir).await;
+        }
     }
 
     /// Blocking check (see `AppState::check_root`).
@@ -328,13 +323,9 @@ impl AppState {
     /// Write a local connection's marker into its folder (just created or
     /// confirmed) and record it, if the connection still has the config
     /// `enc` (None: whatever it is now).
-    pub async fn mark_root(
-        &self,
-        connection_id: i64,
-        dir: PathBuf,
-        enc: Option<&[u8]>,
-    ) -> ApiResult<()> {
-        LocalRoot::write_marker(&self.cfg.local_base, dir, connection_id).await?;
+    pub async fn mark_root(&self, connection_id: i64, enc: Option<&[u8]>) -> ApiResult<()> {
+        let op = self.operator_unchecked(connection_id).await?;
+        LocalRoot::write_marker(&op, connection_id).await?;
         sqlx::query(
             "UPDATE connections SET root_marker = TRUE
              WHERE id = $1 AND ($2::bytea IS NULL OR config_enc = $2)",
