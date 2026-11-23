@@ -5,13 +5,20 @@ export class ApiError extends Error {
   }
 }
 
-export async function api<T = any>(method: string, url: string, body?: unknown): Promise<T> {
+import { session } from './session.svelte';
+
+import { OFFLINE_AT } from './offline/keys';
+
+export async function api<T = any>(method: string, url: string, body?: unknown, meta?: { offlineAt?: string | null }): Promise<T> {
   const init: RequestInit = { method, headers: { 'x-strata': '1' }, credentials: 'same-origin' };
+  // The service worker keeps listings per user: it needs to know whose.
+  if (method === 'GET' && session.user) (init.headers as Record<string, string>)['x-strata-user'] = String(session.user.id);
   if (body !== undefined) {
     (init.headers as Record<string, string>)['content-type'] = 'application/json';
     init.body = JSON.stringify(body);
   }
   const r = await fetch(url, init);
+  if (meta) meta.offlineAt = r.headers.get(OFFLINE_AT);
   if (!r.ok) {
     let msg = r.statusText;
     try {

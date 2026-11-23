@@ -81,7 +81,8 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - run: npm ci
       - run: npm run check
-      - run: npm test
+      # (With coverage: the offline queue and cache must stay at 100%.)
+      - run: npm test -- --coverage
       - run: npm run build
       - run: npm run size
 
@@ -146,14 +147,14 @@ jobs:
           done
           cat "$RUNNER_TEMP/strata.log"
           exit 1
-      - name: Playwright (Chromium; WebKit for media playback)
+      - name: Playwright (Chromium; WebKit for media playback and offline)
         working-directory: web
         env:
           STRATA_E2E_URL: http://127.0.0.1:8080
           STRATA_E2E_USER: admin
         run: |
           STRATA_E2E_PASSWORD=$(cat "$RUNNER_TEMP/e2e-password") \
-            npx playwright test --project=chromium --project=webkit-media --trace retain-on-failure --reporter=list,html
+            npx playwright test --project=chromium --project=webkit-media --project=webkit-offline --trace retain-on-failure --reporter=list,html
       - name: Server log
         if: failure()
         run: cat "$RUNNER_TEMP/strata.log"

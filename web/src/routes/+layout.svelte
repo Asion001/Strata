@@ -11,6 +11,9 @@
   import { cancelAllDialogs, dialogHost } from '$lib/dialogs.svelte';
   import { toaster } from '$lib/toast.svelte';
   import { palette, paletteKey } from '$lib/palette.svelte';
+  import { ApiError } from '$lib/api';
+  import { applyUpdate, lastUser, net, signedIn, startQueue, update, watchUpdates } from '$lib/offline/app.svelte';
+  import { onMount } from 'svelte';
 
   let { children } = $props();
 
@@ -27,11 +30,25 @@
       .then((u) => {
         session.user = u;
         markSignedIn(u.id); // lets the editor's autosave run in every tab
+        // (Offline caches are per user: first say who, then resume uploads.)
+        void signedIn(u).then(() => startQueue(u.id, uploadDone));
         reloadMounts();
       })
-      .catch(() => goto('/login?next=' + encodeURIComponent(page.url.pathname + page.url.search)))
+      .catch((e) => {
+        // Offline (no answer at all): carry on as whoever was signed in
+        // here last, with what is cached. Anything else: sign in again.
+        const last = e instanceof ApiError ? null : lastUser();
+        if (last) {
+          session.user = last;
+          void startQueue(last.id, uploadDone);
+        } else goto('/login?next=' + encodeURIComponent(page.url.pathname + page.url.search));
+      })
       .finally(() => (session.checked = true));
   });
+
+  onMount(() => void watchUpdates());
+  // A queued upload finished: the folder it went to refreshes (if shown).
+  const uploadDone = (j: { path: string }) => window.dispatchEvent(new CustomEvent('strata-upload-done', { detail: j.path }));
 
 </script>
 
@@ -48,6 +65,15 @@
 {/if}
 
 <svelte:window onkeydown={(e) => { if (session.user && !isPublic) paletteKey(e); }} />
+
+{#if update.ready && !isPublic}
+  <div role="status" class="fixed inset-x-0 top-[env(safe-area-inset-top)] z-[60] mx-auto mt-2 flex w-fit max-w-[calc(100vw-2rem)] items-center gap-3 rounded-full border border-border bg-popover py-1.5 pr-1.5 pl-4 text-sm shadow-lg">
+    New version available
+    <button class="rounded-full bg-primary px-3 py-1 font-medium text-primary-foreground" onclick={applyUpdate}>Reload</button>
+  </div>
+{:else if !net.online && session.user && !isPublic}
+  <div role="status" class="fixed inset-x-0 top-[env(safe-area-inset-top)] z-[60] mx-auto mt-2 w-fit rounded-full border border-border bg-popover px-4 py-1.5 text-sm shadow-lg">Offline</div>
+{/if}
 
 {#if palette.component && session.user && !isPublic}<palette.component />{/if}
 {#if dialogHost.component}<dialogHost.component />{/if}

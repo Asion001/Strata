@@ -25,7 +25,9 @@
   import XIcon from '@lucide/svelte/icons/x';
   import InfoIcon from '@lucide/svelte/icons/info';
   import { fileHref } from '$lib/components/shell/nav';
-  import { runUpload, type UploadTask } from '$lib/upload';
+  import { cancelUpload, clearFinished, enqueue as queueFiles, net, retryUpload, uploads } from '$lib/offline/app.svelte';
+  import { isActive, progress as jobProgress } from '$lib/offline/jobs';
+  const Recent = () => import('$lib/offline/recent');
   import { reloadMounts } from '$lib/mounts.svelte';
   import VirtualList from '$lib/VirtualList.svelte';
   import Editor from '$lib/editor/Editor.svelte';
@@ -43,9 +45,28 @@
   let editing = $state<string | null>(null);
   let loading = $state(false);
   let error = $state('');
+  /** The listing shown came from the offline cache, saved at this time. */
+  let offlineAt = $state<string | null>(null);
+  /** Paths kept offline ("Keep offline"). */
+  let pinned = $state(new Set<string>());
+  async function loadPins() {
+    if (!session.user) return;
+    try {
+      pinned = new Set((await (await Recent()).list(session.user.id)).filter((r) => r.pinned).map((r) => r.path));
+    } catch {}
+  }
+  async function togglePin(e: Entry) {
+    menu = null;
+    if (!session.user) return;
+    const p = join(listedPath, e.name);
+    const on = !pinned.has(p);
+    const ok = await (await Recent()).pin(session.user.id, p, e.etag, contentUrl(p), on).catch(() => false);
+    if (!ok) toast(on ? `Couldn't keep “${e.name}” offline (too big, or the storage cap is reached).` : 'Something went wrong.', 'error');
+    else toast(on ? `“${e.name}” is kept offline.` : `“${e.name}” is no longer kept offline.`, 'success');
+    await loadPins();
+  }
   let query = $state('');
   let hits = $state<{ path: string; name: string; is_dir: boolean; size: number; mtime: string }[] | null>(null);
-  let uploads = $state<UploadTask[]>([]);
   let menu = $state<Entry | null>(null);
   let viewerIndex = $state(-1);
   // The preview viewer (and, through it, the PDF viewer) loads on first use.
@@ -170,8 +191,11 @@
     loading = true;
     error = '';
     try {
-      const r = await api('GET', `/api/files/list?path=${encodeURIComponent(p)}`);
+      const meta: { offlineAt?: string | null } = {};
+      const r = await api('GET', `/api/files/list?path=${encodeURIComponent(p)}`, undefined, meta);
       if (my !== seq) return;
+      offlineAt = meta.offlineAt ?? null;
+      void loadPins();
       entries = r.entries;
       if (listedPath !== p) details = null;
       listedPath = p;
@@ -231,6 +255,12 @@
         };
       });
       viewerIndex = viewable.indexOf(e);
+      // Opened: kept in the recent-files cache (if it fits), for offline.
+      if (session.user && !offlineAt) {
+        const p = join(listedPath, e.name);
+        const user = session.user.id;
+        void Recent().then((r) => r.remember(user, p, e.etag, contentUrl(p))).catch(() => {});
+      }
     }
   }
 
@@ -406,28 +436,18 @@
     );
   }
 
-  let uid = 0;
+  // Uploads go through the offline queue (they survive going offline, a
+  // reload or a closed tab); a finished one refreshes its folder.
   function enqueue(files: Iterable<File>, base = path) {
-    for (const f of files) {
-      const rel = (f as File & { webkitRelativePath?: string }).webkitRelativePath || f.name;
-      uploads.push({ id: ++uid, file: f, path: join(base, rel), status: 'queued', progress: 0, sent: 0, skipped: 0 });
-    }
-    pump();
+    if (!session.user) return;
+    const items = [...files].map((f) => ({ file: f, path: join(base, (f as File & { webkitRelativePath?: string }).webkitRelativePath || f.name) }));
+    void queueFiles(session.user.id, items);
   }
-  let active = 0;
-  function pump() {
-    while (active < 2) {
-      const t = uploads.find((u) => u.status === 'queued');
-      if (!t) return;
-      active++;
-      t.status = 'hashing';
-      runUpload(t, () => (uploads = uploads)).finally(() => {
-        active--;
-        if (parent(t.path) === path) load();
-        pump();
-      });
-    }
-  }
+  $effect(() => {
+    const done = (e: Event) => { if (parent((e as CustomEvent<string>).detail) === path) load(); };
+    window.addEventListener('strata-upload-done', done);
+    return () => window.removeEventListener('strata-upload-done', done);
+  });
 
   function onDrop(e: DragEvent) {
     e.preventDefault();
@@ -533,6 +553,9 @@
     <input bind:this={fileInput} type="file" multiple hidden onchange={(e) => { enqueue(e.currentTarget.files!); e.currentTarget.value = ''; }} />
     <input bind:this={folderInput} type="file" webkitdirectory hidden onchange={(e) => { enqueue(e.currentTarget.files!); e.currentTarget.value = ''; }} />
   </header>
+  {#if offlineAt}
+    <p class="border-b border-border bg-muted px-4 py-2 text-sm" role="status" data-testid="offline-banner">Offline, as of {new Date(offlineAt).toLocaleString()}. Files kept offline open; the rest needs the network.</p>
+  {/if}
   {#if mount?.offline}
     <p class="border-b border-border px-4 py-2 text-sm text-muted-foreground" role="status">This storage is offline. Its files can't be opened or changed until it's back.</p>
   {/if}
@@ -649,19 +672,21 @@
     </div>
   {/if}
 
-  {#if uploads.length}
-    <div class="uploads fixed right-4 z-20 grid max-h-[50vh] w-[min(380px,calc(100vw-2rem))] gap-2 overflow-auto rounded-xl border border-border bg-popover p-3 shadow-lg">
-      <div class="flex items-center"><b class="flex-1 text-sm">Uploads</b>
-        <Button variant="ghost" size="sm" onclick={() => (uploads = uploads.filter((u) => u.status !== 'done' && u.status !== 'error'))}>Clear</Button></div>
-      {#each uploads.slice(-6) as u (u.id)}
-        <div class="grid gap-1 text-sm">
-          <div class="flex gap-2"><span class="min-w-0 flex-1 truncate">{u.path}</span>
-            <span class="text-muted-foreground">{u.status === 'error' ? '' : u.status === 'done' ? (u.skipped ? `done, ${bytes(u.skipped)} deduped` : 'done') : u.status}</span></div>
-          {#if u.status === 'error'}<div class="text-destructive">{u.error}</div>{/if}
-          <progress max="1" value={u.progress} class="h-1.5 w-full accent-primary"></progress>
+  {#if uploads.jobs.length}
+    <section aria-label="Uploads" class="uploads fixed right-4 z-20 grid max-h-[50vh] w-[min(380px,calc(100vw-2rem))] gap-2 overflow-auto rounded-xl border border-border bg-popover p-3 shadow-lg">
+      <div class="flex items-center"><b class="flex-1 text-sm">Uploads{#if !net.online && uploads.jobs.some(isActive)} <span class="font-normal text-muted-foreground">· waiting for the network</span>{/if}</b>
+        {#if uploads.jobs.some((u) => !isActive(u))}<Button variant="ghost" size="sm" onclick={clearFinished}>Clear</Button>{/if}</div>
+      {#each uploads.jobs.slice(-6) as u (u.id)}
+        <div class="grid gap-1 text-sm" data-testid="upload">
+          <div class="flex items-center gap-2"><span class="min-w-0 flex-1 truncate">{u.path}</span>
+            <span class="text-muted-foreground">{u.state === 'failed' ? '' : u.state === 'done' ? (u.skipped ? `done, ${bytes(u.skipped)} deduped` : 'done') : u.state}</span>
+            {#if isActive(u)}<Button variant="ghost" size="sm" class="h-6 px-2" onclick={() => cancelUpload(u.id)} aria-label="Cancel upload of {u.path}">Cancel</Button>{/if}
+            {#if u.state === 'failed'}<Button variant="ghost" size="sm" class="h-6 px-2" onclick={() => retryUpload(u.id)}>Retry</Button>{/if}</div>
+          {#if u.state === 'failed'}<div class="text-destructive">{u.error}</div>{/if}
+          <progress max="1" value={jobProgress(u)} class="h-1.5 w-full accent-primary"></progress>
         </div>
       {/each}
-    </div>
+    </section>
   {/if}
 
   {#if dragging}
@@ -700,6 +725,9 @@
       {/if}
       <button role="menuitem" class="item" onclick={() => moveTo(e, true)}>Copy…</button>
       <button role="menuitem" class="item" onclick={() => share(e)}>Share link…</button>
+      {#if !e.is_dir}
+        <button role="menuitemcheckbox" aria-checked={pinned.has(join(listedPath, e.name))} class="item" onclick={() => togglePin(e)}>Keep offline</button>
+      {/if}
       {#if e.mount_id}
         <a role="menuitem" class="item" href="/mounts">Manage mount…</a>
       {:else}

@@ -1,0 +1,203 @@
+// The app's side of offline: who is signed in (for the service worker),
+// the upload queue as the UI sees it, the "new version" prompt, and the
+// sign-out that leaves nothing behind.
+
+// (The queue, the cache and the chunker load on first use, not with the app.)
+import { META, SYNC_TAG, USER_KEY } from './keys';
+import { isActive, type Job } from './jobs';
+import type { Deps } from './queue';
+import type { User } from '../api';
+
+const Queue = () => import('./queue');
+const Recent = () => import('./recent');
+
+// ---------------------------------------------------------------- user
+
+const LAST_USER = 'strata-last-user';
+
+/** Someone is signed in: tell the service worker (it keys cached files by
+ *  user), drop what other users left here, remember them for offline. */
+export async function signedIn(u: User) {
+  try {
+    localStorage.setItem(LAST_USER, JSON.stringify({ id: u.id, username: u.username, is_admin: u.is_admin }));
+  } catch {}
+  try {
+    await (await caches.open(META)).put(USER_KEY, new Response(String(u.id)));
+    await (await Recent()).keepOnlyUser(u.id);
+  } catch {}
+}
+
+/** Offline, the user who was signed in last (until they sign out). */
+export function lastUser(): User | null {
+  try {
+    const u = JSON.parse(localStorage.getItem(LAST_USER) ?? 'null');
+    return u && Number.isInteger(u.id) ? u : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Sign out: cancel queued uploads (their server sessions too, while still
+ *  signed in), sign out, then delete every cache and the queue. Local data
+ *  goes even when the server can't be reached. */
+export async function signOut(user: number | null, logout: () => Promise<unknown>) {
+  const [queue, recent] = await Promise.all([Queue(), Recent()]);
+  if (user !== null) await queue.abandonSessions(user, fetch).catch(() => {});
+  await logout().catch(() => {});
+  try {
+    localStorage.removeItem(LAST_USER);
+  } catch {}
+  await caches.delete(META).catch(() => false);
+  await recent.clearAll().catch(() => {});
+  uploads.jobs = [];
+}
+
+// ---------------------------------------------------------------- network
+
+export const net = $state({ online: typeof navigator === 'undefined' ? true : navigator.onLine });
+if (typeof window !== 'undefined') {
+  window.addEventListener('online', () => (net.online = true));
+  window.addEventListener('offline', () => (net.online = false));
+}
+
+// ---------------------------------------------------------------- uploads
+
+export const uploads = $state<{ jobs: Job[] }>({ jobs: [] });
+
+function changed(j: Job) {
+  const i = uploads.jobs.findIndex((x) => x.id === j.id);
+  if (i >= 0) uploads.jobs[i] = j;
+  else uploads.jobs.push(j);
+}
+
+let queueUser: number | null = null;
+let draining: Promise<unknown> | null = null;
+let again = false;
+let onDone: ((j: Job) => void) | null = null;
+
+const deps = (): Deps => ({
+  fetch: (u, i) => fetch(u, i),
+  chunk: async (b) => (await import('./chunks')).chunkFile(b),
+  sleep: (a) => new Promise((r) => setTimeout(r, 1000 * 2 ** a)),
+  changed: (j) => {
+    changed(j);
+    if (j.state === 'done') onDone?.(j);
+  }
+});
+
+/** Work through the queue now (one run at a time; a request meanwhile runs
+ *  it again afterwards). */
+export function pump() {
+  const user = queueUser;
+  if (user === null) return;
+  if (draining) {
+    again = true;
+    return;
+  }
+  draining = Queue()
+    .then((queue) => queue.drain(user, deps()))
+    .catch(() => {})
+    .finally(() => {
+      draining = null;
+      if (again) {
+        again = false;
+        pump();
+      }
+    });
+}
+
+/** Start the queue for a user: what was left (app open), and again
+ *  whenever the network comes back. `done`: a job finished. */
+export async function startQueue(user: number, done: (j: Job) => void) {
+  queueUser = user;
+  onDone = done;
+  uploads.jobs = await Queue()
+    .then((queue) => queue.jobs(user))
+    .catch(() => []);
+  pump();
+}
+if (typeof window !== 'undefined') window.addEventListener('online', () => pump());
+
+/** Queue files for upload. */
+export async function enqueue(user: number, items: { file: File; path: string }[]) {
+  const queue = await Queue();
+  for (const { file, path } of items) {
+    const j = queue.newJob(user, path, file);
+    await queue.keepBytes(j.id, file);
+    await queue.save(j);
+    changed(j);
+  }
+  // Where the browser can, finish even if the tab is closed.
+  try {
+    const reg = await navigator.serviceWorker?.ready;
+    await (reg as ServiceWorkerRegistration & { sync?: { register(t: string): Promise<void> } })?.sync?.register(SYNC_TAG);
+  } catch {}
+  pump();
+}
+
+export async function cancelUpload(id: string) {
+  await (await Queue()).cancel(id, { fetch: (u, i) => fetch(u, i), changed });
+  uploads.jobs = uploads.jobs.filter((j) => j.id !== id);
+}
+
+export async function retryUpload(id: string) {
+  const queue = await Queue();
+  const j = await queue.load(id);
+  if (!j) return;
+  const n = queue.step(j, { t: 'retry' });
+  await queue.save(n);
+  changed(n);
+  pump();
+}
+
+/** Done, failed and cancelled jobs leave the list (failed ones the queue too). */
+export async function clearFinished() {
+  const queue = await Queue();
+  for (const j of uploads.jobs) if (j.state === 'failed') await queue.remove(j.id);
+  uploads.jobs = uploads.jobs.filter((j) => isActive(j));
+}
+
+// ---------------------------------------------------------------- update
+
+export const update = $state({ ready: false });
+let waiting: ServiceWorker | null = null;
+
+/** Watch for a new version of the app: it installs, waits, and the UI
+ *  offers a reload (which hands over to it). */
+export async function watchUpdates() {
+  if (typeof navigator === 'undefined' || !navigator.serviceWorker) return;
+  const reg = await navigator.serviceWorker.getRegistration();
+  if (!reg) return;
+  const offer = (w: ServiceWorker | null) => {
+    // (A first install has no controller: nothing to replace.)
+    if (w && navigator.serviceWorker.controller) {
+      waiting = w;
+      update.ready = true;
+    }
+  };
+  offer(reg.waiting);
+  reg.addEventListener('updatefound', () => {
+    const w = reg.installing;
+    w?.addEventListener('statechange', () => {
+      if (w.state === 'installed') offer(w);
+    });
+  });
+  // A new worker took over (from this tab or another): reload, so no tab
+  // keeps running the old app against the new worker and assets.
+  const hadController = !!navigator.serviceWorker.controller;
+  let reloading = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (reloading || !hadController) return;
+    reloading = true;
+    location.reload();
+  });
+  // Look for a new version when the app comes back to the foreground.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') void reg.update().catch(() => {});
+  });
+}
+
+export function applyUpdate() {
+  if (!waiting) return location.reload();
+  waiting.postMessage('skip-waiting');
+}

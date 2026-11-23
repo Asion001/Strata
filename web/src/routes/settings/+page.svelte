@@ -24,10 +24,14 @@
     } catch (err) { toastError(err); } finally { busy = false; }
   }
   async function logout() {
-    await api('POST', '/api/auth/logout');
     // Unsaved editor drafts hold file contents: don't leave them behind.
     const { markSignedOut, clearAllDrafts } = await import('$lib/editor/drafts');
+    const { signOut } = await import('$lib/offline/app.svelte');
     markSignedOut(); // stops autosave in every tab before the drafts go
+    // Queued uploads are cancelled (with their server sessions), then the
+    // session ends, then every cached file, listing and queued upload goes
+    // (offline too: then only the local part).
+    await signOut(session.user?.id ?? null, () => api('POST', '/api/auth/logout'));
     await clearAllDrafts();
     location.href = '/login';
   }

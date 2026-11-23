@@ -17,6 +17,8 @@ export default defineConfig({
     { name: 'firefox', testIgnore: /media\.spec\.ts/, use: { ...devices['Desktop Firefox'] } },
     { name: 'webkit', testIgnore: /media\.spec\.ts/, use: { ...devices['Desktop Safari'] } },
     // Media playback in WebKit (CI runs this next to the Chromium project).
-    { name: 'webkit-media', testMatch: /media\.spec\.ts/, use: { ...devices['Desktop Safari'] } }
+    { name: 'webkit-media', testMatch: /media\.spec\.ts/, use: { ...devices['Desktop Safari'] } },
+    // Offline (service worker, caches, upload queue) in WebKit too.
+    { name: 'webkit-offline', testMatch: /offline\.spec\.ts/, use: { ...devices['Desktop Safari'] } }
   ]
 });
