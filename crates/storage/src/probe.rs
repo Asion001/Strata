@@ -179,15 +179,26 @@ async fn write_test(op: &Operator) -> Result<Option<bool>, StepError> {
     // A read from an offset, on its own clock (it never fails the write
     // test): a backend that ignores the offset or refuses it (FTP without
     // REST) can't serve byte ranges directly. A timeout or a temporary
-    // error doesn't tell.
+    // error doesn't tell, and an error counts only when a second try fails
+    // the same way (not a one-off dropped connection).
     let ranges = match res {
         Err(_) => None,
         Ok(()) => {
-            match tokio::time::timeout(STEP_TIMEOUT, op.read_with(&path).range(5..11)).await {
-                Ok(Ok(b)) => Some(b.to_vec() == data[5..11]),
-                Ok(Err(e)) if !e.is_temporary() => Some(false),
-                _ => None,
+            let mut ranges = None;
+            for _ in 0..2 {
+                match tokio::time::timeout(STEP_TIMEOUT, op.read_with(&path).range(5..11)).await {
+                    Ok(Ok(b)) => {
+                        ranges = Some(b.to_vec() == data[5..11]);
+                        break;
+                    }
+                    Ok(Err(e)) if !e.is_temporary() => ranges = Some(false),
+                    _ => {
+                        ranges = None;
+                        break;
+                    }
+                }
             }
+            ranges
         }
     };
     // Always delete, whatever happened above (a timed-out write may still

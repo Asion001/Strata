@@ -156,6 +156,13 @@ pub async fn serve(
                 HeaderValue::from_str(&format!("bytes */{size}")).unwrap(),
             );
             h.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+            h.insert(
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("private, no-cache"),
+            );
+            if let Some(et) = etag.as_deref().and_then(|e| HeaderValue::from_str(e).ok()) {
+                h.insert(header::ETAG, et);
+            }
             return Ok(resp);
         }
     };

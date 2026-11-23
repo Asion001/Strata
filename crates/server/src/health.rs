@@ -352,13 +352,20 @@ async fn probe_inner(st: &AppState, id: i64, counted: bool) -> anyhow::Result<Op
         // result is about the old config, so it is dropped.
         return Ok(None);
     }
-    // Mounts carry `range_read` from the capabilities: cached mounts are
-    // dropped when it changed.
-    // (No earlier detection: mounts were cached as range_read = true.)
-    if let Some(new) = &caps
-        && new.range_read != prev_caps.as_ref().is_none_or(|c| c.range_read)
-    {
-        crate::mounts::invalidate_all(st);
+    // Mounts carry `range_read` from the capabilities: cached mounts that
+    // disagree with it are dropped. (Checked against this instance's cache,
+    // not the stored value, which another instance may have updated.)
+    if let Some(new) = &caps {
+        // (Decided first: the cache's read locks are released before the
+        // drop takes its write locks.)
+        let stale = st.mounts.iter().any(|e| {
+            e.value()
+                .iter()
+                .any(|m| m.connection_id == id && m.range_read != new.range_read)
+        });
+        if stale {
+            crate::mounts::invalidate_all(st);
+        }
     }
     if full && found != Found::Down {
         st.full_checks.insert(id, Instant::now());

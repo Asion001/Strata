@@ -693,15 +693,27 @@ pub async fn read_stream(
         // first and last sliced): never the whole file.
         let sizes: Vec<u64> = sizes.iter().map(|&s| s.max(0) as u64).collect();
         let parts = crate::range::covering(&sizes, start, end);
+        // (Where offset reads don't work, a partial chunk is read whole and
+        // sliced: chunks are small.)
+        let ranged = m.range_read;
         let s = async_stream::try_stream! {
             for (i, r) in parts {
                 let c = chunks.get(i).ok_or_else(|| io::Error::other("chunk list too short"))?;
                 let h = Hash::from_slice(c).ok_or_else(|| io::Error::other("bad chunk hash"))?;
-                let data = if r.start == 0 && r.end == sizes[i] {
+                let whole = r.start == 0 && r.end == sizes[i];
+                let data = if whole {
                     store.get(&h).await
+                } else if ranged {
+                    store.get_range(&h, r.clone()).await
                 } else {
-                    store.get_range(&h, r).await
+                    store.get(&h).await.map(|b| {
+                        let e = (r.end as usize).min(b.len());
+                        b.slice((r.start as usize).min(e)..e)
+                    })
                 }.map_err(io::Error::other)?;
+                if data.len() as u64 != r.end - r.start {
+                    Err(io::Error::new(io::ErrorKind::UnexpectedEof, "chunk shorter than recorded"))?;
+                }
                 yield data;
             }
         };
@@ -1052,7 +1064,18 @@ fn take_bytes(
         if left == 0 {
             return None;
         }
-        match s.next().await? {
+        let Some(item) = s.next().await else {
+            // Ended before the promised length: an error, so the response
+            // is aborted rather than ending cleanly short.
+            return Some((
+                Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "file shorter than expected",
+                )),
+                (s, 0),
+            ));
+        };
+        match item {
             Ok(b) => {
                 let keep = (b.len() as u64).min(left);
                 Some((Ok(b.slice(..keep as usize)), (s, left - keep)))
@@ -1818,13 +1841,17 @@ mod skip_tests {
                 ["abc", "", "defg", "h"].map(|s| Ok::<_, io::Error>(Bytes::from(s))),
             )
         };
-        for n in 0..=9u64 {
+        for n in 0..=8u64 {
             let got: Vec<u8> = take_bytes(parts(), n)
                 .map(|b| b.unwrap().to_vec())
                 .concat()
                 .await;
-            assert_eq!(got, &b"abcdefgh"[..(n as usize).min(8)], "take {n}");
+            assert_eq!(got, &b"abcdefgh"[..n as usize], "take {n}");
         }
+        // a stream shorter than promised ends in an error, not quietly
+        let items: Vec<_> = take_bytes(parts(), 9).collect().await;
+        let last = items.last().unwrap().as_ref().unwrap_err();
+        assert_eq!(last.kind(), io::ErrorKind::UnexpectedEof);
         let got: Vec<u8> = take_bytes(skip_bytes(parts(), 2), 4)
             .map(|b| b.unwrap().to_vec())
             .concat()
