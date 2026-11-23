@@ -371,7 +371,7 @@ async fn insert_local_connection(
         && op.info().capability().write
     {
         // Best effort: without it, a later probe adopts the folder.
-        match crate::state::LocalRoot::write_marker(dir, id).await {
+        match crate::state::LocalRoot::write_marker(&st.cfg.local_base, dir, id).await {
             Ok(()) => {
                 sqlx::query("UPDATE connections SET root_marker = TRUE WHERE id = $1")
                     .bind(id)

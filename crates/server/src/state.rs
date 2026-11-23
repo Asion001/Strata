@@ -271,9 +271,34 @@ impl LocalRoot {
             .join(format!("conn-{connection_id}"))
     }
 
+    /// The marker path, only if `dir` lies inside the storage base (as
+    /// `ConnectionConfig::local_dir` guarantees; checked again right where
+    /// files are touched).
+    pub fn marker_within(
+        base: &std::path::Path,
+        dir: &std::path::Path,
+        connection_id: i64,
+    ) -> ApiResult<PathBuf> {
+        let inside = dir.starts_with(base)
+            && dir.strip_prefix(base).is_ok_and(|rel| {
+                rel.components()
+                    .all(|c| matches!(c, std::path::Component::Normal(_)))
+            });
+        if !inside {
+            return Err(ApiError::Internal(anyhow::anyhow!(
+                "a connection folder outside the storage base"
+            )));
+        }
+        Ok(Self::marker_path(dir, connection_id))
+    }
+
     /// Write the marker file (off the async threads).
-    pub async fn write_marker(dir: PathBuf, connection_id: i64) -> ApiResult<()> {
-        let m = Self::marker_path(&dir, connection_id);
+    pub async fn write_marker(
+        base: &std::path::Path,
+        dir: PathBuf,
+        connection_id: i64,
+    ) -> ApiResult<()> {
+        let m = Self::marker_within(base, &dir, connection_id)?;
         tokio::task::spawn_blocking(move || {
             std::fs::create_dir_all(m.parent().unwrap())?;
             std::fs::write(&m, b"strata connection folder marker\n")
@@ -309,7 +334,7 @@ impl AppState {
         dir: PathBuf,
         enc: Option<&[u8]>,
     ) -> ApiResult<()> {
-        LocalRoot::write_marker(dir, connection_id).await?;
+        LocalRoot::write_marker(&self.cfg.local_base, dir, connection_id).await?;
         sqlx::query(
             "UPDATE connections SET root_marker = TRUE
              WHERE id = $1 AND ($2::bytea IS NULL OR config_enc = $2)",

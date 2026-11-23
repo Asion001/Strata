@@ -423,8 +423,9 @@ pub async fn delete(
         .await?;
     tx.commit().await?;
     st.forget_connection(id);
-    if let Some(dir) = local_dir {
-        let marker = crate::state::LocalRoot::marker_path(&dir, id);
+    if let Some(dir) = local_dir
+        && let Ok(marker) = crate::state::LocalRoot::marker_within(&st.cfg.local_base, &dir, id)
+    {
         let _ = tokio::task::spawn_blocking(move || {
             let _ = std::fs::remove_file(&marker);
             // The probe folder too, if nothing else is in it.
