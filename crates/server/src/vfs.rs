@@ -712,8 +712,25 @@ pub async fn read_stream(
             return Ok(Box::pin(futures::stream::empty()));
         }
         let path = backend_path(m, rel, false);
+        // Pinned to the version that was stat'ed, where the backend can: a
+        // change mid-read (between chunk reads, or since an If-Range check)
+        // fails the read instead of mixing two versions.
+        let pin = node
+            .etag
+            .as_deref()
+            .filter(|t| t.starts_with('"') && op.info().capability().read_with_if_match);
+        let reader = |chunked: bool| {
+            let mut r = op.reader_with(&path);
+            if chunked {
+                r = r.chunk(4 << 20);
+            }
+            if let Some(t) = pin {
+                r = r.if_match(t);
+            }
+            r
+        };
         if m.range_read {
-            let reader = op.reader_with(&path).chunk(4 << 20).await?;
+            let reader = reader(true).await?;
             let s = reader.into_bytes_stream(start..end).await?;
             return Ok(Box::pin(s));
         }
@@ -729,7 +746,7 @@ pub async fn read_stream(
                 m.connection_id
             );
         }
-        let reader = op.reader_with(&path).await?;
+        let reader = reader(false).await?;
         let s = reader.into_bytes_stream(..).await?;
         Ok(Box::pin(take_bytes(skip_bytes(s, start), end - start)))
     }

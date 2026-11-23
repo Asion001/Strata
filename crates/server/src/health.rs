@@ -277,16 +277,28 @@ async fn probe_inner(st: &AppState, id: i64, counted: bool) -> anyhow::Result<Op
                             // A write test only where a delete leaves nothing
                             // behind (not on a versioned bucket, nor where that
                             // can't be confirmed).
-                            let write = c.clean_deletes;
-                            caps = Some(c);
-                            if !write {
+                            let mut c = c;
+                            let found = if !c.clean_deletes {
                                 (Found::Ok, Some(p.latency), None)
                             } else {
                                 match probe::write_check(&op, &secrets).await {
-                                    Ok(()) => (Found::Ok, Some(p.latency), None),
+                                    Ok(ranges) => {
+                                        // The test file also tells whether
+                                        // offset reads work; when that read
+                                        // didn't tell, the last answer stays.
+                                        c.range_read = match ranges {
+                                            Some(r) => r,
+                                            None => prev_caps
+                                                .as_ref()
+                                                .map_or(c.range_read, |p| p.range_read),
+                                        };
+                                        (Found::Ok, Some(p.latency), None)
+                                    }
                                     Err(f) => (Found::ReadOnly, Some(p.latency), Some(f)),
                                 }
-                            }
+                            };
+                            caps = Some(c);
+                            found
                         }
                     }
                 }

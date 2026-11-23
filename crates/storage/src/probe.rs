@@ -113,7 +113,7 @@ pub async fn probe(
         };
     }
     let outcome = match write_check(op, secrets).await {
-        Ok(()) => Outcome::Ok,
+        Ok(_) => Outcome::Ok,
         Err(f) => Outcome::ReadOnly(f),
     };
     Probe { outcome, latency }
@@ -121,7 +121,10 @@ pub async fn probe(
 
 /// The write half of a probe on its own: write, read back and delete one
 /// small file under the probe folder.
-pub async fn write_check(op: &Operator, secrets: &[&str]) -> Result<(), Failure> {
+///
+/// On success, whether a read from an offset returned the right bytes:
+/// `None` when that read failed in a way that doesn't tell (a timeout).
+pub async fn write_check(op: &Operator, secrets: &[&str]) -> Result<Option<bool>, Failure> {
     write_test(op).await.map_err(|e| {
         let mut f = failure(e, secrets);
         if f.reason == Reason::Failed {
@@ -158,7 +161,7 @@ fn probe_name(name: &str) -> bool {
         .is_some_and(|h| h.len() == 16 && h.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
-async fn write_test(op: &Operator) -> Result<(), StepError> {
+async fn write_test(op: &Operator) -> Result<Option<bool>, StepError> {
     let dir = format!("{PROBE_DIR}/");
     sweep(op, &dir).await;
     let tag: u64 = rand::random();
@@ -170,7 +173,13 @@ async fn write_test(op: &Operator) -> Result<(), StepError> {
         if back != data {
             return Err(StepError::Mismatch);
         }
-        Ok(())
+        // A read from an offset: a backend that ignores it (or refuses)
+        // can't serve byte ranges directly.
+        Ok(match op.read_with(&path).range(5..11).await {
+            Ok(b) => Some(b.to_vec() == data[5..11]),
+            Err(e) if e.kind() == opendal::ErrorKind::Unsupported => Some(false),
+            Err(_) => None,
+        })
     })
     .await;
     // Always delete, whatever happened above (a timed-out write may still
@@ -188,7 +197,7 @@ async fn write_test(op: &Operator) -> Result<(), StepError> {
     if empty {
         let _ = step(async { Ok(op.delete(&dir).await?) }).await;
     }
-    res.and(del)
+    res.and_then(|r| del.map(|()| r))
 }
 
 /// Remove probe files an interrupted probe left behind.

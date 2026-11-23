@@ -31,17 +31,13 @@ pub struct Snapshots {
     pub create: bool,
 }
 
-fn yes() -> bool {
-    true
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct Capabilities {
     pub snapshots: Snapshots,
     pub rename: bool,
-    /// Missing in stored JSON counts as true, as mounts read it.
-    #[serde(default = "yes")]
+    /// Reads from an offset work. True unless found otherwise (and missing
+    /// in stored JSON counts as true, as mounts read it).
     pub range_read: bool,
     /// A write becomes visible all at once (never half-written).
     pub atomic_write: bool,
@@ -58,6 +54,21 @@ pub struct Capabilities {
     /// only write test files where it is true.
     #[serde(skip)]
     pub clean_deletes: bool,
+}
+
+impl Default for Capabilities {
+    fn default() -> Self {
+        Capabilities {
+            snapshots: Snapshots::default(),
+            rename: false,
+            range_read: true,
+            atomic_write: false,
+            list_fast: false,
+            read_only: false,
+            fs_type: None,
+            clean_deletes: false,
+        }
+    }
 }
 
 /// A bucket's versioning state from GetBucketVersioning.

@@ -57,7 +57,9 @@ pub async fn user_mounts(st: &AppState, user_id: i64) -> ApiResult<Arc<Vec<Mount
         return Ok(m.clone());
     }
     // A drop between this read and the insert below means the rows may be
-    // from before the change: they are used, but not cached.
+    // from before the change: they are used, but not cached. (One counter
+    // for all users: a drop for one user only skips caching others' loads
+    // that were in flight.)
     let r#gen = st.mounts_gen.load(Ordering::SeqCst);
     let mut v: Vec<Mount> = sqlx::query_as(&format!("{SELECT} WHERE m.owner_id = $1"))
         .bind(user_id)

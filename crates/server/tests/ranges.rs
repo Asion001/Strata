@@ -163,6 +163,8 @@ async fn hashed_and_raw_local() {
             json!({"name": "disk", "config": {"kind": "local", "path": "disk"}}),
         )
         .await;
+    // (the probe read from an offset)
+    assert_eq!(c["capabilities"]["range_read"], true, "{c}");
     t.ok(
         "POST",
         "/api/mounts",
@@ -211,6 +213,10 @@ async fn raw_on_minio() {
             "mc alias set l http://127.0.0.1:9000 minioadmin minioadmin && mc mb l/media",
         ]))
         .await
+        .unwrap()
+        // (read to the end: the bucket exists once the command is done)
+        .stdout_to_vec()
+        .await
         .unwrap();
     let c = t
         .ok(
@@ -221,6 +227,8 @@ async fn raw_on_minio() {
                 "access_key_id": "minioadmin", "secret_access_key": "minioadmin"}}),
         )
         .await;
+    // (the probe read from an offset)
+    assert_eq!(c["capabilities"]["range_read"], true, "{c}");
     t.ok(
         "POST",
         "/api/mounts",
@@ -283,6 +291,8 @@ async fn raw_on_ftp() {
                 "root": "/ftp/strata"}}),
         )
         .await;
+    // (the probe read from an offset)
+    assert_eq!(c["capabilities"]["range_read"], true, "{c}");
     t.ok(
         "POST",
         "/api/mounts",

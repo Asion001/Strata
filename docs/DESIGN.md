@@ -168,8 +168,11 @@ single byte range (RFC 9110).
   and a range past the end gets 416 with `Content-Range: bytes */size`.
   Several ranges, another unit or a malformed header get the whole file.
 * **If-Range.** It lets a range through only on an exact match with the
-  current strong ETag. A coarse raw version (seconds-only mtime) never
-  matches, since it can miss a change.
+  current ETag. A coarse raw version (no backend ETag, seconds-only mtime)
+  never matches, since it can stay the same across a rewrite. Where the
+  backend supports it (S3), a raw read is pinned to the version that was
+  checked (If-Match), so a change mid-download fails the read instead of
+  mixing two versions.
 * **Accept-Ranges and HEAD.** Responses carry `Accept-Ranges: bytes`. HEAD
   gives size, type and ETag with no body.
 * **Hashed mounts.** The range maps to the chunks covering it, using the
@@ -177,9 +180,9 @@ single byte range (RFC 9110).
   and last sliced; the file's first bytes are also read once for the type
   sniff.
 * **Raw mounts.** The backend reads the range itself (local, S3 and FTP
-  all can). A backend whose capabilities say it can't (`range_read:
-  false`; none of the current ones) is read in one plain read from the
-  start, dropping the bytes before the range and stopping after it (logged
+  all can). The health check's write test also reads its test file from an
+  offset; a backend where that returns the wrong bytes (`range_read:
+  false`) is read in one plain read from the start, dropping the bytes before the range and stopping after it (logged
   once per connection).
 * **Playback.** Opening a file starts playback, from where it stopped last
   time.
