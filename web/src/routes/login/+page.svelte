@@ -18,6 +18,8 @@
     error = '';
     try {
       const r = await api('POST', '/api/auth/login', { username, password });
+      // (A sign-out that couldn't reach the server is moot now.)
+      (await import('$lib/offline/app.svelte')).clearPendingLogout();
       session.user = r.user;
       session.checked = true;
       // Unsaved drafts of anyone else who used this browser go away.

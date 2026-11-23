@@ -82,6 +82,11 @@ const add = async (j: q.Job) => {
   await q.keepBytes(j.id, j.blob);
   await q.save(j);
 };
+const fresh = async (over: Partial<q.Job> = {}) => {
+  const j = job(over);
+  await add(j);
+  return j;
+};
 
 beforeEach(async () => {
   await wipe();
@@ -184,7 +189,7 @@ describe('runner', () => {
 
   it('chunks the server already has are not sent', async () => {
     srv.have.add('bb');
-    const out = await q.run(job(), deps());
+    const out = await q.run(await fresh(), deps());
     expect(srv.puts).toEqual(['aa', 'cc']);
     expect(out.skipped).toBe(4);
   });
@@ -195,36 +200,38 @@ describe('runner', () => {
     srv.dropOnce = (u, m) => m === 'PUT' && u.endsWith('/bb');
     await expect(q.run(j, deps())).rejects.toBeInstanceOf(q.Offline);
     const saved = (await q.load(j.id))!;
-    expect(saved).toMatchObject({ state: 'uploading', session: 's1', sent: ['aa'] });
+    expect(saved).toMatchObject({ state: 'uploading', session: 's1' });
+    expect(saved.sent).toContain('aa');
+    expect(saved.sent).not.toContain('bb');
     // Later (another tab, the worker): from what was saved.
     const out = await q.run(saved, deps());
     expect(out.state).toBe('done');
-    expect(srv.puts).toEqual(['aa', 'bb', 'cc']); // aa once
+    expect([...srv.puts].sort()).toEqual(['aa', 'bb', 'cc']); // each once
     expect(srv.log.filter((l) => l.startsWith('POST /api/uploads') && !l.includes('commit'))).toHaveLength(1);
   });
 
   it('the server forgetting the session (before, during, or at commit) starts a new one', async () => {
     // Expired while away: GET says 404.
-    const a = await q.run(job({ state: 'uploading', chunks, session: 'old', sent: ['aa'] }), deps());
+    const a = await q.run(await fresh({ state: 'uploading', chunks, session: 'old', sent: ['aa'] }), deps());
     expect(a.state).toBe('done');
     expect(srv.puts).toEqual(['aa', 'bb', 'cc']);
     // Expired mid-upload: a chunk PUT says 404.
     srv = new Server();
     let once = true;
     srv.fail = (u, m) => (m === 'PUT' && u.endsWith('/bb') && once ? ((once = false), 404) : null);
-    expect((await q.run(job(), deps())).state).toBe('done');
+    expect((await q.run(await fresh(), deps())).state).toBe('done');
     // Committed by an attempt whose answer was lost: commit says 404; the
     // same bytes are committed again in a new session.
     srv = new Server();
     let lost = true;
     srv.fail = (u, m) => (u.endsWith('/commit') && m === 'POST' && lost ? ((lost = false), 404) : null);
-    expect((await q.run(job(), deps())).state).toBe('done');
+    expect((await q.run(await fresh(), deps())).state).toBe('done');
     expect(srv.committed).toEqual(['s2']);
   });
 
   it('a server that keeps losing the commit fails the job instead of looping', async () => {
     srv.fail = (u, m) => (u.endsWith('/commit') && m === 'POST' ? 404 : null);
-    const out = await q.run(job(), deps());
+    const out = await q.run(await fresh(), deps());
     expect(out.state).toBe('failed');
     expect(srv.log.filter((l) => l.endsWith('/commit'))).toHaveLength(3);
   });
@@ -233,21 +240,21 @@ describe('runner', () => {
     const sleep = vi.fn(async () => {});
     let n = 0;
     srv.fail = (u, m) => (m === 'PUT' && n++ < 2 ? 503 : null);
-    expect((await q.run(job(), deps({ sleep }))).state).toBe('done');
+    expect((await q.run(await fresh(), deps({ sleep }))).state).toBe('done');
     expect(sleep).toHaveBeenCalledTimes(2);
     srv = new Server();
     srv.fail = (u, m) => (m === 'PUT' ? 500 : null);
-    const f = await q.run(job(), deps({ sleep }));
+    const f = await q.run(await fresh(), deps({ sleep }));
     expect(f).toMatchObject({ state: 'failed', error: 'status 500' });
   });
 
   it('a refused request fails the job with the server’s message', async () => {
     srv.fail = (u, m) => (u === '/api/uploads' && m === 'POST' ? 403 : null);
-    expect(await q.run(job(), deps())).toMatchObject({ state: 'failed', error: 'status 403' });
+    expect(await q.run(await fresh(), deps())).toMatchObject({ state: 'failed', error: 'status 403' });
     // A refusal with no readable body still says something.
     srv = new Server();
     const f = (async () => new Response('<html>', { status: 400, statusText: 'Bad' })) as unknown as typeof fetch;
-    expect((await q.run(job(), deps({ fetch: f }))).error).toBe('HTTP 400');
+    expect((await q.run(await fresh(), deps({ fetch: f }))).error).toBe('HTTP 400');
   });
 
   it('a finished or failed job runs no further', async () => {
@@ -257,15 +264,15 @@ describe('runner', () => {
   });
 
   it('a hashing failure fails the job', async () => {
-    const out = await q.run(job(), deps({ chunk: async () => { throw 'unreadable'; } }));
+    const out = await q.run(await fresh(), deps({ chunk: async () => { throw 'unreadable'; } }));
     expect(out).toMatchObject({ state: 'failed', error: 'unreadable' });
   });
 
   it('goes offline at the session check, and at commit', async () => {
     srv.dropOnce = (u, m) => m === 'GET';
-    await expect(q.run(job({ state: 'uploading', chunks, session: 's9' }), deps())).rejects.toBeInstanceOf(q.Offline);
+    await expect(q.run(await fresh({ state: 'uploading', chunks, session: 's9' }), deps())).rejects.toBeInstanceOf(q.Offline);
     srv.dropOnce = (u) => u.endsWith('/commit');
-    await expect(q.run(job(), deps())).rejects.toBeInstanceOf(q.Offline);
+    await expect(q.run(await fresh(), deps())).rejects.toBeInstanceOf(q.Offline);
   });
 
   it('an aborted run neither saves nor fails the job', async () => {
@@ -281,7 +288,7 @@ describe('runner', () => {
       c2.abort();
       throw Object.assign(new Error('aborted'), { name: 'AbortError' });
     }) as unknown as typeof fetch;
-    await expect(q.run(job({ chunks }), deps({ fetch: f }), c2.signal)).rejects.toMatchObject({ name: 'AbortError' });
+    await expect(q.run(await fresh({ chunks }), deps({ fetch: f }), c2.signal)).rejects.toMatchObject({ name: 'AbortError' });
   });
 });
 
@@ -453,6 +460,59 @@ describe('stored bytes', () => {
     // A finished one is just listed.
     await q.save(job({ id: 'old', state: 'failed', error: 'x' }));
     expect((await q.load('old'))!.error).toBe('x');
+  });
+
+  it('bytes held in memory for this page, and whether they are there', async () => {
+    q.holdBytes('m', new Blob(['mem']));
+    expect(await q.hasBytes('m')).toBe(true);
+    expect(await q.hasBytes('none')).toBe(false);
+    await q.remove('m');
+    expect(await q.hasBytes('m')).toBe(false);
+  });
+});
+
+describe('cancel from another tab, and sign-out', () => {
+  it('a job removed elsewhere is never written back; its run stops', async () => {
+    const j = await fresh({ id: 'x' });
+    expect(await q.update(j)).toBe(true);
+    let first = true;
+    const f = (async (u: RequestInfo | URL, i: RequestInit = {}) => {
+      if (i.method === 'PUT' && first) {
+        first = false;
+        await q.remove('x'); // (the other tab's cancel)
+      }
+      return srv.fetch(u, i);
+    }) as unknown as typeof fetch;
+    await expect(q.run((await q.load('x'))!, deps({ fetch: f }))).rejects.toMatchObject({ name: 'AbortError' });
+    expect(await q.load('x')).toBeUndefined();
+    expect(await q.update(j)).toBe(false);
+  });
+
+  it('a chunk confirmed after the session was lost is not recorded', async () => {
+    const order: string[] = [];
+    const f = (async (u: RequestInfo | URL, i: RequestInit = {}) => {
+      const url = String(u);
+      if (i.method === 'PUT' && url.endsWith('/aa') && srv.n === 1) {
+        await new Promise((r) => setTimeout(r, 20)); // finishes after bb's 404
+        order.push('aa');
+      }
+      if (i.method === 'PUT' && url.endsWith('/bb') && srv.n === 1) {
+        order.push('bb-404');
+        return Response.json({ error: 'gone' }, { status: 404 });
+      }
+      return srv.fetch(u, i);
+    }) as unknown as typeof fetch;
+    const out = await q.run(await fresh(), deps({ fetch: f }));
+    expect(order).toEqual(['bb-404', 'aa']);
+    expect(out.state).toBe('done');
+    expect(srv.committed).toEqual(['s2']);
+  });
+
+  it('after halt (sign-out) the queue runs nothing more', async () => {
+    await add(job({ id: 'a' }));
+    q.halt();
+    expect(await q.drain(1, deps())).toBe('done');
+    expect(srv.log).toEqual([]);
   });
 });
 

@@ -12,7 +12,7 @@
 // - queued uploads resume from Background Sync where the browser has it;
 // - share links (/s/..., /api/public/...) are never touched.
 // A new version installs and waits; the app offers a reload, which tells
-// it to take over (see lib/offline/update.ts).
+// it to take over (see watchUpdates in lib/offline/app.svelte.ts).
 import { build, files, version } from '$service-worker';
 import { LISTS, lookup } from '$lib/offline/recent';
 import { drain } from '$lib/offline/queue';
@@ -128,6 +128,9 @@ sw.addEventListener('sync', ((event: SyncEvent) => {
   if (event.tag !== SYNC_TAG) return;
   event.waitUntil(
     (async () => {
+      // An open tab runs the queue itself (and shows its progress): fail
+      // this attempt, so the browser tries again later, maybe tab-less.
+      if ((await sw.clients.matchAll({ type: 'window' })).length) throw new Error('a tab is running the queue');
       // The signed-in user, from the server (the queue only runs as them).
       const r = await fetch('/api/auth/me', { headers: { 'x-strata': '1' } });
       if (!r.ok) return;

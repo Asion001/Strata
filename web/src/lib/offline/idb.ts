@@ -8,7 +8,8 @@ export type Store = 'recent' | 'jobs' | 'blobs';
 let opening: Promise<IDBDatabase> | null = null;
 
 export function db(): Promise<IDBDatabase> {
-  opening ??= new Promise<IDBDatabase>((resolve, reject) => {
+  if (opening) return opening;
+  const current: Promise<IDBDatabase> = new Promise<IDBDatabase>((resolve, reject) => {
     const req = indexedDB.open(DB, 1);
     req.onupgradeneeded = () => {
       const d = req.result;
@@ -24,6 +25,10 @@ export function db(): Promise<IDBDatabase> {
         d.close();
         opening = null;
       };
+      // The browser closed it (WebKit does, e.g. for a backgrounded app).
+      d.onclose = () => {
+        if (opening === current) opening = null;
+      };
       resolve(d);
     };
     req.onerror = () => {
@@ -31,14 +36,25 @@ export function db(): Promise<IDBDatabase> {
       reject(req.error);
     };
   });
-  return opening;
+  opening = current;
+  return current;
+}
+
+/** A transaction, reopening the database once if the old connection is gone. */
+async function transaction(store: Store, mode: IDBTransactionMode): Promise<IDBTransaction> {
+  try {
+    return (await db()).transaction(store, mode);
+  } catch (e) {
+    if ((e as DOMException)?.name !== 'InvalidStateError') throw e;
+    opening = null;
+    return (await db()).transaction(store, mode);
+  }
 }
 
 /** Run `fn` on one store and wait for the transaction to finish. */
 export async function tx<T>(store: Store, mode: IDBTransactionMode, fn: (s: IDBObjectStore) => IDBRequest<T> | void): Promise<T> {
-  const d = await db();
+  const t = await transaction(store, mode);
   return new Promise<T>((resolve, reject) => {
-    const t = d.transaction(store, mode);
     const req = fn(t.objectStore(store));
     t.oncomplete = () => resolve(req ? req.result : (undefined as T));
     // (A failed request reports its error; an abort without one, this.)

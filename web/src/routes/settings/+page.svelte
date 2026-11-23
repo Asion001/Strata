@@ -3,6 +3,7 @@
   import { session } from '$lib/session.svelte';
   import { cn } from '$lib/utils';
   import { toast, toastError } from '$lib/toast.svelte';
+  import { alertDialog } from '$lib/dialogs.svelte';
   import Button from '$lib/components/ui/button/button.svelte';
   import Input from '$lib/components/ui/input/input.svelte';
   import { manageNav } from '$lib/components/shell/nav';
@@ -31,8 +32,13 @@
     // Queued uploads are cancelled (with their server sessions), then the
     // session ends, then every cached file, listing and queued upload goes
     // (offline too: then only the local part).
-    await signOut(session.user?.id ?? null, () => api('POST', '/api/auth/logout'));
+    const ended = await signOut(session.user?.id ?? null, () => api('POST', '/api/auth/logout'));
     await clearAllDrafts();
+    if (!ended) {
+      // (Offline: everything here is gone, and the server session is ended
+      // the next time the app can reach it.)
+      await alertDialog({ title: 'Signed out on this device', body: "The server couldn't be reached. Your data on this device is gone; the session on the server is ended the next time Strata is opened online.", ok: 'OK' });
+    }
     location.href = '/login';
   }
 </script>

@@ -681,7 +681,7 @@
           <div class="flex items-center gap-2"><span class="min-w-0 flex-1 truncate">{u.path}</span>
             <span class="text-muted-foreground">{u.state === 'failed' ? '' : u.state === 'done' ? (u.skipped ? `done, ${bytes(u.skipped)} deduped` : 'done') : u.state}</span>
             {#if isActive(u)}<Button variant="ghost" size="sm" class="h-6 px-2" onclick={() => cancelUpload(u.id)} aria-label="Cancel upload of {u.path}">Cancel</Button>{/if}
-            {#if u.state === 'failed'}<Button variant="ghost" size="sm" class="h-6 px-2" onclick={() => retryUpload(u.id)}>Retry</Button>{/if}</div>
+            {#if u.state === 'failed'}<Button variant="ghost" size="sm" class="h-6 px-2" onclick={async () => { if (!(await retryUpload(u.id))) toast('The file is no longer available here; add it again.', 'error'); }}>Retry</Button>{/if}</div>
           {#if u.state === 'failed'}<div class="text-destructive">{u.error}</div>{/if}
           <progress max="1" value={jobProgress(u)} class="h-1.5 w-full accent-primary"></progress>
         </div>

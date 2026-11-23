@@ -59,4 +59,22 @@ describe('offline database', () => {
     await expect(tx('jobs', 'readwrite', (s) => s.transaction.abort())).rejects.toThrow('transaction aborted');
     await wipe();
   });
+
+  it('a connection the browser closed is reopened', async () => {
+    const d = await db();
+    d.close(); // (as the browser would: transactions on it now fail)
+    await tx('jobs', 'readwrite', (s) => void s.put({ id: 'r', user: 1 }));
+    const again = await db();
+    expect(again).not.toBe(d);
+    // Its close event drops it, so the next call opens a new one...
+    again.onclose?.(new Event('close'));
+    const third = await db();
+    expect(third).not.toBe(again);
+    // ...and a late close event of an old one changes nothing.
+    again.onclose?.(new Event('close'));
+    expect(await db()).toBe(third);
+    // Other errors are not retried.
+    await expect(tx('nope' as 'jobs', 'readonly', (s) => s.count())).rejects.toMatchObject({ name: 'NotFoundError' });
+    await wipe();
+  });
 });

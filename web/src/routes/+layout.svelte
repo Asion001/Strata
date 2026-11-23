@@ -12,7 +12,7 @@
   import { toaster } from '$lib/toast.svelte';
   import { palette, paletteKey } from '$lib/palette.svelte';
   import { ApiError } from '$lib/api';
-  import { applyUpdate, lastUser, net, signedIn, startQueue, update, watchUpdates } from '$lib/offline/app.svelte';
+  import { applyUpdate, finishPendingLogout, lastUser, net, signedIn, startQueue, update, watchUpdates } from '$lib/offline/app.svelte';
   import { onMount } from 'svelte';
 
   let { children } = $props();
@@ -26,27 +26,43 @@
 
   $effect(() => {
     if (isPublic || session.checked) return;
-    api('GET', '/api/auth/me')
+    // A sign-out that couldn't reach the server ends that session first.
+    finishPendingLogout(() => api('POST', '/api/auth/logout')).then((pending) => {
+      if (pending) {
+        session.checked = true;
+        return goto('/login');
+      }
+      return checkSession();
+    });
+  });
+  function checkSession() {
+    return api('GET', '/api/auth/me')
       .then((u) => {
         session.user = u;
         markSignedIn(u.id); // lets the editor's autosave run in every tab
-        // (Offline caches are per user: first say who, then resume uploads.)
-        void signedIn(u).then(() => startQueue(u.id, uploadDone));
         reloadMounts();
       })
       .catch((e) => {
         // Offline (no answer at all): carry on as whoever was signed in
         // here last, with what is cached. Anything else: sign in again.
         const last = e instanceof ApiError ? null : lastUser();
-        if (last) {
-          session.user = last;
-          void startQueue(last.id, uploadDone);
-        } else goto('/login?next=' + encodeURIComponent(page.url.pathname + page.url.search));
+        if (last) session.user = last;
+        else goto('/login?next=' + encodeURIComponent(page.url.pathname + page.url.search));
       })
       .finally(() => (session.checked = true));
-  });
+  }
 
   onMount(() => void watchUpdates());
+  // Whoever is signed in (checked here, or just signed in on the sign-in
+  // page): offline caches are per user, so first say who, then resume
+  // their queued uploads.
+  let queueFor: number | null = null;
+  $effect(() => {
+    const u = session.user;
+    if (!u || isPublic || queueFor === u.id) return;
+    queueFor = u.id;
+    void signedIn(u).then(() => startQueue(u.id, uploadDone));
+  });
   // A queued upload finished: the folder it went to refreshes (if shown).
   const uploadDone = (j: { path: string }) => window.dispatchEvent(new CustomEvent('strata-upload-done', { detail: j.path }));
 

@@ -115,12 +115,25 @@ async function bytesOf(id: string): Promise<Blob | null> {
   return s instanceof Blob ? s : new Blob(s.parts, { type: s.type });
 }
 
-/** With its bytes; a job whose bytes are gone (memory, after a reload) fails. */
+export const GONE = 'The file is no longer available here; add it again.';
+
+/** With its bytes; a job whose bytes are gone (kept in memory only, and the
+ *  page was reloaded) is failed for good, and saved so. */
 async function withBytes(j: Job): Promise<Job> {
   const blob = await bytesOf(j.id);
   if (blob) return { ...j, blob };
-  return isActive(j) ? { ...j, blob: new Blob([]), state: 'failed', error: 'The file is no longer available here; add it again.' } : { ...j, blob: new Blob([]) };
+  if (!isActive(j)) return { ...j, blob: new Blob([]) };
+  const lost: Job = { ...j, blob: new Blob([]), state: 'failed', error: GONE };
+  await update(lost);
+  return lost;
 }
+
+/** Are a job's bytes still here? */
+export const hasBytes = async (id: string) => (await bytesOf(id)) !== null;
+
+/** Keep the bytes in memory for this page (it can upload them at once,
+ *  while `keepBytes` stores them for later). */
+export const holdBytes = (id: string, blob: Blob) => void inMemory.set(id, blob);
 
 export async function jobs(user: number): Promise<Job[]> {
   const all = await byUser<Job>('jobs', user);
@@ -128,6 +141,20 @@ export async function jobs(user: number): Promise<Job[]> {
 }
 /** Save a job's state (never its bytes: see `keepBytes`). */
 export const save = (j: Job) => tx('jobs', 'readwrite', (s) => void s.put({ ...j, blob: undefined }));
+
+/** Save a job's state only if it is still queued: one cancelled (from any
+ *  tab) is never written back. Resolves whether it was. */
+export async function update(j: Job): Promise<boolean> {
+  let there = false;
+  await tx('jobs', 'readwrite', (s) => {
+    const g = s.get(j.id);
+    g.onsuccess = () => {
+      there = g.result !== undefined;
+      if (there) s.put({ ...j, blob: undefined });
+    };
+  });
+  return there;
+}
 export async function remove(id: string) {
   inMemory.delete(id);
   await tx('jobs', 'readwrite', (s) => void s.delete(id));
@@ -178,6 +205,8 @@ class HttpError extends Error {
 
 const H = { 'x-strata': '1' };
 const RETRIES = 4;
+/** Chunks in flight at once. */
+const PARALLEL = 3;
 
 async function call(d: Deps, url: string, init: RequestInit = {}): Promise<Response> {
   for (let attempt = 0; ; attempt++) {
@@ -214,12 +243,12 @@ export async function run(job: Job, d: Deps, signal?: AbortSignal, restarts = 0)
     if (signal?.aborted) throw new DOMException('cancelled', 'AbortError');
   };
   const go = async (e: Event) => {
-    // (Cancelled: `cancel` has dropped the job; never write it back.)
     live();
     const n = step(j, e);
     if (n !== j) {
       j = n;
-      await save(j);
+      // Cancelled meanwhile (here or in another tab): stop, write nothing.
+      if (!(await update(j))) throw new DOMException('cancelled', 'AbortError');
       d.changed?.(j);
     }
   };
@@ -258,27 +287,46 @@ export async function run(job: Job, d: Deps, signal?: AbortSignal, restarts = 0)
       } else {
         await go({ t: 'session', id: j.session, missing: missing! });
       }
-      // Send what the server is missing, each distinct chunk once.
+      // Send what the server is missing, each distinct chunk once, a few
+      // at a time; each is recorded as soon as the server confirms it.
       const todo = j.chunks!.filter((c, i, all) => !j.sent.includes(c.hash) && all.findIndex((x) => x.hash === c.hash) === i);
-      for (const c of todo) {
-        live();
+      const session = j.session;
+      let next = 0;
+      let lost = false;
+      let failed = false;
+      const worker = async () => {
         try {
-          await call(d, `/api/uploads/${j.session}/chunks/${c.hash}`, {
-            method: 'PUT',
-            body: j.blob.slice(c.offset, c.offset + c.size),
-            signal
-          });
-        } catch (e) {
-          // The session expired meanwhile: start a new one.
-          if (e instanceof HttpError && e.status === 404) {
-            await go({ t: 'gone' });
-            break;
+          while (next < todo.length && !lost && !failed) {
+            const c = todo[next++];
+            live();
+            try {
+              await call(d, `/api/uploads/${session}/chunks/${c.hash}`, {
+                method: 'PUT',
+                body: j.blob.slice(c.offset, c.offset + c.size),
+                signal
+              });
+            } catch (e) {
+              // The session expired meanwhile: start a new one.
+              if (e instanceof HttpError && e.status === 404) {
+                lost = true;
+                return;
+              }
+              throw e;
+            }
+            if (!lost) await go({ t: 'sent', hash: c.hash });
           }
+        } catch (e) {
+          failed = true; // (the others stop taking chunks)
           throw e;
         }
-        await go({ t: 'sent', hash: c.hash });
-      }
-      await go({ t: 'commit' });
+      };
+      // Every worker has stopped before this run ends (none keeps sending
+      // behind the next run's back); the first failure is then reported.
+      const done = await Promise.allSettled(Array.from({ length: PARALLEL }, worker));
+      const bad = done.find((r): r is PromiseRejectedResult => r.status === 'rejected');
+      if (bad) throw bad.reason;
+      if (lost) await go({ t: 'gone' });
+      else await go({ t: 'commit' });
     }
     if (j.state === 'committing') {
       live();
@@ -306,6 +354,7 @@ export async function run(job: Job, d: Deps, signal?: AbortSignal, restarts = 0)
 export async function drain(user: number, d: Deps): Promise<'done' | 'offline'> {
   const work = async (): Promise<'done' | 'offline'> => {
     for (const j of await jobs(user)) {
+      if (halted) break;
       if (!isActive(j)) continue;
       const cur = await load(j.id); // (cancelled meanwhile?)
       if (!cur || !isActive(cur)) continue;
@@ -328,6 +377,14 @@ export async function drain(user: number, d: Deps): Promise<'done' | 'offline'> 
 }
 
 const running = new Map<string, AbortController>();
+let halted = false;
+
+/** Sign-out: stop this page's queue for good (it reloads to the sign-in
+ *  page next) and abort what is in flight. */
+export function halt() {
+  halted = true;
+  for (const [, ctl] of running) ctl.abort();
+}
 
 /** Cancel a job: stop it if it is running, drop it and its server session. */
 export async function cancel(id: string, d: Pick<Deps, 'fetch' | 'changed'>): Promise<void> {
@@ -347,7 +404,7 @@ export async function cancel(id: string, d: Pick<Deps, 'fetch' | 'changed'>): Pr
 /** Sign-out: drop the server sessions of a user's jobs (best effort, while
  *  still signed in). The local queue goes with the offline database. */
 export async function abandonSessions(user: number, f: typeof fetch): Promise<void> {
-  for (const [, ctl] of running) ctl.abort();
+  halt();
   for (const j of await jobs(user)) {
     if (j.session) await f(`/api/uploads/${j.session}`, { method: 'DELETE', headers: H, credentials: 'same-origin' }).catch(() => undefined);
   }

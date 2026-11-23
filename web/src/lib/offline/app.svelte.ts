@@ -37,19 +37,55 @@ export function lastUser(): User | null {
   }
 }
 
-/** Sign out: cancel queued uploads (their server sessions too, while still
- *  signed in), sign out, then delete every cache and the queue. Local data
- *  goes even when the server can't be reached. */
-export async function signOut(user: number | null, logout: () => Promise<unknown>) {
+const PENDING_LOGOUT = 'strata-pending-logout';
+
+/** Sign out: stop the upload queue (and wait for it), cancel queued uploads
+ *  with their server sessions while still signed in, sign out, then delete
+ *  every cache and the queue. Local data goes even when the server can't be
+ *  reached; then the server session is ended on the next start (see
+ *  `finishPendingLogout`). Resolves whether the server signed out. */
+export async function signOut(user: number | null, logout: () => Promise<unknown>): Promise<boolean> {
   const [queue, recent] = await Promise.all([Queue(), Recent()]);
+  queue.halt();
+  await Promise.race([draining, new Promise((r) => setTimeout(r, 3000))]);
   if (user !== null) await queue.abandonSessions(user, fetch).catch(() => {});
-  await logout().catch(() => {});
+  let ended = true;
+  await logout().catch(() => (ended = false));
+  try {
+    if (ended) localStorage.removeItem(PENDING_LOGOUT);
+    else localStorage.setItem(PENDING_LOGOUT, '1');
+  } catch {}
   try {
     localStorage.removeItem(LAST_USER);
   } catch {}
   await caches.delete(META).catch(() => false);
   await recent.clearAll().catch(() => {});
   uploads.jobs = [];
+  return ended;
+}
+
+/** Someone signed in: a pending sign-out is moot. */
+export function clearPendingLogout() {
+  try {
+    localStorage.removeItem(PENDING_LOGOUT);
+  } catch {}
+}
+
+/** A sign-out that couldn't reach the server: end that session now, before
+ *  anything else. Resolves true when one was pending (the caller goes to the
+ *  sign-in page). */
+export async function finishPendingLogout(logout: () => Promise<unknown>): Promise<boolean> {
+  try {
+    if (!localStorage.getItem(PENDING_LOGOUT)) return false;
+  } catch {
+    return false;
+  }
+  try {
+    await logout();
+    localStorage.removeItem(PENDING_LOGOUT);
+  } catch {}
+  // (Still unreachable: stay signed out here, try again next time.)
+  return true;
 }
 
 // ---------------------------------------------------------------- network
@@ -121,18 +157,31 @@ if (typeof window !== 'undefined') window.addEventListener('online', () => pump(
 /** Queue files for upload. */
 export async function enqueue(user: number, items: { file: File; path: string }[]) {
   const queue = await Queue();
+  const keeping: Promise<unknown>[] = [];
   for (const { file, path } of items) {
     const j = queue.newJob(user, path, file);
-    await queue.keepBytes(j.id, file);
+    // Shown and uploading at once; its bytes are stored for later (resume
+    // after a reload) meanwhile. A job done before that finished has its
+    // stored bytes dropped again.
+    queue.holdBytes(j.id, file);
     await queue.save(j);
     changed(j);
+    keeping.push(
+      queue
+        .keepBytes(j.id, file)
+        .then(async () => {
+          if (!(await queue.load(j.id))) await queue.remove(j.id);
+        })
+        .catch(() => {})
+    );
   }
+  pump();
   // Where the browser can, finish even if the tab is closed.
   try {
     const reg = await navigator.serviceWorker?.ready;
     await (reg as ServiceWorkerRegistration & { sync?: { register(t: string): Promise<void> } })?.sync?.register(SYNC_TAG);
   } catch {}
-  pump();
+  await Promise.all(keeping);
 }
 
 export async function cancelUpload(id: string) {
@@ -140,14 +189,17 @@ export async function cancelUpload(id: string) {
   uploads.jobs = uploads.jobs.filter((j) => j.id !== id);
 }
 
-export async function retryUpload(id: string) {
+/** Retry a failed upload. False if its bytes are gone (add it again). */
+export async function retryUpload(id: string): Promise<boolean> {
   const queue = await Queue();
   const j = await queue.load(id);
-  if (!j) return;
+  if (!j) return false;
+  if (!(await queue.hasBytes(id))) return false;
   const n = queue.step(j, { t: 'retry' });
   await queue.save(n);
   changed(n);
   pump();
+  return true;
 }
 
 /** Done, failed and cancelled jobs leave the list (failed ones the queue too). */
@@ -175,13 +227,13 @@ export async function watchUpdates() {
       update.ready = true;
     }
   };
-  offer(reg.waiting);
-  reg.addEventListener('updatefound', () => {
-    const w = reg.installing;
+  const follow = (w: ServiceWorker | null) =>
     w?.addEventListener('statechange', () => {
       if (w.state === 'installed') offer(w);
     });
-  });
+  offer(reg.waiting);
+  follow(reg.installing); // (one already installing when the app started)
+  reg.addEventListener('updatefound', () => follow(reg.installing));
   // A new worker took over (from this tab or another): reload, so no tab
   // keeps running the old app against the new worker and assets.
   const hadController = !!navigator.serviceWorker.controller;

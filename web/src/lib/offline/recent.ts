@@ -142,10 +142,21 @@ export async function keepOnlyUser(user: number): Promise<void> {
     const owner = k.startsWith(FILES) ? k.slice(FILES.length) : k.startsWith(LISTS) ? k.slice(LISTS.length) : null;
     if (owner !== null && owner !== String(user)) await caches.delete(k);
   }
+  // (One transaction per store: nothing can change the rows in between.)
   for (const store of ['recent', 'jobs'] as const) {
-    const keys = await tx<IDBValidKey[]>(store, 'readonly', (s) => s.getAllKeys());
-    const rows = await tx<{ user: number }[]>(store, 'readonly', (s) => s.getAll() as IDBRequest<{ user: number }[]>);
-    const gone = keys.filter((_, i) => rows[i].user !== user);
-    if (gone.length) await tx(store, 'readwrite', (s) => gone.forEach((k) => s.delete(k)));
+    const gone: IDBValidKey[] = [];
+    await tx(store, 'readwrite', (s) => {
+      const c = s.openCursor();
+      c.onsuccess = () => {
+        const cur = c.result;
+        if (!cur) return;
+        if ((cur.value as { user: number }).user !== user) {
+          gone.push(cur.primaryKey);
+          cur.delete();
+        }
+        cur.continue();
+      };
+    });
+    if (store === 'jobs') await tx('blobs', 'readwrite', (s) => gone.forEach((k) => s.delete(k)));
   }
 }
