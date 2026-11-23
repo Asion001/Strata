@@ -471,6 +471,7 @@ pub async fn admin_delete_user(
     }
     tx.commit().await?;
     crate::mounts::invalidate(&st, id);
+    st.user_mounts_gen.remove(&id);
     Ok(Json(json!({})))
 }
 

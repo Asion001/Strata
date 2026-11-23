@@ -185,8 +185,10 @@ async fn write_test(op: &Operator) -> Result<Option<bool>, StepError> {
         Err(_) => None,
         Ok(()) => {
             let mut ranges = None;
+            // (A short clock: this runs inside the whole probe's time limit.)
             for _ in 0..2 {
-                match tokio::time::timeout(STEP_TIMEOUT, op.read_with(&path).range(5..11)).await {
+                let limit = Duration::from_secs(5);
+                match tokio::time::timeout(limit, op.read_with(&path).range(5..11)).await {
                     Ok(Ok(b)) => {
                         ranges = Some(b.to_vec() == data[5..11]);
                         break;

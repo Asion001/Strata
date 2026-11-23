@@ -64,6 +64,10 @@ impl From<opendal::Error> for ApiError {
             opendal::ErrorKind::NotFound => ApiError::NotFound,
             opendal::ErrorKind::AlreadyExists => ApiError::Conflict("already exists".into()),
             opendal::ErrorKind::PermissionDenied => ApiError::Forbidden,
+            // A pinned read found a newer version (see `vfs::read_stream`).
+            opendal::ErrorKind::ConditionNotMatch => {
+                ApiError::Conflict("the file changed while being read; try again".into())
+            }
             _ => ApiError::Internal(e.into()),
         }
     }
