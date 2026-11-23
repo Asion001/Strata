@@ -3,7 +3,7 @@ import { blake3 } from 'hash-wasm';
 
 export const enabled = !!process.env.STRATA_E2E_PASSWORD;
 // In CI the tests must run: a missing server password would only skip them.
-if (process.env.CI && !enabled) throw new Error('STRATA_E2E_PASSWORD is not set in CI');
+if (process.env.CI === 'true' && !enabled) throw new Error('STRATA_E2E_PASSWORD is not set in CI');
 
 export async function login(page: Page) {
   await page.goto('/login');
@@ -87,6 +87,7 @@ export function makePdf(pageTexts: string[]): string {
 /** Open a file in the preview viewer from the folder listing. */
 export async function openPreview(page: Page, dir: string, name: string) {
   await page.goto(`/?p=${encodeURIComponent(dir)}`);
-  // The row's name button opens the file (the row itself also selects).
+  // The name button always opens the file (a row click only opens when
+  // nothing is selected).
   await page.getByRole('row').filter({ hasText: name }).getByRole('button', { name, exact: true }).click();
 }
