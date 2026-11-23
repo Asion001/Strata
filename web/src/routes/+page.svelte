@@ -60,8 +60,9 @@
     if (!session.user) return;
     const p = join(listedPath, e.name);
     const on = !pinned.has(p);
-    const ok = await (await Recent()).pin(session.user.id, p, e.etag, contentUrl(p), on).catch(() => false);
-    if (!ok) toast(on ? `Couldn't keep “${e.name}” offline (too big, or the storage cap is reached).` : 'Something went wrong.', 'error');
+    const r = await (await Recent()).pin(session.user.id, p, e.etag, contentUrl(p), on).catch(() => 'failed' as const);
+    const why = { 'no-version': 'it has no version to keep', unreadable: "it couldn't be read", 'too-big': 'it is too big, or offline storage is full', failed: 'offline storage is not available' };
+    if (r !== true) toast(`Couldn't keep “${e.name}” offline: ${why[r]}.`, 'error');
     else toast(on ? `“${e.name}” is kept offline.` : `“${e.name}” is no longer kept offline.`, 'success');
     await loadPins();
   }
@@ -441,8 +442,14 @@
   function enqueue(files: Iterable<File>, base = path) {
     if (!session.user) return;
     const items = [...files].map((f) => ({ file: f, path: join(base, (f as File & { webkitRelativePath?: string }).webkitRelativePath || f.name) }));
-    void queueFiles(session.user.id, items);
+    queueFiles(session.user.id, items).catch((e) => toastError(e));
   }
+  // Back online: the folder again (and no "offline" banner).
+  $effect(() => {
+    const back = () => { if (offlineAt) load(); };
+    window.addEventListener('online', back);
+    return () => window.removeEventListener('online', back);
+  });
   $effect(() => {
     const done = (e: Event) => { if (parent((e as CustomEvent<string>).detail) === path) load(); };
     window.addEventListener('strata-upload-done', done);

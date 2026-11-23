@@ -59,18 +59,18 @@ export async function trim(user: number, l: Limits = limits(capMb())) {
 }
 
 /** Store a file's bytes (fetched from `url`) under its version. */
-async function store(user: number, path: string, etag: string, url: string, pinned: boolean, l: Limits): Promise<Recent | null> {
+async function store(user: number, path: string, etag: string, url: string, pinned: boolean, l: Limits): Promise<Recent | 'unreadable' | 'too-big'> {
   const others = (await list(user)).filter((r) => r.pinned && r.path !== path).reduce((a, r) => a + r.size, 0);
   const r = await fetch(url, { credentials: 'same-origin' });
-  if (!r.ok) return null;
+  if (!r.ok) return 'unreadable';
   const declared = Number(r.headers.get('content-length') ?? NaN);
   // Too big: don't even read it.
   if (Number.isFinite(declared) && !admits(declared, pinned, others, l)) {
     await r.body?.cancel();
-    return null;
+    return 'too-big';
   }
   const blob = await r.blob();
-  if (!admits(blob.size, pinned, others, l)) return null;
+  if (!admits(blob.size, pinned, others, l)) return 'too-big';
   const type = r.headers.get('content-type') ?? 'application/octet-stream';
   // The server's own headers are kept (its CSP, nosniff and disposition
   // keep a stored SVG or HTML file inert, offline too).
@@ -91,15 +91,17 @@ export async function remember(user: number, path: string, etag: string | null, 
     await put({ ...old, used: Date.now() });
     return;
   }
-  const r = await store(user, path, etag, url, old?.pinned ?? false, l);
-  if (!r) return;
+  const r = await store(user, path, etag, url, old?.pinned ?? false, l).catch(() => 'unreadable' as const);
+  if (typeof r === 'string') return;
   if (old) await (await caches.open(filesCache(user))).delete(fileKey(user, path, old.etag));
   await put(r);
   await trim(user, l);
 }
 
-/** "Keep offline" on or off. Resolves false when the file doesn't fit. */
-export async function pin(user: number, path: string, etag: string | null, url: string, on: boolean): Promise<boolean> {
+export type PinResult = true | 'no-version' | 'unreadable' | 'too-big';
+
+/** "Keep offline" on or off. Resolves true, or why it couldn't. */
+export async function pin(user: number, path: string, etag: string | null, url: string, on: boolean): Promise<PinResult> {
   const l = limits(capMb());
   const old = await get(user, path);
   if (!on) {
@@ -109,13 +111,13 @@ export async function pin(user: number, path: string, etag: string | null, url: 
     }
     return true;
   }
-  if (!etag) return false;
+  if (!etag) return 'no-version';
   if (old?.etag === etag) {
     await put({ ...old, pinned: true, used: Date.now() });
     return true;
   }
-  const r = await store(user, path, etag, url, true, l);
-  if (!r) return false;
+  const r = await store(user, path, etag, url, true, l).catch(() => 'unreadable' as const);
+  if (typeof r === 'string') return r;
   if (old) await (await caches.open(filesCache(user))).delete(fileKey(user, path, old.etag));
   await put(r);
   await trim(user, l);

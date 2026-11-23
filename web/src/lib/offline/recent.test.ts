@@ -149,11 +149,16 @@ describe('recent files', () => {
     served['/c/a'] = { body: file(11, 2) };
     expect(await recent.pin(1, 'a', '"v2"', '/c/a', true)).toBe(true);
     expect(await text(await recent.lookup(1, 'a'))).toEqual(file(11, 2));
-    expect(await recent.pin(1, 'b', null, '/c/b', true)).toBe(false); // no version
-    expect(await recent.pin(1, 'b', '"v"', '/c/missing', true)).toBe(false); // can't read
+    expect(await recent.pin(1, 'b', null, '/c/b', true)).toBe('no-version');
+    expect(await recent.pin(1, 'b', '"v"', '/c/missing', true)).toBe('unreadable');
+    // (A network failure too.)
+    vi.stubGlobal('fetch', async () => { throw new TypeError('offline'); });
+    expect(await recent.pin(1, 'b', '"v"', '/c/b', true)).toBe('unreadable');
+    await recent.remember(1, 'b', '"v"', '/c/b'); // (quietly nothing)
+    vi.stubGlobal('fetch', fetchMock);
     recent.setCapMb(1);
     served['/c/huge'] = { body: file(2 * MB) };
-    expect(await recent.pin(1, 'huge', '"v"', '/c/huge', true)).toBe(false); // over the cap
+    expect(await recent.pin(1, 'huge', '"v"', '/c/huge', true)).toBe('too-big'); // over the cap
     // A new pin of an unkept file.
     served['/c/n'] = { body: file(3) };
     expect(await recent.pin(1, 'n', '"v"', '/c/n', true)).toBe(true);

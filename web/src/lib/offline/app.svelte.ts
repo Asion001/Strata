@@ -115,6 +115,7 @@ const deps = (): Deps => ({
   fetch: (u, i) => fetch(u, i),
   chunk: async (b) => (await import('./chunks')).chunkFile(b),
   sleep: (a) => new Promise((r) => setTimeout(r, 1000 * 2 ** a)),
+  online: () => navigator.onLine,
   changed: (j) => {
     changed(j);
     if (j.state === 'done') onDone?.(j);
@@ -132,6 +133,14 @@ export function pump() {
   }
   draining = Queue()
     .then((queue) => queue.drain(user, deps()))
+    .then((out) => {
+      // Stopped by the network while the device says it is online (the
+      // server was unreachable for a while): try again later by itself.
+      if (out === 'offline' && navigator.onLine) {
+        clearTimeout(retryTimer);
+        retryTimer = setTimeout(pump, (retryDelay = Math.min(retryDelay * 2, 5 * 60_000)));
+      } else retryDelay = 15_000;
+    })
     .catch(() => {})
     .finally(() => {
       draining = null;
@@ -141,6 +150,8 @@ export function pump() {
       }
     });
 }
+let retryTimer: ReturnType<typeof setTimeout> | undefined;
+let retryDelay = 15_000;
 
 /** Start the queue for a user: what was left (app open), and again
  *  whenever the network comes back. `done`: a job finished. */

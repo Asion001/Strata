@@ -84,7 +84,13 @@ export const BUFFER_MAX = 256 * 1024 * 1024;
 const PART = 16 * 1024 * 1024;
 const inMemory = new Map<string, Blob>();
 
-type Stored = Blob | { parts: ArrayBuffer[]; type: string };
+/** A job's bytes in the store: a Blob, buffers, or a mark that they were
+ *  kept in memory only (by the page that queued it). */
+type Stored = Blob | { parts: ArrayBuffer[]; type: string } | { memory: true };
+
+/** How long a new job's bytes may take to be stored before another
+ *  context gives up on them. */
+export const STORING_GRACE = 60 * 60 * 1000;
 
 /** Keep a job's bytes. Resolves how: 'blob', 'buffers' or 'memory'. */
 export async function keepBytes(id: string, blob: Blob): Promise<'blob' | 'buffers' | 'memory'> {
@@ -103,33 +109,43 @@ export async function keepBytes(id: string, blob: Blob): Promise<'blob' | 'buffe
       }
     }
     inMemory.set(id, blob);
+    await tx('blobs', 'readwrite', (s) => void s.put({ memory: true }, id)).catch(() => {});
     return 'memory';
   }
 }
 
-async function bytesOf(id: string): Promise<Blob | null> {
+/** The bytes; 'pending' while they are still being stored (by the page
+ *  that queued the job), null when they are gone. */
+async function bytesOf(id: string): Promise<Blob | 'pending' | null> {
   const m = inMemory.get(id);
   if (m) return m;
   const s = await tx<Stored | undefined>('blobs', 'readonly', (st) => st.get(id));
-  if (!s) return null;
-  return s instanceof Blob ? s : new Blob(s.parts, { type: s.type });
+  if (!s) return 'pending';
+  if (s instanceof Blob) return s;
+  if ('parts' in s) return new Blob(s.parts, { type: s.type });
+  return null; // (in another page's memory, which is gone or elsewhere)
 }
 
 export const GONE = 'The file is no longer available here; add it again.';
 
+const NONE = new Blob([]);
+/** A job whose bytes are still being stored elsewhere: not runnable yet. */
+export const waiting = (j: Job) => j.blob === NONE;
+
 /** With its bytes; a job whose bytes are gone (kept in memory only, and the
  *  page was reloaded) is failed for good, and saved so. */
-async function withBytes(j: Job): Promise<Job> {
+async function withBytes(j: Job, now = Date.now()): Promise<Job> {
   const blob = await bytesOf(j.id);
-  if (blob) return { ...j, blob };
-  if (!isActive(j)) return { ...j, blob: new Blob([]) };
+  if (blob instanceof Blob) return { ...j, blob };
+  if (!isActive(j)) return { ...j, blob: NONE };
+  if (blob === 'pending' && now - j.created < STORING_GRACE) return { ...j, blob: NONE };
   const lost: Job = { ...j, blob: new Blob([]), state: 'failed', error: GONE };
   await update(lost);
   return lost;
 }
 
 /** Are a job's bytes still here? */
-export const hasBytes = async (id: string) => (await bytesOf(id)) !== null;
+export const hasBytes = async (id: string) => (await bytesOf(id)) instanceof Blob;
 
 /** Keep the bytes in memory for this page (it can upload them at once,
  *  while `keepBytes` stores them for later). */
@@ -192,6 +208,8 @@ export interface Deps {
   sleep: (attempt: number) => Promise<void>;
   /** Called whenever a job changes (for the UI). */
   changed?: (j: Job) => void;
+  /** Whether the device is online (a failed request is then retried). */
+  online?: () => boolean;
 }
 
 /** The network went away: stop, keep the job as it is, resume later. */
@@ -207,6 +225,8 @@ const H = { 'x-strata': '1' };
 const RETRIES = 4;
 /** Chunks in flight at once. */
 const PARALLEL = 3;
+/** Confirmed chunks are saved at most this often (ms). */
+export const SAVE_EVERY = 1000;
 
 async function call(d: Deps, url: string, init: RequestInit = {}): Promise<Response> {
   for (let attempt = 0; ; attempt++) {
@@ -215,7 +235,11 @@ async function call(d: Deps, url: string, init: RequestInit = {}): Promise<Respo
       r = await d.fetch(url, { credentials: 'same-origin', ...init, headers: { ...H, ...(init.headers ?? {}) } });
     } catch (e) {
       if ((e as Error)?.name === 'AbortError') throw e;
-      throw new Offline('offline');
+      // A blip (a server restart, a dropped connection) while the device
+      // is online is retried; offline, the queue waits for the network.
+      if (!d.online?.() || attempt >= RETRIES) throw new Offline('offline');
+      await d.sleep(attempt);
+      continue;
     }
     if (r.ok || r.status < 500 || attempt >= RETRIES) {
       if (r.ok) return r;
@@ -242,15 +266,26 @@ export async function run(job: Job, d: Deps, signal?: AbortSignal, restarts = 0)
   const live = () => {
     if (signal?.aborted) throw new DOMException('cancelled', 'AbortError');
   };
+  // Saved after every change, except confirmed chunks: those at most every
+  // SAVE_EVERY (a job of thousands of chunks would otherwise be rewritten
+  // thousands of times). Nothing is lost by that: a resumed upload asks the
+  // server what it is missing.
+  let lastSave = 0;
+  let dirty = false;
+  const persist = async () => {
+    dirty = false;
+    lastSave = Date.now();
+    // Cancelled meanwhile (here or in another tab): stop, write nothing.
+    if (!(await update(j))) throw new DOMException('cancelled', 'AbortError');
+    d.changed?.(j);
+  };
   const go = async (e: Event) => {
     live();
     const n = step(j, e);
-    if (n !== j) {
-      j = n;
-      // Cancelled meanwhile (here or in another tab): stop, write nothing.
-      if (!(await update(j))) throw new DOMException('cancelled', 'AbortError');
-      d.changed?.(j);
-    }
+    if (n === j) return;
+    j = n;
+    if (e.t === 'sent' && Date.now() - lastSave < SAVE_EVERY) dirty = true;
+    else await persist();
   };
   try {
     await go({ t: 'start' });
@@ -299,12 +334,16 @@ export async function run(job: Job, d: Deps, signal?: AbortSignal, restarts = 0)
           while (next < todo.length && !lost && !failed) {
             const c = todo[next++];
             live();
+            // Read first: a file that can't be read (changed or gone on
+            // disk) fails this upload, rather than passing for the network.
+            let body: ArrayBuffer;
             try {
-              await call(d, `/api/uploads/${session}/chunks/${c.hash}`, {
-                method: 'PUT',
-                body: j.blob.slice(c.offset, c.offset + c.size),
-                signal
-              });
+              body = await j.blob.slice(c.offset, c.offset + c.size).arrayBuffer();
+            } catch (e) {
+              throw new Error(`The file can't be read any more (${(e as Error)?.name ?? 'error'}); add it again.`);
+            }
+            try {
+              await call(d, `/api/uploads/${session}/chunks/${c.hash}`, { method: 'PUT', body, signal });
             } catch (e) {
               // The session expired meanwhile: start a new one.
               if (e instanceof HttpError && e.status === 404) {
@@ -342,7 +381,11 @@ export async function run(job: Job, d: Deps, signal?: AbortSignal, restarts = 0)
     }
     return j;
   } catch (e) {
-    if (e instanceof Offline || (e as Error)?.name === 'AbortError') throw e;
+    if (e instanceof Offline) {
+      if (dirty) await persist().catch(() => {}); // (what was confirmed so far)
+      throw e;
+    }
+    if ((e as Error)?.name === 'AbortError') throw e;
     await go({ t: 'fail', error: e instanceof Error ? e.message : String(e) });
     return j;
   }
@@ -357,7 +400,7 @@ export async function drain(user: number, d: Deps): Promise<'done' | 'offline'> 
       if (halted) break;
       if (!isActive(j)) continue;
       const cur = await load(j.id); // (cancelled meanwhile?)
-      if (!cur || !isActive(cur)) continue;
+      if (!cur || !isActive(cur) || waiting(cur)) continue;
       const ctl = new AbortController();
       running.set(j.id, ctl);
       try {

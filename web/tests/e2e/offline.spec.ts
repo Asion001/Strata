@@ -162,3 +162,21 @@ test('installable: Chrome finds no installability errors', async ({ browser, bro
   expect(errors).toEqual([]);
   await ctx.close();
 });
+
+test('signing out offline ends the server session on the next start', async ({ browser }) => {
+  const { ctx, page } = await newSession(browser);
+  await page.goto('/settings');
+  await controlled(page);
+  await setOffline(ctx, page, true);
+  await page.getByRole('button', { name: /sign out/i }).click();
+  await expect(page.getByRole('dialog')).toContainText("The server couldn't be reached");
+  await page.getByRole('dialog').getByRole('button', { name: 'OK' }).click();
+  await expect(page).toHaveURL(/\/login/);
+  // Online again: opening the app ends the old session before anything.
+  await setOffline(ctx, page, false);
+  await page.goto('/');
+  await expect(page).toHaveURL(/\/login/);
+  const me = await page.evaluate(async () => (await fetch('/api/auth/me')).status);
+  expect(me).toBe(401);
+  await ctx.close();
+});

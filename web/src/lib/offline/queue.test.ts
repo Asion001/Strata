@@ -1,7 +1,7 @@
 import 'fake-indexeddb/auto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as q from './queue';
-import { wipe } from './idb';
+import { tx, wipe } from './idb';
 
 const chunks: q.Chunk[] = [
   { offset: 0, size: 4, hash: 'aa' },
@@ -437,7 +437,11 @@ describe('stored bytes', () => {
   it('only in memory when too big for buffers, or when nothing can be stored', async () => {
     const spy = refuseBlobs();
     const big = job({ id: 'big' });
-    const huge = { size: q.BUFFER_MAX + 1, slice: () => new Blob([]) } as unknown as Blob;
+    const huge = new (class extends Blob {
+      get size() {
+        return q.BUFFER_MAX + 1;
+      }
+    })([]);
     expect(await q.keepBytes(big.id, huge)).toBe('memory');
     await q.save(big);
     expect((await q.load('big'))!.blob).toBe(huge);
@@ -513,6 +517,77 @@ describe('cancel from another tab, and sign-out', () => {
     q.halt();
     expect(await q.drain(1, deps())).toBe('done');
     expect(srv.log).toEqual([]);
+  });
+
+  it('bytes kept in another page’s memory are gone here', async () => {
+    const j = job({ id: 'elsewhere' });
+    await q.save(j);
+    await tx('blobs', 'readwrite', (st) => void st.put({ memory: true }, 'elsewhere'));
+    expect((await q.load('elsewhere'))!).toMatchObject({ state: 'failed', error: q.GONE });
+  });
+
+  it('a new job whose bytes are still being stored waits (and the queue skips it)', async () => {
+    const j = q.newJob(1, 'p', new Blob(['x']));
+    await q.save(j);
+    const back = (await q.load(j.id))!;
+    expect(back.state).toBe('queued');
+    expect(q.waiting(back)).toBe(true);
+    expect(await q.drain(1, deps())).toBe('done');
+    expect(srv.log).toEqual([]);
+    expect((await q.load(j.id))!.state).toBe('queued');
+  });
+});
+
+describe('network and file errors', () => {
+  it('online, a failed request is retried (a blip); still failing, it is offline', async () => {
+    srv.dropOnce = (u, m) => m === 'PUT';
+    expect((await q.run(await fresh(), deps({ online: () => true }))).state).toBe('done');
+    const down = (async () => {
+      throw new TypeError('Failed to fetch');
+    }) as unknown as typeof fetch;
+    await expect(q.run(await fresh(), deps({ fetch: down, online: () => true }))).rejects.toBeInstanceOf(q.Offline);
+  });
+
+  it('a file that can no longer be read fails its upload (not "offline")', async () => {
+    for (const thrown of [new DOMException('changed', 'NotReadableError'), 'odd']) {
+      const bad = new (class extends Blob {
+        slice() {
+          return { arrayBuffer: () => Promise.reject(thrown) } as unknown as Blob;
+        }
+      })([new Uint8Array(14)]);
+      const j = q.newJob(1, 'dir/f.bin', bad);
+      await add(j);
+      q.holdBytes(j.id, bad); // (this page's copy, preferred to the stored one)
+      const out = await q.run((await q.load(j.id))!, deps());
+      expect(out.state).toBe('failed');
+      expect(out.error).toMatch(thrown === 'odd' ? /\(error\)/ : /NotReadableError/);
+    }
+  });
+
+  it('chunks confirmed just before going offline are saved', async () => {
+    const j = await fresh();
+    srv.dropOnce = (u, m) => m === 'PUT' && u.endsWith('/cc');
+    // (One chunk at a time here: aa and bb confirmed, then cc fails.)
+    const f = (async (u: RequestInfo | URL, i: RequestInit = {}) => {
+      if (i.method === 'PUT' && String(u).endsWith('/cc')) await new Promise((r) => setTimeout(r, 10));
+      return srv.fetch(u, i);
+    }) as unknown as typeof fetch;
+    await expect(q.run(j, deps({ fetch: f }))).rejects.toBeInstanceOf(q.Offline);
+    expect((await q.load(j.id))!.sent.sort()).toEqual(['aa', 'bb']);
+  });
+
+  it('a job cancelled right as the network went: nothing is written back', async () => {
+    const j = await fresh();
+    const f = (async (u: RequestInfo | URL, i: RequestInit = {}) => {
+      if (i.method === 'PUT' && String(u).endsWith('/cc')) {
+        await new Promise((r) => setTimeout(r, 10));
+        await q.remove(j.id);
+        throw new TypeError('Failed to fetch');
+      }
+      return srv.fetch(u, i);
+    }) as unknown as typeof fetch;
+    await expect(q.run(j, deps({ fetch: f }))).rejects.toBeInstanceOf(q.Offline);
+    expect(await q.load(j.id)).toBeUndefined();
   });
 });
 

@@ -86,8 +86,19 @@ async function content(req: Request): Promise<Response> {
     if (user === null || path === null) throw e;
     const hit = await lookup(user, path);
     if (!hit) throw e;
-    return ranged(hit, req.headers.get('range'));
+    return ranged(asServed(hit, new URL(req.url), path), req.headers.get('range'));
   }
+}
+
+/** The stored copy (from the content route) as this route would serve it:
+ *  the image route gives an SVG its image type (an <img> never runs its
+ *  scripts; the stored CSP stays), and download=1 makes it an attachment. */
+function asServed(r: Response, url: URL, path: string): Response {
+  const h = new Headers(r.headers);
+  if (url.pathname === '/api/files/image' && /\.svg$/i.test(path)) h.set('content-type', 'image/svg+xml');
+  const name = path.split('/').pop() ?? 'file';
+  if (url.searchParams.get('download') === '1') h.set('content-disposition', `attachment; filename*=UTF-8''${encodeURIComponent(name)}`);
+  return new Response(r.body, { status: r.status, headers: h });
 }
 
 sw.addEventListener('fetch', (event) => {
@@ -130,7 +141,7 @@ sw.addEventListener('sync', ((event: SyncEvent) => {
     (async () => {
       // An open tab runs the queue itself (and shows its progress): fail
       // this attempt, so the browser tries again later, maybe tab-less.
-      if ((await sw.clients.matchAll({ type: 'window' })).length) throw new Error('a tab is running the queue');
+      if ((await sw.clients.matchAll({ type: 'window', includeUncontrolled: true })).length) throw new Error('a tab is running the queue');
       // The signed-in user, from the server (the queue only runs as them).
       const r = await fetch('/api/auth/me', { headers: { 'x-strata': '1' } });
       if (!r.ok) return;
