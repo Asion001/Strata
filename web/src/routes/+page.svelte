@@ -3,7 +3,7 @@
   import { goto } from '$app/navigation';
   import { untrack } from 'svelte';
   import { api, contentUrl, previewUrl, thumbUrl, type Entry } from '$lib/api';
-  import { bytes, when, join, parent, isImage, isTextName } from '$lib/format';
+  import { bytes, when, join, parent, isImage, isBrowserImage, isTextName } from '$lib/format';
   import { cn } from '$lib/utils';
   import FileIcon from '$lib/components/files/FileIcon.svelte';
   import { Selection, loadPref, nextSort, savePref, sortEntries, type Sort, type SortKey } from '$lib/components/files/listing';
@@ -213,14 +213,23 @@
 
   const crumbs = $derived(path ? path.split('/').map((n, i, a) => ({ name: n, path: a.slice(0, i + 1).join('/') })) : []);
   const viewable = $derived(sorted.filter((e) => !e.is_dir));
-  let viewerItems = $state<{ name: string; size: number; src: string; download: string; path: string }[]>([]);
+  let viewerItems = $state<{ name: string; size: number; src: string; download: string; path: string; thumb?: string; poster?: string; mtime: string }[]>([]);
 
   function open(e: Entry) {
     if (e.is_dir) goto(`/?p=${encodeURIComponent(join(listedPath, e.name))}`);
     else {
       // A snapshot: a refresh (an upload landing, another device) must not
       // shift which file the open viewer shows.
-      viewerItems = viewable.map((v) => ({ name: v.name, size: v.size, src: previewUrl(join(listedPath, v.name)), download: contentUrl(join(listedPath, v.name), true), path: join(listedPath, v.name) }));
+      viewerItems = viewable.map((v) => {
+        const p = join(listedPath, v.name);
+        return {
+          name: v.name, size: v.size, mtime: v.mtime, path: p,
+          src: previewUrl(p), download: contentUrl(p, true),
+          // The list's own thumbnail URL: already in the cache, so it shows at once.
+          thumb: isImage(v.name) ? thumbUrl(p, v.etag) : undefined,
+          poster: isImage(v.name) && !isBrowserImage(v.name) ? thumbUrl(p, v.etag, 1024) : undefined
+        };
+      });
       viewerIndex = viewable.indexOf(e);
     }
   }
@@ -315,6 +324,7 @@
       selection.clear();
       for (const n of failed) if (byName.has(n)) selection.toggle(n);
     }
+    return failed;
   }
 
   /** Mounts are moved and removed on the Mounts page, never as files. */
@@ -327,12 +337,35 @@
 
   const removePicked = () => removeItems(picked);
 
+  /** Delete from the viewer: on to the next file, or closed after the last. */
+  async function viewerDelete(i: number) {
+    const it = viewerItems[i];
+    const e = byName.get(it.name);
+    if (!e) return toast(`“${it.name}” is no longer in this folder.`, 'info');
+    const failed = await removeItems([e], false);
+    if (!failed || failed.length) return; // cancelled, busy or failed
+    // (By path: the viewer may have been closed, or reopened on a newer
+    // snapshot, while the dialog and the delete ran.)
+    const at = viewerItems.findIndex((x) => x.path === it.path);
+    if (at < 0) return;
+    const open = viewerIndex >= 0;
+    const current = viewerItems[viewerIndex]?.path;
+    viewerItems = viewerItems.filter((x) => x.path !== it.path);
+    if (!open) return;
+    const still = viewerItems.findIndex((x) => x.path === current);
+    viewerIndex = !viewerItems.length ? -1 : still >= 0 ? still : Math.min(at, viewerItems.length - 1);
+  }
+
   const waitForBusy = () => toast('Wait for the current action to finish.', 'info');
 
-  async function removeItems(all: Entry[], fromSelection = true) {
-    if (busy) return waitForBusy();
+  /** The names that failed; null when nothing was tried (busy, cancelled). */
+  async function removeItems(all: Entry[], fromSelection = true): Promise<string[] | null> {
+    if (busy) {
+      waitForBusy();
+      return null;
+    }
     const items = withoutMounts(all, 'remove');
-    if (!items.length) return;
+    if (!items.length) return null;
     const dir = listedPath;
     const ok = await confirmDialog({
       title: `Delete ${names(items)}?`,
@@ -342,9 +375,12 @@
       confirm: 'Delete',
       danger: true
     });
-    if (!ok) return;
-    if (busy) return waitForBusy();
-    await each(items, 'delete', (e) => api('POST', '/api/files/delete', { paths: [join(dir, e.name)] }), fromSelection);
+    if (!ok) return null;
+    if (busy) {
+      waitForBusy();
+      return null;
+    }
+    return each(items, 'delete', (e) => api('POST', '/api/files/delete', { paths: [join(dir, e.name)] }), fromSelection);
   }
 
   async function transferPicked(copy: boolean) {
@@ -680,6 +716,8 @@
     items={viewerItems}
     bind:index={viewerIndex}
     onedit={(i) => { editing = viewerItems[i].path; viewerIndex = -1; }}
+    onshare={(i) => { const e = byName.get(viewerItems[i].name); if (e) void share(e); }}
+    ondelete={viewerDelete}
     onclose={() => (viewerIndex = -1)} />
   </div>
 {/if}

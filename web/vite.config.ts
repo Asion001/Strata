@@ -9,5 +9,7 @@ export default defineConfig({
       '/api': { target: 'http://localhost:8080', ws: true }
     }
   },
+  // Component tests mount the client build of Svelte (in jsdom).
+  resolve: process.env.VITEST ? { conditions: ['browser'] } : undefined,
   test: { include: ['src/**/*.test.ts'] }
 });

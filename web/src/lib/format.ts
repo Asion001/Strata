@@ -28,6 +28,9 @@ export function parent(p: string) {
 
 const IMG = /\.(jpe?g|png|gif|webp|bmp|tiff?)$/i;
 export const isImage = (n: string) => IMG.test(n);
+/** Images every current browser decodes itself (SVG only through the image
+ *  route, as a plain picture). The rest of `isImage` shows a thumbnail. */
+export const isBrowserImage = (n: string) => /\.(jpe?g|png|gif|webp|avif|bmp|ico|svg)$/i.test(n);
 export const isPdf = (n: string) => /\.pdf$/i.test(n);
 export const isVideo = (n: string) => /\.(mp4|webm|mov|m4v)$/i.test(n);
 /** Files the text editor opens (by name; content is checked on open). */

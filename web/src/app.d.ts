@@ -1,4 +1,9 @@
 declare global {
-  namespace App {}
+  namespace App {
+    interface PageState {
+      /** The file viewer is open (a history entry, so Back closes it). */
+      viewer?: number;
+    }
+  }
 }
 export {};
