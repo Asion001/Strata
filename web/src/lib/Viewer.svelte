@@ -3,7 +3,6 @@
   import { isAudio, isImage, isPdf, isSvg, isTextName, isVideo, bytes } from './format';
   import { staleApp } from './lazy';
   import { cn } from './utils';
-  import MediaPlayer from './media/MediaPlayer.svelte';
   import { session } from './session.svelte';
   import Button, { buttonClass } from './components/ui/button/button.svelte';
   import XIcon from '@lucide/svelte/icons/x';
@@ -34,6 +33,13 @@
   $effect(() => {
     if (!Pdf && isPdf(item.name))
       import('./pdf/PdfViewer.svelte').then((m) => (Pdf = m.default), staleApp);
+  });
+
+  // The media player, likewise (it stays out of the startup bundle).
+  let Player = $state<typeof import('./media/MediaPlayer.svelte').default>();
+  $effect(() => {
+    if (!Player && (isVideo(item.name) || isAudio(item.name)))
+      import('./media/MediaPlayer.svelte').then((m) => (Player = m.default), staleApp);
   });
 
   $effect(() => {
@@ -123,11 +129,11 @@
       {#if Pdf}{#key item.src}<Pdf src={item.src} download={item.download} name={item.name} />{/key}{/if}
     {:else if isVideo(item.name) || isAudio(item.name)}
       <!-- Keyed by file: each one gets a fresh player and its own position. -->
-      {#key item.src}
-        <MediaPlayer kind={isVideo(item.name) ? 'video' : 'audio'} src={item.src} name={item.name}
+      {#if Player}{#key item.src}
+        <Player kind={isVideo(item.name) ? 'video' : 'audio'} src={item.src} name={item.name}
           owner={session.user?.id ?? null}
           file={session.user && !item.src.startsWith('/api/public/') ? `${session.user.id}|${item.src}` : null} />
-      {/key}
+      {/key}{/if}
     {:else if text !== null}
       <pre>{text}</pre>
     {:else}

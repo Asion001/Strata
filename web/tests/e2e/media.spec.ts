@@ -17,15 +17,26 @@ async function playAndSeek(page: Page) {
     v.muted = true;
     v.currentTime = 12;
     await new Promise((r) => v.addEventListener('seeked', r, { once: true }));
-    await v.play();
     const start = v.currentTime;
-    await new Promise((r) => setTimeout(r, 1200));
+    // Not awaiting play(): some WebKit builds settle it late. Wait until
+    // playback has moved on from the seek instead.
+    void v.play().catch(() => {});
+    await new Promise<void>((r) => {
+      const tick = () => {
+        if (v.currentTime > start + 0.5) {
+          v.removeEventListener('timeupdate', tick);
+          r();
+        }
+      };
+      v.addEventListener('timeupdate', tick);
+    });
     v.pause();
     return { duration: v.duration, start, now: v.currentTime };
   });
   expect(at.duration).toBeGreaterThan(29);
   expect(at.start).toBeGreaterThanOrEqual(11.5);
   expect(at.now).toBeGreaterThan(at.start); // it played on from the seek
+  expect(at.now).toBeLessThan(at.start + 10); // ... and didn't jump to the end
   return at.now;
 }
 
