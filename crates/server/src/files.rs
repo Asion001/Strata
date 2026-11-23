@@ -13,6 +13,7 @@ use strata_storage::paths;
 use crate::auth::AuthUser;
 use crate::error::{ApiError, ApiResult, bad};
 use crate::mounts::{self, Mount};
+use crate::range;
 use crate::safe;
 use crate::state::AppState;
 use crate::vfs::{self, Node};
@@ -39,38 +40,6 @@ pub async fn list(
                    "connection_kind": m.connection_kind, "offline": st.is_offline(m.connection_id) },
         "entries": entries,
     })))
-}
-
-/// Parse a single `Range: bytes=a-b` header against `size`.
-pub fn parse_range(headers: &HeaderMap, size: u64) -> ApiResult<Option<(u64, u64)>> {
-    let Some(v) = headers.get(header::RANGE).and_then(|v| v.to_str().ok()) else {
-        return Ok(None);
-    };
-    let Some(spec) = v.strip_prefix("bytes=") else {
-        return Ok(None);
-    };
-    if spec.contains(',') {
-        return Ok(None); // multi-range: serve the whole file
-    }
-    let (a, b) = spec.split_once('-').ok_or(ApiError::RangeNotSatisfiable)?;
-    let (start, end) = if a.is_empty() {
-        let n: u64 = b.parse().map_err(|_| ApiError::RangeNotSatisfiable)?;
-        (size.saturating_sub(n), size)
-    } else {
-        let s: u64 = a.parse().map_err(|_| ApiError::RangeNotSatisfiable)?;
-        let e = if b.is_empty() {
-            size
-        } else {
-            b.parse::<u64>()
-                .map_err(|_| ApiError::RangeNotSatisfiable)?
-                + 1
-        };
-        (s, e.min(size))
-    };
-    if start >= end || start >= size {
-        return Err(ApiError::RangeNotSatisfiable);
-    }
-    Ok(Some((start, end)))
 }
 
 /// Read the first bytes of a file, for content sniffing.
@@ -153,8 +122,36 @@ pub async fn serve(
         );
         return Ok(resp);
     }
-    let range = parse_range(headers, size)?;
-    let (start, end) = range.unwrap_or((0, size));
+    // A range only for the version the client has (If-Range), and only a
+    // strong one: a coarse raw version can miss a change.
+    let etag_now = etag.clone().unwrap_or_default();
+    let range = if range::if_range_allows(
+        headers.get(header::IF_RANGE).and_then(|v| v.to_str().ok()),
+        &etag_now,
+        !vfs::is_coarse(node),
+    ) {
+        range::parse(
+            headers.get(header::RANGE).and_then(|v| v.to_str().ok()),
+            size,
+        )
+    } else {
+        range::Range::Full
+    };
+    let (start, end, range) = match range {
+        range::Range::Full => (0, size, None),
+        range::Range::Part { start, end } => (start, end, Some((start, end))),
+        range::Range::Unsatisfiable => {
+            let mut resp = StatusCode::RANGE_NOT_SATISFIABLE.into_response();
+            let h = resp.headers_mut();
+            safe::protect(h);
+            h.insert(
+                header::CONTENT_RANGE,
+                HeaderValue::from_str(&format!("bytes */{size}")).unwrap(),
+            );
+            h.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+            return Ok(resp);
+        }
+    };
     // One read serves both the type decision and the body when the body
     // starts at 0: peek its first bytes, then hand them on. The type and the
     // bytes therefore always come from the same version of the file.

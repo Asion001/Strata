@@ -689,20 +689,18 @@ pub async fn read_stream(
         let store = hashed_store(st, m).await?;
         let chunks = node.chunks.clone().unwrap_or_default();
         let sizes = node.chunk_sizes.clone().unwrap_or_default();
+        // Only the chunks covering the range are read, one at a time (the
+        // first and last sliced): never the whole file.
+        let sizes: Vec<u64> = sizes.iter().map(|&s| s.max(0) as u64).collect();
+        let parts = crate::range::covering(&sizes, start, end);
         let s = async_stream::try_stream! {
-            let mut off = 0u64;
-            for (c, sz) in chunks.iter().zip(sizes.iter()) {
-                let sz = *sz as u64;
-                let (cs, ce) = (off, off + sz);
-                off = ce;
-                if ce <= start || cs >= end { continue; }
+            for (i, r) in parts {
+                let c = chunks.get(i).ok_or_else(|| io::Error::other("chunk list too short"))?;
                 let h = Hash::from_slice(c).ok_or_else(|| io::Error::other("bad chunk hash"))?;
-                let a = start.saturating_sub(cs);
-                let b = end.min(ce) - cs;
-                let data = if a == 0 && b == sz {
+                let data = if r.start == 0 && r.end == sizes[i] {
                     store.get(&h).await
                 } else {
-                    store.get_range(&h, a..b).await
+                    store.get_range(&h, r).await
                 }.map_err(io::Error::other)?;
                 yield data;
             }
@@ -717,8 +715,18 @@ pub async fn read_stream(
             .reader_with(&backend_path(m, rel, false))
             .chunk(4 << 20)
             .await?;
-        let s = reader.into_bytes_stream(start..end).await?;
-        Ok(Box::pin(s))
+        if m.range_read || start == 0 {
+            let s = reader.into_bytes_stream(start..end).await?;
+            return Ok(Box::pin(s));
+        }
+        // A backend that can't read from an offset: read from the start and
+        // drop what comes before the range (slow for late offsets).
+        tracing::warn!(
+            "connection {}: no range reads; reading {start} bytes to discard them",
+            m.connection_id
+        );
+        let s = reader.into_bytes_stream(0..end).await?;
+        Ok(Box::pin(skip_bytes(s, start)))
     }
 }
 
@@ -1010,6 +1018,29 @@ async fn overlapping_raw_volumes(st: &AppState, m: &Mount) -> ApiResult<Vec<i64>
         }
     }
     Ok(out)
+}
+
+/// Drop the first `n` bytes of a byte stream.
+fn skip_bytes(
+    s: impl Stream<Item = io::Result<Bytes>> + Send + 'static,
+    n: u64,
+) -> impl Stream<Item = io::Result<Bytes>> + Send + 'static {
+    let mut left = n;
+    s.filter_map(move |item| {
+        let out = match item {
+            Ok(b) if left >= b.len() as u64 => {
+                left -= b.len() as u64;
+                None
+            }
+            Ok(b) => {
+                let b = b.slice(left as usize..);
+                left = 0;
+                Some(Ok(b))
+            }
+            Err(e) => Some(Err(e)),
+        };
+        futures::future::ready(out)
+    })
 }
 
 /// Current state of a file for a precondition check (None if missing).
@@ -1732,4 +1763,25 @@ pub async fn search(st: &AppState, user_id: i64, q: &str, limit: i64) -> ApiResu
     .fetch_all(&st.db)
     .await?;
     Ok(hits)
+}
+
+#[cfg(test)]
+mod skip_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn skip_bytes_drops_exactly_the_prefix() {
+        let parts = || {
+            futures::stream::iter(
+                ["abc", "", "defg", "h"].map(|s| Ok::<_, io::Error>(Bytes::from(s))),
+            )
+        };
+        for n in 0..=9u64 {
+            let got: Vec<u8> = skip_bytes(parts(), n)
+                .map(|b| b.unwrap().to_vec())
+                .concat()
+                .await;
+            assert_eq!(got, &b"abcdefgh"[(n as usize).min(8)..], "skip {n}");
+        }
+    }
 }

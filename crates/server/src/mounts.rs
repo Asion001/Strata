@@ -33,6 +33,10 @@ pub struct Mount {
     /// Journal entries of the volume up to this seq predate the mount.
     pub journal_from: i64,
     pub created_at: DateTime<Utc>,
+    /// The backend reads byte ranges itself (capabilities; true until the
+    /// first detection says otherwise).
+    #[serde(skip)]
+    pub range_read: bool,
 }
 
 impl Mount {
@@ -42,7 +46,8 @@ impl Mount {
 }
 
 const SELECT: &str = "SELECT m.id, m.owner_id, m.path, m.volume_id, v.connection_id, c.name AS connection_name,
-    c.kind AS connection_kind, v.base_path, v.mode, m.journal_from, m.created_at
+    c.kind AS connection_kind, v.base_path, v.mode, m.journal_from, m.created_at,
+    COALESCE((c.capabilities->>'range_read')::boolean, TRUE) AS range_read
     FROM mounts m JOIN volumes v ON v.id = m.volume_id JOIN connections c ON c.id = v.connection_id";
 
 /// A user's mounts, longest path first (cached).
