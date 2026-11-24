@@ -89,8 +89,8 @@ export async function signOut(user: number | null, logout: () => Promise<unknown
 }
 
 /** A sign-out that couldn't reach the server: end that session now, before
- *  anything else. Resolves true when one was pending (the caller goes to the
- *  sign-in page). */
+ *  anything else. Resolves 'none' (nothing pending), 'done' (ended now: go
+ *  to the sign-in page) or 'unreachable' (still pending). */
 let finishing: Promise<'none' | 'done' | 'unreachable'> | null = null;
 /** (One request at a time, shared by every caller: a late answer to a
  *  second logout would clear the cookie of a session started meanwhile.) */

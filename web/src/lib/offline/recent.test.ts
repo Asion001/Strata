@@ -255,4 +255,60 @@ describe('recent files', () => {
     await store.delete(META);
     expect(await recent.signedInHere()).toBeNull();
   });
+
+  it('a size known from the listing is checked before any download', async () => {
+    served['/c/big'] = { body: file(3) };
+    await recent.remember(1, 'big', '"v"', '/c/big', 30 * MB);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(await recent.pin(1, 'big', '"v"', '/c/big', true, 600 * MB)).toBe('too-big');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('an answer with no length is read only up to the limit', async () => {
+    recent.setCapMb(1);
+    let pulled = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(c) {
+        pulled++;
+        c.enqueue(new Uint8Array(256 * 1024));
+        if (pulled > 100) c.close();
+      }
+    });
+    vi.stubGlobal('fetch', async () => new Response(body));
+    await recent.remember(1, 'z', '"v"', '/c/z');
+    expect(await recent.list(1)).toEqual([]);
+    expect(pulled).toBeLessThan(10); // (stopped past 1 MB, not read to the end)
+    // An empty answer (no body at all) is kept as an empty file.
+    vi.stubGlobal('fetch', async () => new Response(null));
+    await recent.remember(1, 'empty', '"v"', '/c/e');
+    expect((await recent.list(1)).map((r) => [r.path, r.size])).toEqual([['empty', 0]]);
+  });
+
+  it('signed out while a file was being stored: nothing of it stays', async () => {
+    vi.stubGlobal('fetch', async () => {
+      await caches.delete(META); // (the sign-out, in another tab, meanwhile)
+      return new Response(file(4));
+    });
+    await recent.remember(1, 'a', '"v"', '/c/a');
+    expect(await recent.list(1)).toEqual([]);
+    expect(await recent.lookup(1, 'a')).toBeUndefined();
+    await signIn(1);
+    vi.stubGlobal('fetch', async () => {
+      await caches.delete(META);
+      return new Response(file(4));
+    });
+    expect(await recent.pin(1, 'b', '"v"', '/c/b', true)).toBe('unreadable');
+    expect(await recent.list(1)).toEqual([]);
+  });
+
+  it('a newer version that can’t be kept drops the old one (unless pinned)', async () => {
+    served['/c/a'] = { body: file(3) };
+    await recent.remember(1, 'a', '"v1"', '/c/a');
+    await recent.remember(1, 'a', '"v2"', '/c/a', 30 * MB);
+    expect(await recent.lookup(1, 'a')).toBeUndefined();
+    await recent.pin(1, 'p', '"v1"', '/c/a', true);
+    await recent.remember(1, 'p', '"v2"', '/c/a', 30 * MB);
+    expect(await recent.lookup(1, 'p')).toBeDefined();
+  });
 });
+

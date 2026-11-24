@@ -67,8 +67,10 @@ export async function trim(user: number, l: Limits = limits(capMb())) {
 }
 
 /** Store a file's bytes (fetched from `url`) under its version. */
-async function store(user: number, path: string, etag: string, url: string, pinned: boolean, l: Limits): Promise<Recent | 'unreadable' | 'too-big'> {
+async function store(user: number, path: string, etag: string, url: string, pinned: boolean, l: Limits, known?: number): Promise<Recent | 'unreadable' | 'too-big'> {
   const others = (await list(user)).filter((r) => r.pinned && r.path !== path).reduce((a, r) => a + r.size, 0);
+  // Known too big (from the listing): not fetched at all.
+  if (known !== undefined && !admits(known, pinned, others, l)) return 'too-big';
   // Only for whoever is signed in on this device now (a tab can be stale:
   // the bytes come with the current session, maybe someone else's).
   // (No one recorded: signed out here, maybe in another tab.)
@@ -81,8 +83,25 @@ async function store(user: number, path: string, etag: string, url: string, pinn
     await r.body?.cancel();
     return 'too-big';
   }
-  const blob = await r.blob();
-  if (!admits(blob.size, pinned, others, l)) return 'too-big';
+  // Read up to the limit only (a compressed answer declares no length).
+  const limit = pinned ? l.maxBytes - others : Math.min(l.maxFile, l.maxBytes);
+  const parts: Uint8Array[] = [];
+  let got = 0;
+  if (r.body) {
+    const reader = r.body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      got += value.length;
+      if (got > limit) {
+        await reader.cancel();
+        return 'too-big';
+      }
+      parts.push(value);
+    }
+  }
+  // (Within the limit by now: `admits` holds.)
+  const blob = new Blob(parts as BlobPart[]);
   const type = r.headers.get('content-type') ?? 'application/octet-stream';
   // The server's own headers are kept (its CSP, nosniff and disposition
   // keep a stored SVG or HTML file inert, offline too).
@@ -95,7 +114,15 @@ async function store(user: number, path: string, etag: string, url: string, pinn
 }
 
 /** A file was opened: keep its bytes (if they fit), or just note the use. */
-export async function remember(user: number, path: string, etag: string | null, url: string): Promise<void> {
+/** Signed out (or someone else signed in) while a file was being stored:
+ *  what was just written goes again. */
+async function stillTheirs(r: Recent): Promise<boolean> {
+  if ((await signedInHere()) === r.user) return true;
+  await drop(r);
+  return false;
+}
+
+export async function remember(user: number, path: string, etag: string | null, url: string, size?: number): Promise<void> {
   if (!etag) return; // (no version to key it by)
   const l = limits(capMb());
   const old = await get(user, path);
@@ -103,17 +130,22 @@ export async function remember(user: number, path: string, etag: string | null, 
     await put({ ...old, used: Date.now() });
     return;
   }
-  const r = await store(user, path, etag, url, old?.pinned ?? false, l).catch(() => 'unreadable' as const);
-  if (typeof r === 'string') return;
+  const r = await store(user, path, etag, url, old?.pinned ?? false, l, size).catch(() => 'unreadable' as const);
+  if (typeof r === 'string') {
+    // (A newer version that can't be kept: the old one mustn't pass for it.)
+    if (old && !old.pinned) await drop(old);
+    return;
+  }
   if (old) await (await caches.open(filesCache(user))).delete(fileKey(user, path, old.etag));
   await put(r);
+  if (!(await stillTheirs(r))) return;
   await trim(user, l);
 }
 
 export type PinResult = true | 'no-version' | 'unreadable' | 'too-big';
 
 /** "Keep offline" on or off. Resolves true, or why it couldn't. */
-export async function pin(user: number, path: string, etag: string | null, url: string, on: boolean): Promise<PinResult> {
+export async function pin(user: number, path: string, etag: string | null, url: string, on: boolean, size?: number): Promise<PinResult> {
   const l = limits(capMb());
   const old = await get(user, path);
   if (!on) {
@@ -131,10 +163,11 @@ export async function pin(user: number, path: string, etag: string | null, url: 
     await put({ ...old, pinned: true, used: Date.now() });
     return true;
   }
-  const r = await store(user, path, etag, url, true, l).catch(() => 'unreadable' as const);
+  const r = await store(user, path, etag, url, true, l, size).catch(() => 'unreadable' as const);
   if (typeof r === 'string') return r;
   if (old) await (await caches.open(filesCache(user))).delete(fileKey(user, path, old.etag));
   await put(r);
+  if (!(await stillTheirs(r))) return 'unreadable';
   await trim(user, l);
   return true;
 }

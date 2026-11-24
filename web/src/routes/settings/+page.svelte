@@ -80,7 +80,7 @@
   <h2 class={h2Class}>Offline</h2>
   <form class={cn(cardClass, 'grid gap-2 p-4')} onsubmit={saveCap}>
     <label class={labelClass}>Storage for files kept offline (MB)
-      <Input type="number" min="50" step="50" bind:value={capMb} placeholder="500" />
+      <Input type="number" min="1" step="1" bind:value={capMb} placeholder="500" />
     </label>
     <p class={mutedClass}>The 50 most recently opened files under 20 MB, and the ones you keep offline, up to this much. Signing out removes them.</p>
     <div><Button type="submit" variant="outline">Save</Button></div>

@@ -76,6 +76,8 @@ async function listing(req: Request, user: string): Promise<Response> {
       // (And only while they are signed in here: never after a sign-out.)
       if (String(owner) === user && String(await signedInHere()) === user) {
         await cache.put(key, new Response(body, { headers: { 'content-type': 'application/json', [OFFLINE_AT]: new Date().toISOString() } }));
+        // (Signed out meanwhile: what was just written goes again.)
+        if (String(await signedInHere()) !== user) await caches.delete(`${LISTS}${user}`);
       } else await cache.delete(key);
     } else if (r.status === 401 || r.status === 403) {
       // Not this user's (any more): nothing of it stays.
