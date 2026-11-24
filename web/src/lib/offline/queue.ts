@@ -186,7 +186,6 @@ async function withBytes(j: Job, now = Date.now()): Promise<Job> {
   return lost;
 }
 
-/** Are a job's bytes still here? */
 /** Are a job's bytes here, or held by a page that is still open? */
 export async function hasBytes(id: string): Promise<boolean> {
   const b = await bytesOf(id);
@@ -234,8 +233,8 @@ export async function save(j: Job) {
   else await tx('jobs', 'readwrite', (s) => void s.put({ ...j, blob: undefined }));
 }
 
-/** Save a job's state only if it is still queued: one cancelled (from any
- *  tab) is never written back. Resolves whether it was. */
+/** Save a job's state only if it still exists: one cancelled or dropped
+ *  (from any context) is never written back. Resolves whether it was. */
 export async function update(j: Job): Promise<boolean> {
   const m = await memory();
   if (m) {
@@ -411,6 +410,8 @@ export async function run(job: Job, d: Deps, signal?: AbortSignal, restarts = 0)
         }
       }
       if (!j.session) {
+        // (Dropped meanwhile, e.g. by a sign-out elsewhere: no new session.)
+        if (!(await exists(j.id))) throw new DOMException('cancelled', 'AbortError');
         const r = await call(d, '/api/uploads', {
           ...json({
             path: j.path,
@@ -544,15 +545,31 @@ export function halt() {
 /** Resolves false when it is too late: the file is being saved (here or
  *  in another context), so cancelling could only pretend. */
 export async function cancel(id: string, d: Pick<Deps, 'fetch' | 'changed'>): Promise<boolean> {
+  // Checked and removed in one transaction: a runner (any context) writes
+  // 'committing' before it sends the commit, and writes nothing once the
+  // job is gone, so the two can't both go ahead.
   const m = await memory();
-  const stored = m ? m.get(id) : await tx<Job | undefined>('jobs', 'readonly', (s) => s.get(id));
-  if (stored?.state === 'committing') return false;
+  let j: Job | undefined;
+  let late = false;
+  if (m) {
+    j = m.get(id);
+    late = j?.state === 'committing';
+    if (!late) m.delete(id);
+  } else {
+    await tx('jobs', 'readwrite', (s) => {
+      const g = s.get(id);
+      g.onsuccess = () => {
+        j = g.result;
+        late = j?.state === 'committing';
+        if (j && !late) s.delete(id);
+      };
+    });
+  }
+  if (late) return false;
   running.get(id)?.abort();
-  const j = await load(id);
+  await remove(id); // (its bytes and owner lock)
   if (!j) return true;
-  const c = step(j, { t: 'cancel' });
-  await remove(id);
-  d.changed?.(c);
+  d.changed?.(step(j, { t: 'cancel' }));
   if (j.session) {
     await d
       .fetch(`/api/uploads/${j.session}`, { method: 'DELETE', headers: H, credentials: 'same-origin' })
@@ -565,7 +582,11 @@ export async function cancel(id: string, d: Pick<Deps, 'fetch' | 'changed'>): Pr
  *  still signed in). The local queue goes with the offline database. */
 export async function abandonSessions(user: number, f: typeof fetch): Promise<void> {
   for (const [, ctl] of running) ctl.abort();
-  for (const j of await jobs(user)) {
+  // The jobs go first: a runner in another context then stops at its next
+  // save, and never opens a new session for them.
+  const all = await jobs(user);
+  for (const j of all) await remove(j.id);
+  for (const j of all) {
     if (j.session) await f(`/api/uploads/${j.session}`, { method: 'DELETE', headers: H, credentials: 'same-origin' }).catch(() => undefined);
   }
 }

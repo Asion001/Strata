@@ -54,7 +54,10 @@
           // Check the session for real again (it may have expired): when the
           // network returns, and every half minute meanwhile (a server that
           // was down doesn't change navigator.onLine).
-          window.addEventListener('online', () => void checkSession(), { once: true });
+          if (!recheckOnline) {
+            recheckOnline = true;
+            window.addEventListener('online', () => void checkSession());
+          }
           clearTimeout(recheck);
           recheck = setTimeout(() => void checkSession(), 30_000);
         }
@@ -64,6 +67,7 @@
   }
 
   let recheck: ReturnType<typeof setTimeout> | undefined;
+  let recheckOnline = false; // (one listener, however often it fails)
   onMount(() => void watchUpdates());
   // Signed out in another tab: this one leaves too.
   onMount(() => {

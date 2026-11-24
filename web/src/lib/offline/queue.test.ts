@@ -402,6 +402,8 @@ describe('queue', () => {
     await add(job({ id: 'b' }));
     await q.abandonSessions(1, srv.fetch as unknown as typeof fetch);
     expect(srv.log).toEqual(['DELETE /api/uploads/s1']);
+    expect(await q.jobs(1)).toEqual([]); // (the jobs go first)
+    await add(job({ id: 'c', session: 's2' }));
     const down = (async () => { throw new TypeError('offline'); }) as unknown as typeof fetch;
     await expect(q.abandonSessions(1, down)).resolves.toBeUndefined();
   });
@@ -671,6 +673,12 @@ describe('network and file errors', () => {
     const j = await fresh({ state: 'committing', chunks, session: 's1' });
     expect(await q.cancel(j.id, { fetch: srv.fetch as unknown as typeof fetch })).toBe(false);
     expect(await q.exists(j.id)).toBe(true);
+    expect(srv.log).toEqual([]);
+  });
+
+  it('a job dropped before its session exists never opens one', async () => {
+    const j = job({ state: 'uploading', chunks }); // (never saved: dropped)
+    await expect(q.run(j, deps())).rejects.toMatchObject({ name: 'AbortError' });
     expect(srv.log).toEqual([]);
   });
 });

@@ -311,8 +311,8 @@ let waiting: ServiceWorker | null = null;
  *  offers a reload (which hands over to it). */
 export async function watchUpdates() {
   if (typeof navigator === 'undefined' || !navigator.serviceWorker) return;
-  const reg = await navigator.serviceWorker.getRegistration();
-  if (!reg) return;
+  // (On a first visit the worker registers after the page loads: wait.)
+  const reg = await navigator.serviceWorker.ready;
   const offer = (w: ServiceWorker | null) => {
     // (A first install has no controller: nothing to replace.)
     if (w && navigator.serviceWorker.controller) {
@@ -327,20 +327,21 @@ export async function watchUpdates() {
   offer(reg.waiting);
   follow(reg.installing); // (one already installing when the app started)
   reg.addEventListener('updatefound', () => follow(reg.installing));
-  // A new worker took over (from this tab or another): reload, so no tab
-  // keeps running the old app against the new worker and assets.
-  // The tab that asked reloads; any other tab (whose uploads must not be
-  // cut off) gets the banner, and reloads when its user says so. (The
-  // first worker claiming a fresh page is no new version.)
-  const hadController = !!navigator.serviceWorker.controller;
+  // A new worker took over (from this tab or another). The tab that asked
+  // reloads; any other tab (whose uploads must not be cut off) gets the
+  // banner, and reloads when its user says so. The first worker claiming
+  // a fresh page is no new version.
+  let controlled = !!navigator.serviceWorker.controller;
   let reloading = false;
   navigator.serviceWorker.addEventListener('controllerchange', () => {
     if (reloading) return;
     if (asked) {
       reloading = true;
       location.reload();
-    } else if (hadController) {
-      waiting = null;
+    } else if (!controlled) {
+      controlled = true;
+    } else {
+      waiting = null; // (already active: Reload just reloads)
       update.ready = true;
     }
   });
@@ -353,6 +354,7 @@ export async function watchUpdates() {
 let asked = false;
 export function applyUpdate() {
   asked = true;
-  if (!waiting) return location.reload();
+  // (Activated by another tab meanwhile: nothing to hand over to.)
+  if (!waiting || waiting.state === 'activated' || waiting.state === 'redundant') return location.reload();
   waiting.postMessage('skip-waiting');
 }

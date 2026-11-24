@@ -44,5 +44,10 @@ describe('queue without IndexedDB', () => {
     await q.remove(b.id);
     expect(await q.exists(b.id)).toBe(false);
     expect(await q.update(b)).toBe(false);
+    // Too late to cancel while committing (in memory too).
+    const c = { ...q.newJob(1, 'c.txt', new Blob(['c'])), state: 'committing' as const };
+    await q.save(c);
+    expect(await q.cancel(c.id, { fetch })).toBe(false);
+    expect(await q.exists(c.id)).toBe(true);
   });
 });
