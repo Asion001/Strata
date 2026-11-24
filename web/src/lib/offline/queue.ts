@@ -81,7 +81,8 @@ export function step(j: Job, e: Event): Job {
       return { ...j, state: 'failed', error: e.error };
     case 'retry':
       if (j.state !== 'failed') return j;
-      return { ...j, state: 'queued', error: undefined };
+      // A new session (the old one may be what failed: a changed folder).
+      return { ...j, state: 'queued', error: undefined, session: null, sent: [], skipped: 0 };
     case 'cancel':
       if (!isActive(j) && j.state !== 'failed') return j;
       return { ...j, state: 'cancelled' };
@@ -494,6 +495,7 @@ export async function drain(user: number, d: Deps): Promise<'done' | 'offline'> 
       if (halted) break;
       if (!isActive(j)) continue;
       const cur = await load(j.id); // (cancelled meanwhile?)
+      if (cur && cur.state === 'failed' && isActive(j)) d.changed?.(cur); // (its bytes are gone)
       if (!cur || !isActive(cur) || waiting(cur)) continue;
       const ctl = new AbortController();
       running.set(j.id, ctl);
@@ -541,7 +543,7 @@ export async function cancel(id: string, d: Pick<Deps, 'fetch' | 'changed'>): Pr
 /** Sign-out: drop the server sessions of a user's jobs (best effort, while
  *  still signed in). The local queue goes with the offline database. */
 export async function abandonSessions(user: number, f: typeof fetch): Promise<void> {
-  halt();
+  for (const [, ctl] of running) ctl.abort();
   for (const j of await jobs(user)) {
     if (j.session) await f(`/api/uploads/${j.session}`, { method: 'DELETE', headers: H, credentials: 'same-origin' }).catch(() => undefined);
   }

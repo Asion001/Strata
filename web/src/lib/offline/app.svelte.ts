@@ -191,11 +191,20 @@ if (typeof window !== 'undefined') window.addEventListener('online', () => pump(
 async function refresh() {
   const user = queueUser;
   if (user === null) return;
-  const stored = new Set((await (await Queue()).jobs(user).catch(() => [] as Job[])).map((j) => j.id));
-  const gone = uploads.jobs.filter((j) => isActive(j) && !stored.has(j.id));
-  if (!gone.length) return;
-  uploads.jobs = uploads.jobs.filter((j) => !gone.includes(j));
-  for (const j of gone) onDone?.(j);
+  let stored: Job[];
+  try {
+    stored = await (await Queue()).jobs(user);
+  } catch {
+    return; // (can't read it now: leave the list as it is)
+  }
+  const byId = new Map(stored.map((j) => [j.id, j]));
+  const gone = uploads.jobs.filter((j) => isActive(j) && !byId.has(j.id));
+  // The stored state wins (another context may have moved it on or failed it).
+  uploads.jobs = uploads.jobs.filter((j) => !gone.includes(j)).map((j) => {
+    const s = byId.get(j.id);
+    return s && isActive(j) ? { ...s, blob: j.blob } : j;
+  });
+  for (const j of [...gone, ...uploads.jobs.filter((j) => !isActive(j) && byId.has(j.id))]) onDone?.(j);
 }
 if (typeof document !== 'undefined')
   document.addEventListener('visibilitychange', () => {
@@ -266,7 +275,12 @@ export async function retryUpload(id: string): Promise<boolean> {
 /** Done, failed and cancelled jobs leave the list (failed ones the queue too). */
 export async function clearFinished() {
   const queue = await Queue();
-  for (const j of uploads.jobs) if (j.state === 'failed') await queue.remove(j.id);
+  for (const j of uploads.jobs) {
+    if (j.state !== 'failed') continue;
+    // (Its server session and staged chunks go too.)
+    if (j.session) await fetch(`/api/uploads/${j.session}`, { method: 'DELETE', headers: { 'x-strata': '1' } }).catch(() => {});
+    await queue.remove(j.id);
+  }
   uploads.jobs = uploads.jobs.filter((j) => isActive(j));
 }
 

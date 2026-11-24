@@ -14,10 +14,10 @@
 // A new version installs and waits; the app offers a reload, which tells
 // it to take over (see watchUpdates in lib/offline/app.svelte.ts).
 import { build, files, version } from '$service-worker';
-import { LISTS, lookup } from '$lib/offline/recent';
+import { LISTS, lookup, signedInHere } from '$lib/offline/recent';
 import { drain } from '$lib/offline/queue';
 import { chunkFile } from '$lib/offline/chunks';
-import { USER_KEY, META, OFFLINE_AT, SYNC_TAG, NETWORK_ONLY } from '$lib/offline/keys';
+import { OFFLINE_AT, SYNC_TAG, NETWORK_ONLY } from '$lib/offline/keys';
 import { ranged } from '$lib/offline/range';
 
 const sw = self as unknown as ServiceWorkerGlobalScope;
@@ -47,13 +47,6 @@ sw.addEventListener('activate', (event) => {
       .then(() => sw.clients.claim())
   );
 });
-
-/** Who the app says is signed in (written by the app; gone on sign-out). */
-async function currentUser(): Promise<number | null> {
-  const r = await (await caches.open(META)).match(USER_KEY);
-  const n = r ? Number(await r.text()) : NaN;
-  return Number.isInteger(n) && n > 0 ? n : null;
-}
 
 /** A listing: the network, else the last answer for this user and folder. */
 async function listing(req: Request, user: string): Promise<Response> {
@@ -109,7 +102,7 @@ async function content(req: Request): Promise<Response> {
 
 /** This user's stored copy of the requested file, as the route serves it. */
 async function offlineCopy(req: Request): Promise<Response | null> {
-  const user = await currentUser();
+  const user = await signedInHere();
   const url = new URL(req.url);
   const path = url.searchParams.get('path');
   if (user === null || path === null) return null;
@@ -171,11 +164,18 @@ sw.addEventListener('sync', ((event: SyncEvent) => {
       // app registers this sync again when it goes away or offline.
       // (A hidden or closing tab doesn't count: the lock keeps the two
       // from running the queue at the same time.)
+      // (Nor does a sign-in or share page: those don't run the queue.)
       const tabs = await sw.clients.matchAll({ type: 'window', includeUncontrolled: true });
-      if (tabs.some((t) => (t as WindowClient).visibilityState === 'visible')) return;
+      const runs = (t: WindowClient) => {
+        const p = new URL(t.url).pathname;
+        return t.visibilityState === 'visible' && p !== '/login' && !p.startsWith('/s/');
+      };
+      if (tabs.some((t) => runs(t as WindowClient))) return;
       // The signed-in user, from the server (the queue only runs as them).
       const r = await fetch('/api/auth/me', { headers: { 'x-strata': '1' } });
-      if (!r.ok) return;
+      // A gateway answering for an unreachable server: try again later.
+      if (r.status >= 502) throw new Error(`HTTP ${r.status}`);
+      if (!r.ok) return; // (signed out: the queue waits for its user)
       const me = (await r.json()) as { id: number };
       const out = await drain(me.id, { fetch: (u, i) => fetch(u, i), chunk: (b) => chunkFile(b), sleep: (a) => new Promise((res) => setTimeout(res, 1000 * 2 ** a)) });
       // Still offline: fail, so the browser tries again later.

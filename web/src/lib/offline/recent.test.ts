@@ -4,6 +4,10 @@ import { MemoryCacheStorage } from '../testing/caches';
 import * as recent from './recent';
 import { MB } from './lru';
 import { tx } from './idb';
+import { META, USER_KEY } from './keys';
+
+/** Who signed in on this device (as the app records it). */
+const signIn = async (user: number) => (await caches.open(META)).put(USER_KEY, new Response(String(user)));
 
 let store: MemoryCacheStorage;
 const ls = new Map<string, string>();
@@ -27,6 +31,7 @@ beforeEach(async () => {
   served = {};
   fetchMock.mockClear();
   await recent.clearAll();
+  await signIn(1);
 });
 afterEach(() => vi.unstubAllGlobals());
 
@@ -43,7 +48,7 @@ describe('recent files', () => {
     expect(r!.headers.get('set-cookie')).toBeNull();
     // Another user sees nothing of it.
     expect(await recent.lookup(2, 'a.png')).toBeUndefined();
-    expect(await store.keys()).toEqual([recent.filesCache(1)]);
+    expect((await store.keys()).filter((k) => k !== META)).toEqual([recent.filesCache(1)]);
   });
 
   it('opening the same version again only marks it used', async () => {
@@ -152,8 +157,11 @@ describe('recent files', () => {
     expect(await recent.pin(1, 'a', '"v"', '/c/a', true)).toBe('too-big');
   });
 
-  it('sign-out where there is no Cache Storage (plain http) still clears the rest', async () => {
+  it('without Cache Storage (plain http), sign-in and sign-out still clear the rest', async () => {
+    await tx('jobs', 'readwrite', (s) => void s.put({ id: 'other', user: 9 }));
     vi.stubGlobal('caches', undefined);
+    await recent.keepOnlyUser(1);
+    expect(await tx('jobs', 'readonly', (s) => s.getAllKeys())).toEqual([]);
     await expect(recent.clearAll()).resolves.toBeUndefined();
   });
 
@@ -190,17 +198,19 @@ describe('recent files', () => {
   it('sign-out clears every user’s files and listings, and nothing else', async () => {
     served['/c/a'] = { body: file(3) };
     await recent.remember(1, 'a', '"v"', '/c/a');
+    await signIn(2);
     await recent.remember(2, 'a', '"v"', '/c/a');
     await (await caches.open(`${recent.LISTS}1`)).put('/l', new Response('{}'));
     await (await caches.open('strata-shell-x')).put('/', new Response('shell'));
     await recent.clearAll();
-    expect(await store.keys()).toEqual(['strata-shell-x']);
+    expect((await store.keys()).filter((k) => k !== META)).toEqual(['strata-shell-x']);
     expect(await recent.list(1)).toEqual([]);
   });
 
   it('a new user drops what other users left (files, listings, queued uploads)', async () => {
     served['/c/a'] = { body: file(3) };
     await recent.remember(1, 'a', '"v"', '/c/a');
+    await signIn(2);
     await recent.remember(2, 'b', '"v"', '/c/a');
     await (await caches.open(`${recent.LISTS}1`)).put('/l', new Response('{}'));
     await (await caches.open(`${recent.LISTS}2`)).put('/l', new Response('{}'));
@@ -210,7 +220,7 @@ describe('recent files', () => {
       s.put({ id: 'j2', user: 2 });
     });
     await recent.keepOnlyUser(2);
-    expect((await store.keys()).sort()).toEqual([recent.filesCache(2), `${recent.LISTS}2`, 'strata-shell-x'].sort());
+    expect((await store.keys()).filter((k) => k !== META).sort()).toEqual([recent.filesCache(2), `${recent.LISTS}2`, 'strata-shell-x'].sort());
     expect(await recent.list(1)).toEqual([]);
     expect((await recent.list(2)).length).toBe(1);
     expect(await tx('jobs', 'readonly', (s) => s.getAllKeys())).toEqual(['j2']);
@@ -234,5 +244,15 @@ describe('recent files', () => {
     expect(recent.capMb()).toBeNull();
     expect(() => recent.setCapMb(5)).not.toThrow();
     expect(() => recent.setCapMb(null)).not.toThrow();
+  });
+
+  it('never stores for a user who is not the one signed in here (a stale tab)', async () => {
+    served['/c/a'] = { body: file(3) };
+    await signIn(2);
+    await recent.remember(1, 'a', '"v"', '/c/a');
+    expect(await recent.pin(1, 'a', '"v"', '/c/a', true)).toBe('unreadable');
+    expect(fetchMock).not.toHaveBeenCalled();
+    await store.delete(META);
+    expect(await recent.signedInHere()).toBeNull();
   });
 });

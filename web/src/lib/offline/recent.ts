@@ -5,7 +5,14 @@
 
 import { byUser, tx, wipe } from './idb';
 import { admits, evictions, limits, type Limits } from './lru';
-import { NETWORK_ONLY } from './keys';
+import { META, NETWORK_ONLY, USER_KEY } from './keys';
+
+/** Who signed in on this device last (written at sign-in). */
+export async function signedInHere(): Promise<number | null> {
+  const r = await (await caches.open(META)).match(USER_KEY);
+  const n = r ? Number(await r.text()) : NaN;
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
 
 export interface Recent {
   /** `${user}|${path}` */
@@ -62,6 +69,9 @@ export async function trim(user: number, l: Limits = limits(capMb())) {
 /** Store a file's bytes (fetched from `url`) under its version. */
 async function store(user: number, path: string, etag: string, url: string, pinned: boolean, l: Limits): Promise<Recent | 'unreadable' | 'too-big'> {
   const others = (await list(user)).filter((r) => r.pinned && r.path !== path).reduce((a, r) => a + r.size, 0);
+  // Only for whoever is signed in on this device now (a tab can be stale:
+  // the bytes come with the current session, maybe someone else's).
+  if ((await signedInHere()) !== user) return 'unreadable';
   const r = await fetch(url, { credentials: 'same-origin', headers: { [NETWORK_ONLY]: '1' } });
   if (!r.ok) return 'unreadable';
   const declared = Number(r.headers.get('content-length') ?? NaN);
@@ -145,7 +155,7 @@ export async function clearAll(): Promise<void> {
 
 /** Someone signed in: drop what other users left on this device. */
 export async function keepOnlyUser(user: number): Promise<void> {
-  for (const k of await caches.keys()) {
+  if (typeof caches !== 'undefined') for (const k of await caches.keys()) {
     const owner = k.startsWith(FILES) ? k.slice(FILES.length) : k.startsWith(LISTS) ? k.slice(LISTS.length) : null;
     if (owner !== null && owner !== String(user)) await caches.delete(k);
   }

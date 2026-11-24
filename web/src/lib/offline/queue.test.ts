@@ -144,7 +144,7 @@ describe('state machine', () => {
     expect(f).toMatchObject({ state: 'failed', error: 'boom' });
     expect(q.step(f, { t: 'fail', error: 'again' })).toBe(f);
     const r = q.step(f, { t: 'retry' });
-    expect(r).toMatchObject({ state: 'queued', error: undefined });
+    expect(r).toMatchObject({ state: 'queued', error: undefined, session: null, sent: [], skipped: 0 });
     expect(q.step(r, { t: 'retry' })).toBe(r);
     expect(q.step(f, { t: 'cancel' }).state).toBe('cancelled');
     const done = job({ state: 'done' });
@@ -520,13 +520,6 @@ describe('cancel from another tab, and sign-out', () => {
     expect(srv.committed).toEqual(['s2']);
   });
 
-  it('after halt (sign-out) the queue runs nothing more', async () => {
-    await add(job({ id: 'a' }));
-    q.halt();
-    expect(await q.drain(1, deps())).toBe('done');
-    expect(srv.log).toEqual([]);
-  });
-
   it('bytes in another page’s memory: the job waits while that page owns it', async () => {
     const held = new Set<string>();
     const request = vi.fn((name: string, fn: () => Promise<void>) => {
@@ -630,5 +623,10 @@ describe('network and file errors', () => {
     await expect(q.run(j, deps({ fetch: f }))).rejects.toBeInstanceOf(q.Offline);
     expect(await q.load(j.id)).toBeUndefined();
   });
-});
 
+  it('the queue reports a job it found gone (for the panel)', async () => {
+    await q.save(job({ id: 'gone', created: Date.now() - q.PENDING_GRACE - 1 }));
+    expect(await q.drain(1, deps())).toBe('done');
+    expect(changes.map((c) => [c.id, c.state])).toEqual([['gone', 'failed']]);
+  });
+});
