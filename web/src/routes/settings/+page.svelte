@@ -24,6 +24,19 @@
       old_password = new_password = '';
     } catch (err) { toastError(err); } finally { busy = false; }
   }
+  // The offline cache's size cap (this device only).
+  let capMb = $state<number | null>(null);
+  $effect(() => {
+    import('$lib/offline/recent').then((r) => (capMb = r.capMb() ? Number(r.capMb()) : null));
+  });
+  async function saveCap(e: Event) {
+    e.preventDefault();
+    const r = await import('$lib/offline/recent');
+    r.setCapMb(capMb && capMb >= 1 ? Math.floor(capMb) : null);
+    if (session.user) await r.trim(session.user.id).catch(() => {});
+    toast('Saved.', 'success');
+  }
+
   async function logout() {
     // Unsaved editor drafts hold file contents: don't leave them behind.
     const { markSignedOut, clearAllDrafts } = await import('$lib/editor/drafts');
@@ -63,6 +76,15 @@
       {/each}
     </ul>
   </nav>
+
+  <h2 class={h2Class}>Offline</h2>
+  <form class={cn(cardClass, 'grid gap-2 p-4')} onsubmit={saveCap}>
+    <label class={labelClass}>Storage for files kept offline (MB)
+      <Input type="number" min="50" step="50" bind:value={capMb} placeholder="500" />
+    </label>
+    <p class={mutedClass}>The 50 most recently opened files under 20 MB, and the ones you keep offline, up to this much. Signing out removes them.</p>
+    <div><Button type="submit" variant="outline">Save</Button></div>
+  </form>
 
   <h2 class={h2Class}>Change password</h2>
   <form class={cn(cardClass, 'grid gap-4 p-4')} onsubmit={change}>

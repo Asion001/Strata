@@ -121,7 +121,7 @@ async function memory(): Promise<Map<string, Job> | null> {
 /** Keep a job's bytes. Resolves how: 'blob', 'buffers' or 'memory'. */
 export async function keepBytes(id: string, blob: Blob): Promise<'blob' | 'buffers' | 'memory'> {
   if (await memory()) {
-    inMemory.set(id, blob);
+    holdBytes(id, blob);
     return 'memory';
   }
   try {
@@ -138,7 +138,7 @@ export async function keepBytes(id: string, blob: Blob): Promise<'blob' | 'buffe
         // (fall through)
       }
     }
-    inMemory.set(id, blob);
+    holdBytes(id, blob);
     await tx('blobs', 'readwrite', (s) => void s.put({ memory: true }, id)).catch(() => {});
     return 'memory';
   }
@@ -167,13 +167,19 @@ export const waiting = (j: Job) => j.blob === NONE;
 
 /** With its bytes; a job whose bytes are gone (kept in memory only, and the
  *  page was reloaded) is failed for good, and saved so. */
-async function withBytes(j: Job): Promise<Job> {
+async function withBytes(j: Job, now = Date.now()): Promise<Job> {
   if (!isActive(j)) return { ...j, blob: NONE }; // (no reading for finished jobs)
   const blob = await bytesOf(j.id);
   if (blob instanceof Blob) return { ...j, blob };
-  // Still being stored, or held in another tab's memory (maybe uploading
-  // there now): it waits, never failed from here; the user can cancel it.
-  if (blob === 'pending') return { ...j, blob: NONE };
+  // Still being stored, or held in a tab's memory: it waits while that tab
+  // is open (it holds the job's owner lock). With no owner left, or where
+  // there are no locks after a long grace, the bytes are gone.
+  if (blob === 'pending') {
+    const alive = await ownerAlive(j.id);
+    if (alive || (alive === null && now - j.created < PENDING_GRACE) || (alive === false && now - j.created < OWNERLESS_GRACE)) {
+      return { ...j, blob: NONE };
+    }
+  }
   const lost: Job = { ...j, blob: new Blob([]), state: 'failed', error: GONE };
   await update(lost);
   return lost;
@@ -182,14 +188,38 @@ async function withBytes(j: Job): Promise<Job> {
 /** Are a job's bytes still here? */
 export const hasBytes = async (id: string) => (await bytesOf(id)) instanceof Blob;
 
-/** Keep the bytes in memory for this page (it can upload them at once,
- *  while `keepBytes` stores them for later). */
-export const holdBytes = (id: string, blob: Blob) => void inMemory.set(id, blob);
+/** Without Web Locks, how long bytes may stay unseen before they count as
+ *  gone; with them, how long a job may have no owner (just queued). */
+export const PENDING_GRACE = 60 * 60 * 1000;
+export const OWNERLESS_GRACE = 2 * 60 * 1000;
+const owners = new Map<string, () => void>();
+const lockName = (id: string) => `strata-upload-owner-${id}`;
+const locks = () => (globalThis.navigator as Navigator | undefined)?.locks;
 
+/** Is some page holding this job's bytes in memory? null: can't tell. */
+async function ownerAlive(id: string): Promise<boolean | null> {
+  const l = locks();
+  if (!l?.query) return null;
+  const { held = [] } = await l.query();
+  return held.some((h) => h.name === lockName(id));
+}
+
+/** Keep the bytes in memory for this page (it can upload them at once,
+ *  while `keepBytes` stores them for later), and own the job meanwhile. */
+export function holdBytes(id: string, blob: Blob) {
+  inMemory.set(id, blob);
+  const l = locks();
+  if (l && !owners.has(id)) {
+    void l.request(lockName(id), () => new Promise<void>((release) => owners.set(id, release)));
+  }
+}
+
+/** A user's jobs, oldest first: their state only (their bytes are read by
+ *  `load`, for the one about to run). */
 export async function jobs(user: number): Promise<Job[]> {
   const m = await memory();
   const all = m ? [...m.values()].filter((j) => j.user === user) : await byUser<Job>('jobs', user);
-  return Promise.all(all.sort((a, b) => a.created - b.created).map(withBytes));
+  return all.sort((a, b) => a.created - b.created).map((j) => ({ ...j, blob: NONE }));
 }
 /** Save a job's state (never its bytes: see `keepBytes`). */
 export async function save(j: Job) {
@@ -219,6 +249,8 @@ export async function update(j: Job): Promise<boolean> {
 }
 export async function remove(id: string) {
   inMemory.delete(id);
+  owners.get(id)?.();
+  owners.delete(id);
   const m = await memory();
   if (m) return void m.delete(id);
   await tx('jobs', 'readwrite', (s) => void s.delete(id));

@@ -28,7 +28,7 @@
     if (isPublic || session.checked) return;
     // A sign-out that couldn't reach the server ends that session first.
     finishPendingLogout(() => api('POST', '/api/auth/logout')).then((pending) => {
-      if (pending) {
+      if (pending !== 'none') {
         session.checked = true;
         return goto('/login');
       }

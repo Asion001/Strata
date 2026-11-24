@@ -19,9 +19,12 @@
     try {
       // A sign-out that couldn't reach the server ends that session first.
       const offline = await import('$lib/offline/app.svelte');
-      await offline.finishPendingLogout(() => api('POST', '/api/auth/logout'));
+      // (Signing in can't wait for it: the browser has one session cookie,
+      // and ending the old session later would end the new one.)
+      if ((await offline.finishPendingLogout(() => api('POST', '/api/auth/logout'))) === 'unreachable') {
+        throw new Error("The server can't be reached. Try again when you're online.");
+      }
       const r = await api('POST', '/api/auth/login', { username, password });
-      offline.clearPendingLogout();
       session.user = r.user;
       session.checked = true;
       // Unsaved drafts of anyone else who used this browser go away.

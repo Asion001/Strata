@@ -6,7 +6,7 @@
 import { META, SYNC_TAG, USER_KEY } from './keys';
 import { isActive, type Job } from './jobs';
 import type { Deps } from './queue';
-import type { User } from '../api';
+import { ApiError, type User } from '../api';
 
 const Queue = () => import('./queue');
 const Recent = () => import('./recent');
@@ -21,11 +21,27 @@ export async function signedIn(u: User) {
   try {
     localStorage.setItem(LAST_USER, JSON.stringify({ id: u.id, username: u.username, is_admin: u.is_admin }));
   } catch {}
+  // (Apart: with no Cache Storage, other users' queued uploads still go.)
   try {
-    await (await caches.open(META)).put(USER_KEY, new Response(String(u.id)));
+    if (typeof caches !== 'undefined') await (await caches.open(META)).put(USER_KEY, new Response(String(u.id)));
+  } catch {}
+  try {
     await (await Recent()).keepOnlyUser(u.id);
   } catch {}
+  dropOldUploadKeys();
 }
+
+/** The old uploader kept resume keys (named after file paths) in
+ *  localStorage; nothing reads them now. */
+function dropOldUploadKeys() {
+  try {
+    for (const k of Object.keys(localStorage)) if (k.startsWith('strata-upload:')) localStorage.removeItem(k);
+  } catch {}
+}
+
+/** Did a request fail for want of the server (no answer, or a gateway
+ *  answering for it), rather than with the server's own error? */
+const unreachable = (e: unknown) => !(e instanceof ApiError) || e.status >= 502;
 
 /** Offline, the user who was signed in last (until they sign out). */
 export function lastUser(): User | null {
@@ -50,7 +66,9 @@ export async function signOut(user: number | null, logout: () => Promise<unknown
   await Promise.race([draining, new Promise((r) => setTimeout(r, 3000))]);
   if (user !== null) await queue.abandonSessions(user, fetch).catch(() => {});
   let ended = true;
-  await logout().catch(() => (ended = false));
+  // (The server answering with an error still ended nothing it can't end.)
+  await logout().catch((e) => (ended = !unreachable(e)));
+  dropOldUploadKeys();
   try {
     if (ended) localStorage.removeItem(PENDING_LOGOUT);
     else localStorage.setItem(PENDING_LOGOUT, '1');
@@ -64,28 +82,25 @@ export async function signOut(user: number | null, logout: () => Promise<unknown
   return ended;
 }
 
-/** Someone signed in: a pending sign-out is moot. */
-export function clearPendingLogout() {
-  try {
-    localStorage.removeItem(PENDING_LOGOUT);
-  } catch {}
-}
-
 /** A sign-out that couldn't reach the server: end that session now, before
  *  anything else. Resolves true when one was pending (the caller goes to the
  *  sign-in page). */
-export async function finishPendingLogout(logout: () => Promise<unknown>): Promise<boolean> {
+export async function finishPendingLogout(logout: () => Promise<unknown>): Promise<'none' | 'done' | 'unreachable'> {
   try {
-    if (!localStorage.getItem(PENDING_LOGOUT)) return false;
+    if (!localStorage.getItem(PENDING_LOGOUT)) return 'none';
   } catch {
-    return false;
+    return 'none';
   }
   try {
     await logout();
+  } catch (e) {
+    // Still unreachable: stay signed out here, try again next time.
+    if (unreachable(e)) return 'unreachable';
+  }
+  try {
     localStorage.removeItem(PENDING_LOGOUT);
   } catch {}
-  // (Still unreachable: stay signed out here, try again next time.)
-  return true;
+  return 'done';
 }
 
 // ---------------------------------------------------------------- network
@@ -140,7 +155,8 @@ export function pump() {
       // server was unreachable for a while): try again later by itself.
       if (out === 'offline' && navigator.onLine) {
         clearTimeout(retryTimer);
-        retryTimer = setTimeout(pump, (retryDelay = Math.min(retryDelay * 2, 5 * 60_000)));
+        retryTimer = setTimeout(pump, retryDelay);
+        retryDelay = Math.min(retryDelay * 2, 5 * 60_000);
       } else retryDelay = 15_000;
     })
     .catch(() => {})

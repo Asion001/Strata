@@ -429,7 +429,7 @@ describe('stored bytes', () => {
     const j = job();
     expect(await q.keepBytes(j.id, new Blob(['hello'], { type: 'text/plain' }))).toBe('buffers');
     await q.save(j);
-    const back = (await q.jobs(1))[0];
+    const back = (await q.load(j.id))!;
     expect([await back.blob.text(), back.blob.type]).toEqual(['hello', 'text/plain']);
     spy.mockRestore();
   });
@@ -455,12 +455,13 @@ describe('stored bytes', () => {
     expect(await q.load('big')).toBeUndefined();
   });
 
-  it('a job with no bytes here waits (another tab may hold them); never failed from here', async () => {
-    const j = job({ id: 'lost' });
-    await q.save(j);
-    const back = (await q.load('lost'))!;
-    expect(back.state).toBe('queued');
-    expect(q.waiting(back)).toBe(true);
+  it('a job with no bytes here waits for a while, then counts as gone (no locks to ask)', async () => {
+    const fresh1 = q.newJob(1, 'p', new Blob(['x']));
+    await q.save(fresh1);
+    expect(q.waiting((await q.load(fresh1.id))!)).toBe(true);
+    const old = job({ id: 'lost', created: Date.now() - q.PENDING_GRACE - 1 });
+    await q.save(old);
+    expect((await q.load('lost'))!).toMatchObject({ state: 'failed', error: q.GONE });
     // A finished one is just listed.
     await q.save(job({ id: 'old', state: 'failed', error: 'x' }));
     expect((await q.load('old'))!.error).toBe('x');
@@ -526,12 +527,39 @@ describe('cancel from another tab, and sign-out', () => {
     expect(srv.log).toEqual([]);
   });
 
-  it('bytes kept in another page’s memory: the job waits here', async () => {
-    const j = job({ id: 'elsewhere' });
+  it('bytes in another page’s memory: the job waits while that page owns it', async () => {
+    const held = new Set<string>();
+    const request = vi.fn((name: string, fn: () => Promise<void>) => {
+      held.add(name);
+      return fn().then(() => void held.delete(name));
+    });
+    vi.stubGlobal('navigator', { locks: { request, query: async () => ({ held: [...held].map((name) => ({ name })) }) } });
+    const old = Date.now() - q.OWNERLESS_GRACE - 1;
+    const j = job({ id: 'elsewhere', created: old });
     await q.save(j);
     await tx('blobs', 'readwrite', (st) => void st.put({ memory: true }, 'elsewhere'));
-    const back = (await q.load('elsewhere'))!;
-    expect([back.state, q.waiting(back)]).toEqual(['queued', true]);
+    // Another page holds it (its owner lock).
+    held.add('strata-upload-owner-elsewhere');
+    expect(q.waiting((await q.load('elsewhere'))!)).toBe(true);
+    // No owner, but just queued: waits.
+    held.clear();
+    await q.save({ ...j, id: 'young', created: Date.now() });
+    await tx('blobs', 'readwrite', (st) => void st.put({ memory: true }, 'young'));
+    expect(q.waiting((await q.load('young'))!)).toBe(true);
+    // No owner for long: gone.
+    expect((await q.load('elsewhere'))!).toMatchObject({ state: 'failed', error: q.GONE });
+    // This page owning one: a lock, released when the job goes.
+    q.holdBytes('mine', new Blob(['m']));
+    q.holdBytes('mine', new Blob(['m'])); // (once)
+    await vi.waitFor(() => expect(held.has('strata-upload-owner-mine')).toBe(true));
+    expect(request).toHaveBeenCalledTimes(1);
+    await q.remove('mine');
+    await vi.waitFor(() => expect(held.has('strata-upload-owner-mine')).toBe(false));
+    // Locks without query: can't tell, so the long grace applies.
+    vi.stubGlobal('navigator', { locks: { request } });
+    await q.save({ ...j, id: 'nq', created: old });
+    await tx('blobs', 'readwrite', (st) => void st.put({ memory: true }, 'nq'));
+    expect(q.waiting((await q.load('nq'))!)).toBe(true);
   });
 
   it('an unreachable server behind a proxy (502, 530…) is offline, not a failure', async () => {

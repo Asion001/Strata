@@ -59,13 +59,18 @@ async function currentUser(): Promise<number | null> {
 async function listing(req: Request, user: string): Promise<Response> {
   const cache = await caches.open(`${LISTS}${user}`);
   const key = new URL(req.url).pathname + new URL(req.url).search;
+  let r: Response;
   try {
-    const r = await fetch(req);
-    // A gateway answering for an unreachable server: as good as offline.
-    if (r.status >= 502) {
-      const hit = await cache.match(key);
-      if (hit) return hit;
-    }
+    r = await fetch(req);
+  } catch (e) {
+    const hit = await cache.match(key);
+    if (hit) return hit; // (carries when it was saved: the app shows a banner)
+    throw e;
+  }
+  // A gateway answering for an unreachable server: as good as offline.
+  if (r.status >= 502) return (await cache.match(key)) ?? r;
+  // Keeping a copy is best effort: a full disk never costs the answer.
+  try {
     if (r.ok) {
       const body = await r.clone().arrayBuffer();
       // Kept only when it is this user's (the server says whose it is: the
@@ -81,12 +86,8 @@ async function listing(req: Request, user: string): Promise<Response> {
       // Not this user's (any more): nothing of it stays.
       await cache.delete(key);
     }
-    return r;
-  } catch (e) {
-    const hit = await cache.match(key);
-    if (hit) return hit; // (carries when it was saved: the app shows a banner)
-    throw e;
-  }
+  } catch {}
+  return r;
 }
 
 /** File bytes: the network; offline, the recent-files cache. */
