@@ -71,7 +71,8 @@ async function store(user: number, path: string, etag: string, url: string, pinn
   const others = (await list(user)).filter((r) => r.pinned && r.path !== path).reduce((a, r) => a + r.size, 0);
   // Only for whoever is signed in on this device now (a tab can be stale:
   // the bytes come with the current session, maybe someone else's).
-  if ((await signedInHere()) !== user) return 'unreadable';
+  const here = await signedInHere();
+  if (here !== null && here !== user) return 'unreadable';
   const r = await fetch(url, { credentials: 'same-origin', headers: { [NETWORK_ONLY]: '1' } });
   if (!r.ok) return 'unreadable';
   const declared = Number(r.headers.get('content-length') ?? NaN);

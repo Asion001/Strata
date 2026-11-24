@@ -33,7 +33,7 @@ class Server {
       throw new TypeError('Failed to fetch');
     }
     const st = this.fail?.(url, method);
-    if (st) return new Response(JSON.stringify({ error: `status ${st}` }), { status: st });
+    if (st) return Response.json({ error: `status ${st}` }, { status: st });
     const missing = (id: string) =>
       chunks.map((c, i) => [c, i] as const).filter(([c]) => !this.sessions.get(id)!.has(c.hash) && !this.have.has(c.hash)).map(([, i]) => i);
     let m: RegExpMatchArray | null;
@@ -477,9 +477,10 @@ describe('stored bytes', () => {
   it('bytes held in memory for this page, and whether they are there', async () => {
     q.holdBytes('m', new Blob(['mem']));
     expect(await q.hasBytes('m')).toBe(true);
-    expect(await q.hasBytes('none')).toBe(false);
+    // (None stored yet: maybe still being stored, or in another tab.)
+    expect(await q.hasBytes('none')).toBe(true);
     await q.remove('m');
-    expect(await q.hasBytes('m')).toBe(false);
+    expect(await q.hasBytes('m')).toBe(true); // (likewise, once it is no longer held here)
   });
 });
 
@@ -556,8 +557,9 @@ describe('cancel from another tab, and sign-out', () => {
   });
 
   it('an unreachable server behind a proxy (502, 530…) is offline, not a failure', async () => {
-    srv.fail = (u, m) => (m === 'PUT' ? 502 : null);
-    await expect(q.run(await fresh(), deps())).rejects.toBeInstanceOf(q.Offline);
+    const f = (async (u: RequestInfo | URL, i: RequestInit = {}) =>
+      i.method === 'PUT' ? new Response(new Uint8Array([1]), { status: 502 }) : srv.fetch(u, i)) as unknown as typeof fetch; // (no type at all)
+    await expect(q.run(await fresh(), deps({ fetch: f }))).rejects.toBeInstanceOf(q.Offline);
   });
 
   it('a new job whose bytes are still being stored waits (and the queue skips it)', async () => {
@@ -629,4 +631,37 @@ describe('network and file errors', () => {
     expect(await q.drain(1, deps())).toBe('done');
     expect(changes.map((c) => [c.id, c.state])).toEqual([['gone', 'failed']]);
   });
+
+  it('the server’s own 503 (storage offline) fails that job; a sign-out waits', async () => {
+    srv.fail = (u, m) => (u === '/api/uploads' && m === 'POST' ? 503 : null);
+    expect(await q.run(await fresh(), deps())).toMatchObject({ state: 'failed', error: 'status 503' });
+    srv = new Server();
+    srv.fail = (u, m) => (m === 'PUT' ? 401 : null);
+    await expect(q.run(await fresh(), deps())).rejects.toBeInstanceOf(q.Offline);
+  });
+
+  it('a gateway 503 (HTML, not the server) is offline', async () => {
+    const f = (async (u: RequestInfo | URL, i: RequestInit = {}) =>
+      i.method === 'PUT' ? new Response('<html>down</html>', { status: 503, headers: { 'content-type': 'text/html' } }) : srv.fetch(u, i)) as unknown as typeof fetch;
+    await expect(q.run(await fresh(), deps({ fetch: f }))).rejects.toBeInstanceOf(q.Offline);
+  });
+
+  it('chunks that keep getting 404 fail the job after a few new sessions', async () => {
+    srv.fail = (u, m) => (m === 'PUT' ? 404 : null);
+    const out = await q.run(await fresh(), deps());
+    expect(out.state).toBe('failed');
+    expect(srv.log.filter((l) => l === 'POST /api/uploads')).toHaveLength(3);
+  });
+
+  it('cancelling while hashing stops the hashing', async () => {
+    const ctl = new AbortController();
+    const chunk = vi.fn(async (_b: Blob, signal?: AbortSignal) => {
+      ctl.abort();
+      if (signal?.aborted) throw new DOMException('cancelled', 'AbortError');
+      return chunks;
+    });
+    await expect(q.run(await fresh(), deps({ chunk }), ctl.signal)).rejects.toMatchObject({ name: 'AbortError' });
+    expect(chunk.mock.calls[0][1]).toBe(ctl.signal);
+  });
 });
+

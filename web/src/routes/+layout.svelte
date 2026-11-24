@@ -48,7 +48,11 @@
         // (A gateway answering for an unreachable server counts as no answer.)
         const unreachable = !(e instanceof ApiError) || e.status >= 502;
         const last = unreachable ? lastUser() : null;
-        if (last) session.user = last;
+        if (last) {
+          session.user = last;
+          // Online again: check the session for real (it may have expired).
+          window.addEventListener('online', () => void checkSession(), { once: true });
+        }
         else goto('/login?next=' + encodeURIComponent(page.url.pathname + page.url.search));
       })
       .finally(() => (session.checked = true));

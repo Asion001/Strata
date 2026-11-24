@@ -6,7 +6,7 @@ import type { Chunk } from './queue';
 
 const READ = 16 * 1024 * 1024;
 
-export async function chunkFile(file: Blob, onProgress: (done: number) => void = () => {}): Promise<Chunk[]> {
+export async function chunkFile(file: Blob, signal?: AbortSignal, onProgress: (done: number) => void = () => {}): Promise<Chunk[]> {
   const hasher = await createBLAKE3();
   const hash = (d: Uint8Array) => {
     hasher.init();
@@ -23,6 +23,8 @@ export async function chunkFile(file: Blob, onProgress: (done: number) => void =
   let bufStart = 0;
   let readPos = 0;
   for (;;) {
+    // (Cancelled: stop reading.)
+    if (signal?.aborted) throw new DOMException('cancelled', 'AbortError');
     while (buf.length < MAX_SIZE && readPos < file.size) {
       const next = new Uint8Array(await file.slice(readPos, readPos + READ).arrayBuffer());
       readPos += next.length;

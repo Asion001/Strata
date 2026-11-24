@@ -129,7 +129,7 @@ let onDone: ((j: Job) => void) | null = null;
 
 const deps = (): Deps => ({
   fetch: (u, i) => fetch(u, i),
-  chunk: async (b) => (await import('./chunks')).chunkFile(b),
+  chunk: async (b, signal) => (await import('./chunks')).chunkFile(b, signal),
   sleep: (a) => new Promise((r) => setTimeout(r, 1000 * 2 ** a)),
   online: () => navigator.onLine,
   changed: (j) => {
@@ -198,13 +198,16 @@ async function refresh() {
     return; // (can't read it now: leave the list as it is)
   }
   const byId = new Map(stored.map((j) => [j.id, j]));
+  const wasActive = new Set(uploads.jobs.filter(isActive).map((j) => j.id));
   const gone = uploads.jobs.filter((j) => isActive(j) && !byId.has(j.id));
   // The stored state wins (another context may have moved it on or failed it).
   uploads.jobs = uploads.jobs.filter((j) => !gone.includes(j)).map((j) => {
     const s = byId.get(j.id);
     return s && isActive(j) ? { ...s, blob: j.blob } : j;
   });
-  for (const j of [...gone, ...uploads.jobs.filter((j) => !isActive(j) && byId.has(j.id))]) onDone?.(j);
+  // (Only what changed refreshes the folder.)
+  const ended = uploads.jobs.filter((j) => !isActive(j) && byId.has(j.id) && wasActive.has(j.id));
+  for (const j of [...gone, ...ended]) onDone?.(j);
 }
 if (typeof document !== 'undefined')
   document.addEventListener('visibilitychange', () => {
@@ -220,8 +223,8 @@ export async function enqueue(user: number, items: { file: File; path: string }[
     // Shown and uploading at once; its bytes are stored for later (resume
     // after a reload) meanwhile. A job done before that finished has its
     // stored bytes dropped again.
-    queue.holdBytes(j.id, file);
     await queue.save(j);
+    queue.holdBytes(j.id, file); // (only once it is queued: nothing held for nothing)
     changed(j);
     // (One file at a time: storing as buffers reads a file into memory.)
     storing = storing
@@ -266,7 +269,11 @@ export async function retryUpload(id: string): Promise<boolean> {
   if (!j) return false;
   if (!(await queue.hasBytes(id))) return false;
   const n = queue.step(j, { t: 'retry' });
-  await queue.save(n);
+  // (Cancelled elsewhere meanwhile: not brought back.)
+  if (!(await queue.update(n))) {
+    uploads.jobs = uploads.jobs.filter((x) => x.id !== id);
+    return true;
+  }
   changed(n);
   pump();
   return true;

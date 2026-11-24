@@ -187,7 +187,7 @@ async function withBytes(j: Job, now = Date.now()): Promise<Job> {
 }
 
 /** Are a job's bytes still here? */
-export const hasBytes = async (id: string) => (await bytesOf(id)) instanceof Blob;
+export const hasBytes = async (id: string) => (await bytesOf(id)) !== null; // (pending: elsewhere, still there)
 
 /** Without Web Locks, how long bytes may stay unseen before they count as
  *  gone; with them, how long a job may have no owner (just queued). */
@@ -292,7 +292,7 @@ export function newJob(user: number, path: string, file: Blob & { lastModified?:
 /** What the runner needs from the outside (the network, the chunker). */
 export interface Deps {
   fetch: typeof fetch;
-  chunk: (blob: Blob) => Promise<Chunk[]>;
+  chunk: (blob: Blob, signal?: AbortSignal) => Promise<Chunk[]>;
   /** Waits before a retry (attempt 0, 1, ...). */
   sleep: (attempt: number) => Promise<void>;
   /** Called whenever a job changes (for the UI). */
@@ -336,7 +336,12 @@ async function call(d: Deps, url: string, init: RequestInit = {}): Promise<Respo
       if (r.ok) return r;
       // A proxy answering for an unreachable server (restarting, a tunnel
       // down): that is "offline" too; the job waits instead of failing.
-      if (UNREACHABLE.has(r.status)) throw new Offline(`HTTP ${r.status}`);
+      // (The server's own 503, "this storage is offline", is JSON: that is a
+      // real answer, about this job only.)
+      const own = (r.headers.get('content-type') ?? '').includes('application/json');
+      if (UNREACHABLE.has(r.status) && !own) throw new Offline(`HTTP ${r.status}`);
+      // Signed out meanwhile (the session expired): wait for a sign-in.
+      if (r.status === 401) throw new Offline('signed out');
       const msg = await r
         .json()
         .then((b) => (b as { error?: string }).error)
@@ -384,7 +389,7 @@ export async function run(job: Job, d: Deps, signal?: AbortSignal, restarts = 0)
   try {
     await go({ t: 'start' });
     if (j.state === 'hashing') {
-      const chunks = await d.chunk(j.blob);
+      const chunks = await d.chunk(j.blob, signal);
       live();
       await go({ t: 'hashed', chunks });
     }
@@ -459,7 +464,12 @@ export async function run(job: Job, d: Deps, signal?: AbortSignal, restarts = 0)
       const done = await Promise.allSettled(Array.from({ length: PARALLEL }, worker));
       const bad = done.find((r): r is PromiseRejectedResult => r.status === 'rejected');
       if (bad) throw bad.reason;
-      if (lost) await go({ t: 'gone' });
+      if (lost) {
+        // (A server that keeps losing sessions fails the job: no endless loop.)
+        if (restarts >= 2) throw new Error('The server keeps losing this upload; try again later.');
+        restarts++;
+        await go({ t: 'gone' });
+      }
       else await go({ t: 'commit' });
     }
     if (j.state === 'committing') {

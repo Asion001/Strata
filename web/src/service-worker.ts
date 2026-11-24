@@ -61,7 +61,8 @@ async function listing(req: Request, user: string): Promise<Response> {
     throw e;
   }
   // A gateway answering for an unreachable server: as good as offline.
-  if (r.status >= 502) return (await cache.match(key)) ?? r;
+  // (The server's own errors are JSON, and shown as they are.)
+  if (r.status >= 502 && !(r.headers.get('content-type') ?? '').includes('application/json')) return (await cache.match(key)) ?? r;
   // Keeping a copy is best effort: a full disk never costs the answer.
   try {
     if (r.ok) {
@@ -91,7 +92,7 @@ async function content(req: Request): Promise<Response> {
   try {
     const r = await fetch(req);
     // (A gateway answering for an unreachable server: as good as offline.)
-    if (r.status >= 502 && !own) return (await offlineCopy(req)) ?? r;
+    if (r.status >= 502 && !own && !(r.headers.get('content-type') ?? '').includes('application/json')) return (await offlineCopy(req)) ?? r;
     return r;
   } catch (e) {
     const hit = own ? null : await offlineCopy(req);
@@ -177,7 +178,7 @@ sw.addEventListener('sync', ((event: SyncEvent) => {
       if (r.status >= 502) throw new Error(`HTTP ${r.status}`);
       if (!r.ok) return; // (signed out: the queue waits for its user)
       const me = (await r.json()) as { id: number };
-      const out = await drain(me.id, { fetch: (u, i) => fetch(u, i), chunk: (b) => chunkFile(b), sleep: (a) => new Promise((res) => setTimeout(res, 1000 * 2 ** a)) });
+      const out = await drain(me.id, { fetch: (u, i) => fetch(u, i), chunk: (b, s) => chunkFile(b, s), sleep: (a) => new Promise((res) => setTimeout(res, 1000 * 2 ** a)) });
       // Still offline: fail, so the browser tries again later.
       if (out === 'offline') throw new Error('offline');
     })()
