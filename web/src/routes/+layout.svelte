@@ -12,7 +12,7 @@
   import { toaster } from '$lib/toast.svelte';
   import { palette, paletteKey } from '$lib/palette.svelte';
   import { ApiError } from '$lib/api';
-  import { applyUpdate, finishPendingLogout, lastUser, net, signedIn, startQueue, update, watchUpdates } from '$lib/offline/app.svelte';
+  import { applyUpdate, finishPendingLogout, lastUser, net, SIGNED_OUT, signedIn, startQueue, update, watchUpdates } from '$lib/offline/app.svelte';
   import { onMount } from 'svelte';
 
   let { children } = $props();
@@ -38,6 +38,7 @@
   function checkSession() {
     return api('GET', '/api/auth/me')
       .then((u) => {
+        clearTimeout(recheck);
         session.user = u;
         markSignedIn(u.id); // lets the editor's autosave run in every tab
         reloadMounts();
@@ -50,15 +51,28 @@
         const last = unreachable ? lastUser() : null;
         if (last) {
           session.user = last;
-          // Online again: check the session for real (it may have expired).
+          // Check the session for real again (it may have expired): when the
+          // network returns, and every half minute meanwhile (a server that
+          // was down doesn't change navigator.onLine).
           window.addEventListener('online', () => void checkSession(), { once: true });
+          clearTimeout(recheck);
+          recheck = setTimeout(() => void checkSession(), 30_000);
         }
         else goto('/login?next=' + encodeURIComponent(page.url.pathname + page.url.search));
       })
       .finally(() => (session.checked = true));
   }
 
+  let recheck: ReturnType<typeof setTimeout> | undefined;
   onMount(() => void watchUpdates());
+  // Signed out in another tab: this one leaves too.
+  onMount(() => {
+    const left = (e: StorageEvent) => {
+      if (e.key === SIGNED_OUT && !isPublic) location.href = '/login';
+    };
+    window.addEventListener('storage', left);
+    return () => window.removeEventListener('storage', left);
+  });
   // Whoever is signed in (checked here, or just signed in on the sign-in
   // page): offline caches are per user, so first say who, then resume
   // their queued uploads.

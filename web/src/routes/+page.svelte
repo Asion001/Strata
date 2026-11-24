@@ -238,7 +238,15 @@
 
   const crumbs = $derived(path ? path.split('/').map((n, i, a) => ({ name: n, path: a.slice(0, i + 1).join('/') })) : []);
   const viewable = $derived(sorted.filter((e) => !e.is_dir));
-  let viewerItems = $state<{ name: string; size: number; src: string; download: string; path: string; thumb?: string; poster?: string; mtime: string }[]>([]);
+  let viewerItems = $state<{ name: string; size: number; src: string; download: string; path: string; thumb?: string; poster?: string; mtime: string; etag: string | null }[]>([]);
+  // Every file shown in the viewer (opened, or reached with next and
+  // previous) goes into the recent-files cache, if it fits, for offline.
+  $effect(() => {
+    const it = viewerIndex >= 0 ? viewerItems[viewerIndex] : undefined;
+    if (!it || !session.user || offlineAt) return;
+    const user = session.user.id;
+    void Recent().then((r) => r.remember(user, it.path, it.etag, contentUrl(it.path))).catch(() => {});
+  });
 
   function open(e: Entry) {
     if (e.is_dir) goto(`/?p=${encodeURIComponent(join(listedPath, e.name))}`);
@@ -248,7 +256,7 @@
       viewerItems = viewable.map((v) => {
         const p = join(listedPath, v.name);
         return {
-          name: v.name, size: v.size, mtime: v.mtime, path: p,
+          name: v.name, size: v.size, mtime: v.mtime, path: p, etag: v.etag,
           src: previewUrl(p), download: contentUrl(p, true),
           // The list's own thumbnail URL: already in the cache, so it shows at once.
           thumb: isImage(v.name) ? thumbUrl(p, v.etag) : undefined,
@@ -256,12 +264,6 @@
         };
       });
       viewerIndex = viewable.indexOf(e);
-      // Opened: kept in the recent-files cache (if it fits), for offline.
-      if (session.user && !offlineAt) {
-        const p = join(listedPath, e.name);
-        const user = session.user.id;
-        void Recent().then((r) => r.remember(user, p, e.etag, contentUrl(p))).catch(() => {});
-      }
     }
   }
 
@@ -687,7 +689,7 @@
         <div class="grid gap-1 text-sm" data-testid="upload">
           <div class="flex items-center gap-2"><span class="min-w-0 flex-1 truncate">{u.path}</span>
             <span class="text-muted-foreground">{u.state === 'failed' ? '' : u.state === 'done' ? (u.skipped ? `done, ${bytes(u.skipped)} deduped` : 'done') : u.state}</span>
-            {#if isActive(u) && u.state !== 'committing'}<Button variant="ghost" size="sm" class="h-6 px-2" onclick={() => cancelUpload(u.id)} aria-label="Cancel upload of {u.path}">Cancel</Button>{/if}
+            {#if isActive(u) && u.state !== 'committing'}<Button variant="ghost" size="sm" class="h-6 px-2" onclick={async () => { if (!(await cancelUpload(u.id))) toast('Too late to cancel: the file is being saved.', 'info'); }} aria-label="Cancel upload of {u.path}">Cancel</Button>{/if}
             {#if u.state === 'failed'}<Button variant="ghost" size="sm" class="h-6 px-2" onclick={async () => { if (!(await retryUpload(u.id))) toast('The file is no longer available here; add it again.', 'error'); }}>Retry</Button>{/if}</div>
           {#if u.state === 'failed'}<div class="text-destructive">{u.error}</div>{/if}
           <progress max="1" value={jobProgress(u)} class="h-1.5 w-full accent-primary"></progress>

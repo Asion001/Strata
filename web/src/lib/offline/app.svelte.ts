@@ -54,6 +54,8 @@ export function lastUser(): User | null {
 }
 
 const PENDING_LOGOUT = 'strata-pending-logout';
+/** Set at sign-out: other tabs see it change (a storage event) and leave. */
+export const SIGNED_OUT = 'strata-signed-out';
 
 /** Sign out: stop the upload queue (and wait for it), cancel queued uploads
  *  with their server sessions while still signed in, sign out, then delete
@@ -79,6 +81,10 @@ export async function signOut(user: number | null, logout: () => Promise<unknown
   if (typeof caches !== 'undefined') await caches.delete(META).catch(() => false);
   await recent.clearAll().catch(() => {});
   uploads.jobs = [];
+  // Every other open tab of the app leaves too (it would cache again).
+  try {
+    localStorage.setItem(SIGNED_OUT, String(Date.now()));
+  } catch {}
   return ended;
 }
 
@@ -208,6 +214,9 @@ async function refresh() {
   // (Only what changed refreshes the folder.)
   const ended = uploads.jobs.filter((j) => !isActive(j) && byId.has(j.id) && wasActive.has(j.id));
   for (const j of [...gone, ...ended]) onDone?.(j);
+  // (Finished elsewhere: let go of their bytes and owner locks here.)
+  const queue = await Queue();
+  for (const j of gone) await queue.remove(j.id).catch(() => {});
 }
 if (typeof document !== 'undefined')
   document.addEventListener('visibilitychange', () => {
@@ -257,9 +266,11 @@ if (typeof window !== 'undefined') {
   });
 }
 
-export async function cancelUpload(id: string) {
-  await (await Queue()).cancel(id, { fetch: (u, i) => fetch(u, i), changed });
+/** Resolves false when it is too late (the file is being saved). */
+export async function cancelUpload(id: string): Promise<boolean> {
+  if (!(await (await Queue()).cancel(id, { fetch: (u, i) => fetch(u, i), changed }))) return false;
   uploads.jobs = uploads.jobs.filter((j) => j.id !== id);
+  return true;
 }
 
 /** Retry a failed upload. False if its bytes are gone (add it again). */

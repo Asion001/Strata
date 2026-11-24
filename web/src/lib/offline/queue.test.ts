@@ -477,10 +477,13 @@ describe('stored bytes', () => {
   it('bytes held in memory for this page, and whether they are there', async () => {
     q.holdBytes('m', new Blob(['mem']));
     expect(await q.hasBytes('m')).toBe(true);
-    // (None stored yet: maybe still being stored, or in another tab.)
-    expect(await q.hasBytes('none')).toBe(true);
+    // (None stored, and no page holding them.)
+    expect(await q.hasBytes('none')).toBe(false);
     await q.remove('m');
-    expect(await q.hasBytes('m')).toBe(true); // (likewise, once it is no longer held here)
+    expect(await q.hasBytes('m')).toBe(false);
+    // Held by another open page (its owner lock): there.
+    vi.stubGlobal('navigator', { locks: { request: vi.fn(), query: async () => ({ held: [{ name: 'strata-upload-owner-far' }] }) } });
+    expect(await q.hasBytes('far')).toBe(true);
   });
 });
 
@@ -662,6 +665,13 @@ describe('network and file errors', () => {
     });
     await expect(q.run(await fresh(), deps({ chunk }), ctl.signal)).rejects.toMatchObject({ name: 'AbortError' });
     expect(chunk.mock.calls[0][1]).toBe(ctl.signal);
+  });
+
+  it('too late to cancel while the file is being saved (here or elsewhere)', async () => {
+    const j = await fresh({ state: 'committing', chunks, session: 's1' });
+    expect(await q.cancel(j.id, { fetch: srv.fetch as unknown as typeof fetch })).toBe(false);
+    expect(await q.exists(j.id)).toBe(true);
+    expect(srv.log).toEqual([]);
   });
 });
 

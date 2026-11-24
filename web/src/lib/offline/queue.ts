@@ -187,7 +187,12 @@ async function withBytes(j: Job, now = Date.now()): Promise<Job> {
 }
 
 /** Are a job's bytes still here? */
-export const hasBytes = async (id: string) => (await bytesOf(id)) !== null; // (pending: elsewhere, still there)
+/** Are a job's bytes here, or held by a page that is still open? */
+export async function hasBytes(id: string): Promise<boolean> {
+  const b = await bytesOf(id);
+  if (b instanceof Blob) return true;
+  return b === 'pending' && (await ownerAlive(id)) === true;
+}
 
 /** Without Web Locks, how long bytes may stay unseen before they count as
  *  gone; with them, how long a job may have no owner (just queued). */
@@ -536,10 +541,15 @@ export function halt() {
 }
 
 /** Cancel a job: stop it if it is running, drop it and its server session. */
-export async function cancel(id: string, d: Pick<Deps, 'fetch' | 'changed'>): Promise<void> {
+/** Resolves false when it is too late: the file is being saved (here or
+ *  in another context), so cancelling could only pretend. */
+export async function cancel(id: string, d: Pick<Deps, 'fetch' | 'changed'>): Promise<boolean> {
+  const m = await memory();
+  const stored = m ? m.get(id) : await tx<Job | undefined>('jobs', 'readonly', (s) => s.get(id));
+  if (stored?.state === 'committing') return false;
   running.get(id)?.abort();
   const j = await load(id);
-  if (!j) return;
+  if (!j) return true;
   const c = step(j, { t: 'cancel' });
   await remove(id);
   d.changed?.(c);
@@ -548,6 +558,7 @@ export async function cancel(id: string, d: Pick<Deps, 'fetch' | 'changed'>): Pr
       .fetch(`/api/uploads/${j.session}`, { method: 'DELETE', headers: H, credentials: 'same-origin' })
       .catch(() => undefined);
   }
+  return true;
 }
 
 /** Sign-out: drop the server sessions of a user's jobs (best effort, while

@@ -38,6 +38,9 @@ describe('queue without IndexedDB', () => {
     expect((await q.load(b.id))!).toMatchObject({ state: 'failed', error: q.GONE });
     // Not written back once removed (cancelled).
     expect(await q.exists(b.id)).toBe(true);
+    expect(await q.hasBytes(b.id)).toBe(false);
+    expect(await q.cancel(b.id, { fetch })).toBe(true);
+    await q.save(b);
     await q.remove(b.id);
     expect(await q.exists(b.id)).toBe(false);
     expect(await q.update(b)).toBe(false);

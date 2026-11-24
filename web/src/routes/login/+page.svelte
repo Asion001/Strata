@@ -10,6 +10,13 @@
   let username = $state('');
   let password = $state('');
   let error = $state('');
+  // A sign-out that couldn't reach the server: end it as soon as possible.
+  $effect(() => {
+    const finish = () => import('$lib/offline/app.svelte').then((o) => o.finishPendingLogout(() => api('POST', '/api/auth/logout')));
+    void finish();
+    window.addEventListener('online', finish);
+    return () => window.removeEventListener('online', finish);
+  });
   let busy = $state(false);
 
   async function submit(e: Event) {
