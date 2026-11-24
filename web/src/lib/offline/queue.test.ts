@@ -681,5 +681,23 @@ describe('network and file errors', () => {
     await expect(q.run(j, deps())).rejects.toMatchObject({ name: 'AbortError' });
     expect(srv.log).toEqual([]);
   });
+
+  it('a job removed before its owner lock came lets the lock go at once', async () => {
+    let grant!: () => Promise<void>;
+    const request = vi.fn((_n: string, fn: () => Promise<void>) => {
+      grant = fn;
+      return new Promise<void>(() => {});
+    });
+    vi.stubGlobal('navigator', { locks: { request, query: async () => ({ held: [] }) } });
+    q.holdBytes('early', new Blob(['x']));
+    await q.remove('early');
+    await expect(grant()).resolves.toBeUndefined(); // (released, not kept)
+  });
+
+  it('a job with only its commit left needs no bytes', async () => {
+    await q.save(job({ id: 'c', state: 'committing', chunks, session: 's1', sent: ['aa', 'bb', 'cc'] }));
+    const back = (await q.load('c'))!;
+    expect([back.state, q.waiting(back)]).toEqual(['committing', false]);
+  });
 });
 

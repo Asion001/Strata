@@ -119,8 +119,12 @@ async function offlineCopy(req: Request): Promise<Response | null> {
 function asServed(r: Response, url: URL, path: string): Response {
   const h = new Headers(r.headers);
   if (url.pathname === '/api/files/image' && /\.svg$/i.test(path)) h.set('content-type', 'image/svg+xml');
-  const name = path.split('/').pop() ?? 'file';
-  if (url.searchParams.get('download') === '1') h.set('content-disposition', `attachment; filename*=UTF-8''${encodeURIComponent(name)}`);
+  // (The server's own header, its file name already made safe, as an
+  // attachment: never a name built here.)
+  if (url.searchParams.get('download') === '1') {
+    const d = h.get('content-disposition');
+    h.set('content-disposition', d ? d.replace(/^\s*inline\b/i, 'attachment') : 'attachment');
+  }
   return new Response(r.body, { status: r.status, headers: h });
 }
 

@@ -50,7 +50,8 @@
         const unreachable = !(e instanceof ApiError) || e.status >= 502;
         const last = unreachable ? lastUser() : null;
         if (last) {
-          session.user = last;
+          // (Unchanged: no reassigning, which would reload every page.)
+          if (session.user?.id !== last.id) session.user = last;
           // Check the session for real again (it may have expired): when the
           // network returns, and every half minute meanwhile (a server that
           // was down doesn't change navigator.onLine).

@@ -91,7 +91,14 @@ export async function signOut(user: number | null, logout: () => Promise<unknown
 /** A sign-out that couldn't reach the server: end that session now, before
  *  anything else. Resolves true when one was pending (the caller goes to the
  *  sign-in page). */
-export async function finishPendingLogout(logout: () => Promise<unknown>): Promise<'none' | 'done' | 'unreachable'> {
+let finishing: Promise<'none' | 'done' | 'unreachable'> | null = null;
+/** (One request at a time, shared by every caller: a late answer to a
+ *  second logout would clear the cookie of a session started meanwhile.) */
+export function finishPendingLogout(logout: () => Promise<unknown>): Promise<'none' | 'done' | 'unreachable'> {
+  finishing ??= endPending(logout).finally(() => (finishing = null));
+  return finishing;
+}
+async function endPending(logout: () => Promise<unknown>): Promise<'none' | 'done' | 'unreachable'> {
   try {
     if (!localStorage.getItem(PENDING_LOGOUT)) return 'none';
   } catch {
@@ -279,6 +286,8 @@ export async function retryUpload(id: string): Promise<boolean> {
   const j = await queue.load(id);
   if (!j) return false;
   if (!(await queue.hasBytes(id))) return false;
+  // (The old session goes: retrying starts a new one.)
+  if (j.session) await fetch(`/api/uploads/${j.session}`, { method: 'DELETE', headers: { 'x-strata': '1' } }).catch(() => {});
   const n = queue.step(j, { t: 'retry' });
   // (Cancelled elsewhere meanwhile: not brought back.)
   if (!(await queue.update(n))) {

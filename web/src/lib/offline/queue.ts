@@ -164,12 +164,14 @@ export const GONE = 'The file is no longer available here; add it again.';
 
 const NONE = new Blob([]);
 /** A job whose bytes are still being stored elsewhere: not runnable yet. */
-export const waiting = (j: Job) => j.blob === NONE;
+export const waiting = (j: Job) => j.blob === NONE && j.state !== 'committing';
 
 /** With its bytes; a job whose bytes are gone (kept in memory only, and the
  *  page was reloaded) is failed for good, and saved so. */
 async function withBytes(j: Job, now = Date.now()): Promise<Job> {
-  if (!isActive(j)) return { ...j, blob: NONE }; // (no reading for finished jobs)
+  // (No reading for finished jobs, nor for one with only its commit left:
+  // the server has every chunk.)
+  if (!isActive(j) || j.state === 'committing') return { ...j, blob: NONE };
   const blob = await bytesOf(j.id);
   if (blob instanceof Blob) return { ...j, blob };
   // Still being stored, or held in a tab's memory: it waits while that tab
@@ -211,11 +213,19 @@ async function ownerAlive(id: string): Promise<boolean | null> {
 
 /** Keep the bytes in memory for this page (it can upload them at once,
  *  while `keepBytes` stores them for later), and own the job meanwhile. */
+const asking = new Set<string>();
 export function holdBytes(id: string, blob: Blob) {
   inMemory.set(id, blob);
   const l = locks();
-  if (l && !owners.has(id)) {
-    void l.request(lockName(id), () => new Promise<void>((release) => owners.set(id, release)));
+  // (Once per job: a second request would never be released.)
+  if (l && !asking.has(id)) {
+    asking.add(id);
+    void l.request(lockName(id), () =>
+      new Promise<void>((release) => {
+        if (inMemory.has(id)) owners.set(id, release);
+        else release(); // (removed before the lock came)
+      })
+    );
   }
 }
 
@@ -256,6 +266,7 @@ export async function remove(id: string) {
   inMemory.delete(id);
   owners.get(id)?.();
   owners.delete(id);
+  asking.delete(id);
   const m = await memory();
   if (m) return void m.delete(id);
   await tx('jobs', 'readwrite', (s) => void s.delete(id));
