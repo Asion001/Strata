@@ -733,3 +733,59 @@ async fn restored_folder_never_replaces_one_made_meanwhile() {
         b"in"
     );
 }
+
+#[tokio::test]
+async fn symlink_to_a_folder_restores_as_a_link() {
+    let Some(t) = app().await else { return };
+    let cid = local_conn(&t, "Disk", "disk").await;
+    let disk = t.dir.path().join("local/disk");
+    std::fs::create_dir_all(disk.join("real")).unwrap();
+    std::fs::write(disk.join("real/x.txt"), b"x").unwrap();
+    std::os::unix::fs::symlink("real", disk.join("link")).unwrap();
+    t.ok(
+        "POST",
+        "/api/mounts",
+        json!({"path": "Disk", "connection_id": cid, "mode": "raw"}),
+    )
+    .await;
+    delete(&t, &["Disk/link"]).await;
+    assert!(disk.join("real/x.txt").exists(), "only the link moved");
+    assert!(std::fs::symlink_metadata(disk.join("link")).is_err());
+    assert_eq!(
+        restore(&t, id_of(&items(&t).await, "Disk/link")).await,
+        "Disk/link"
+    );
+    let md = std::fs::symlink_metadata(disk.join("link")).unwrap();
+    assert!(md.file_type().is_symlink());
+    assert_eq!(std::fs::read(disk.join("link/x.txt")).unwrap(), b"x");
+}
+
+#[tokio::test]
+async fn connection_on_a_vanished_disk_can_still_be_deleted() {
+    let Some(t) = app().await else { return };
+    let cid = local_conn(&t, "Disk", "disk").await;
+    let disk = t.dir.path().join("local/disk");
+    std::fs::create_dir_all(&disk).unwrap();
+    std::fs::write(disk.join("a.txt"), b"a").unwrap();
+    let v = t
+        .ok(
+            "POST",
+            "/api/mounts",
+            json!({"path": "Disk", "connection_id": cid, "mode": "raw"}),
+        )
+        .await;
+    delete(&t, &["Disk/a.txt"]).await;
+    let mid = v["id"].as_i64().unwrap();
+    t.ok("DELETE", &format!("/api/mounts/{mid}"), json!({}))
+        .await;
+    // The disk is gone for good: trash folder and marker with it.
+    std::fs::remove_dir_all(disk.join(".strata-trash")).unwrap();
+    std::fs::remove_dir_all(disk.join(".strata-probe")).unwrap();
+    t.ok(
+        "DELETE",
+        &format!("/api/connections/{cid}?purge_trash=true"),
+        json!({}),
+    )
+    .await;
+    assert!(items(&t).await.is_empty());
+}

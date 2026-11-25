@@ -99,9 +99,9 @@
     return () => { closed = true; ws?.close(); };
   });
   async function del(c: Conn) {
-    const ok = await confirmDialog({ title: `Delete connection “${c.name}”?`, body: 'Unmounted hashed volumes on it lose their file index.', confirm: 'Delete', danger: true });
+    const ok = await confirmDialog({ title: `Delete connection “${c.name}”?`, body: 'Unmounted hashed volumes on it lose their file index, and deleted items from it that are still in the trash are removed for good.', confirm: 'Delete', danger: true });
     if (!ok) return;
-    try { await api('DELETE', `/api/connections/${c.id}`); await load(); } catch (e) { toastError(e); }
+    try { await api('DELETE', `/api/connections/${c.id}?purge_trash=true`); await load(); } catch (e) { toastError(e); }
   }
   const fields: Record<string, [string, string, string?][]> = {
     local: [['path', 'Folder (relative to the server storage base)']],

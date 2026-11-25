@@ -204,6 +204,24 @@ pub async fn trash(
             .bind(node_id)
             .fetch_one(&st.db)
             .await?;
+            // Before the rename too: once the item is moved, everything below
+            // is best effort (reconcile finishes the move after a crash).
+            if let Err(e) = sqlx::query(REMEMBER_SHARES)
+                .bind(id)
+                .bind(m.volume_id)
+                .bind(parent)
+                .bind(name)
+                .bind(rel)
+                .bind(&like)
+                .execute(&st.db)
+                .await
+            {
+                let _ = sqlx::query("DELETE FROM trash WHERE id = $1")
+                    .bind(id)
+                    .execute(&st.db)
+                    .await;
+                return Err(e.into());
+            }
             let src = root.join(paths::join(&m.base_path, rel));
             let dir = item_dir(root, id);
             let moved = async {
@@ -229,26 +247,35 @@ pub async fn trash(
                     io_error(e)
                 });
             }
-            sqlx::query("UPDATE trash SET ready = TRUE WHERE id = $1")
-                .bind(id)
-                .execute(&st.db)
-                .await?;
-            sqlx::query(REMEMBER_SHARES)
-                .bind(id)
-                .bind(m.volume_id)
-                .bind(parent)
-                .bind(name)
-                .bind(rel)
-                .bind(&like)
-                .execute(&st.db)
-                .await?;
-            vfs::delete_subtree_rows(st, m.volume_id, rel).await?;
-            id
+            // The item is in the trash now: report success even if the
+            // bookkeeping below fails (reconcile completes it).
+            if let Err(e) = finish_raw_trash(st, id, m.volume_id, rel, node.is_dir).await {
+                tracing::warn!("trash {id}: finishing the move failed, reconcile will: {e}");
+            }
+            lock.release().await?;
+            return Ok(id);
         }
     };
     journal::record_volume(st, m.volume_id, vec![Change::delete(rel, node.is_dir)]).await?;
     lock.release().await?;
     Ok(id)
+}
+
+/// After a raw item was renamed into the trash: mark the row ready, drop the
+/// item's listing cache and journal the delete. Caller holds the volume lock.
+async fn finish_raw_trash(
+    st: &AppState,
+    id: i64,
+    volume_id: i64,
+    rel: &str,
+    is_dir: bool,
+) -> ApiResult<()> {
+    sqlx::query("UPDATE trash SET ready = TRUE WHERE id = $1")
+        .bind(id)
+        .execute(&st.db)
+        .await?;
+    vfs::delete_subtree_rows(st, volume_id, rel).await?;
+    journal::record_volume(st, volume_id, vec![Change::delete(rel, is_dir)]).await
 }
 
 async fn owned_row(st: &AppState, user_id: i64, id: i64) -> ApiResult<Row> {
@@ -323,7 +350,9 @@ async fn free_name(
 ///   non-empty folder, so files put there meanwhile make it fail instead).
 ///
 /// Filesystems without hard links fall back to a checked rename.
-async fn rename_no_replace(src: &Path, dst: &Path, is_dir: bool) -> std::io::Result<()> {
+async fn rename_no_replace(src: &Path, dst: &Path) -> std::io::Result<()> {
+    // The entry's own kind: a symlink to a folder moves as a link (a file).
+    let is_dir = tokio::fs::symlink_metadata(src).await?.is_dir();
     if is_dir {
         tokio::fs::create_dir(dst).await?;
         if let Err(e) = tokio::fs::rename(src, dst).await {
@@ -372,6 +401,8 @@ pub async fn restore(st: &AppState, user_id: i64, id: i64) -> ApiResult<String> 
     };
     // Missing parents are created first (mkdir takes the volume lock itself),
     // then checked again under the lock: a delete may remove them in between.
+    // (Still there? A racing purge or restore would leave the folders behind.)
+    row_again(st, id).await?;
     let mut tries = 0;
     let lock = loop {
         if !parent.is_empty() {
@@ -453,7 +484,7 @@ pub async fn restore(st: &AppState, user_id: i64, id: i64) -> ApiResult<String> 
                 Err(e) => return Err(io_error(e)),
             }
             let dst = root.join(paths::join(&m.base_path, &new_rel));
-            rename_no_replace(&item, &dst, row.is_dir)
+            rename_no_replace(&item, &dst)
                 .await
                 .map_err(|e| match e.kind() {
                     std::io::ErrorKind::AlreadyExists => {
@@ -575,8 +606,28 @@ pub async fn reconcile(st: &AppState) -> ApiResult<usize> {
     .await?;
     let mut fixed = 0;
     for (id, volume_id, connection_id, base, rel, name) in rows {
+        match reconcile_one(st, id, volume_id, connection_id, &base, &rel, &name).await {
+            Ok(true) => fixed += 1,
+            Ok(false) => {}
+            // One broken storage or a DB hiccup must not stop the rest.
+            Err(e) => tracing::warn!("trash reconcile of item {id} failed: {e}"),
+        }
+    }
+    Ok(fixed)
+}
+
+async fn reconcile_one(
+    st: &AppState,
+    id: i64,
+    volume_id: i64,
+    connection_id: i64,
+    base: &str,
+    rel: &str,
+    name: &str,
+) -> ApiResult<bool> {
+    {
         let Ok(root) = local_root(st, connection_id).await else {
-            continue;
+            return Ok(false);
         };
         let lock = vfs::lock_volume(st, volume_id).await?;
         // Re-read: it may have been restored, purged or finished meanwhile.
@@ -586,21 +637,20 @@ pub async fn reconcile(st: &AppState) -> ApiResult<usize> {
             .await?;
         let Some(ready) = ready else {
             lock.release().await?;
-            continue;
+            return Ok(false);
         };
         let exists = |p: PathBuf| async move { tokio::fs::symlink_metadata(p).await.is_ok() };
-        let in_trash = exists(item_dir(&root, id).join(&name)).await;
+        let item = item_dir(&root, id).join(name);
+        let in_trash = exists(item.clone()).await;
+        let mut fixed = false;
         let drop_row = if in_trash {
             if !ready {
-                sqlx::query("UPDATE trash SET ready = TRUE WHERE id = $1")
-                    .bind(id)
-                    .execute(&st.db)
-                    .await?;
-                vfs::delete_subtree_rows(st, volume_id, &rel).await?;
-                fixed += 1;
+                let is_dir = tokio::fs::metadata(&item).await.is_ok_and(|m| m.is_dir());
+                finish_raw_trash(st, id, volume_id, rel, is_dir).await?;
+                fixed = true;
             }
             false
-        } else if !ready && exists(root.join(paths::join(&base, &rel))).await {
+        } else if !ready && exists(root.join(paths::join(base, rel))).await {
             true
         } else {
             trash_reachable(st, connection_id, &root).await
@@ -611,11 +661,29 @@ pub async fn reconcile(st: &AppState) -> ApiResult<usize> {
                 .execute(&st.db)
                 .await?;
             let _ = tokio::fs::remove_dir(item_dir(&root, id)).await;
-            fixed += 1;
+            fixed = true;
         }
         lock.release().await?;
+        Ok(fixed)
     }
-    Ok(fixed)
+}
+
+/// Drop a trash row whose storage can't be reached, removing its files if
+/// they happen to be there (best effort). For deleting a connection only.
+pub async fn forget(st: &AppState, id: i64) -> ApiResult<()> {
+    let conn: Option<(i64, String)> = sqlx::query_as(
+        "DELETE FROM trash t USING volumes v WHERE v.id = t.volume_id AND t.id = $1
+         RETURNING v.connection_id, v.mode",
+    )
+    .bind(id)
+    .fetch_optional(&st.db)
+    .await?;
+    if let Some((connection_id, mode)) = conn
+        && mode == "raw"
+    {
+        remove_raw_items(st, &[(id, connection_id)]).await;
+    }
+    Ok(())
 }
 
 /// Remove raw trash items (id, connection) whose rows are already gone.
