@@ -343,15 +343,9 @@ fn rescan_in_background(st: &AppState, m: &Mount, rel: &str) {
     tokio::spawn(async move {
         let (_done, _slot) = (done, slot);
         if let Err(e) = scan_dir_inner(&st, &m, &rel, true).await {
+            // The scan mark stays stale, so the next open tries again; it
+            // stays (rather than being dropped) so that scan still journals.
             tracing::warn!("background rescan of volume {} {rel:?}: {e}", m.volume_id);
-            // The folder may be gone or no longer a folder: forget the scan,
-            // so the next open rescans in the request and reports the error
-            // instead of serving the old listing again.
-            let _ = sqlx::query("DELETE FROM raw_scans WHERE volume_id = $1 AND dir = $2")
-                .bind(m.volume_id)
-                .bind(&rel)
-                .execute(&st.db)
-                .await;
         }
     });
 }
