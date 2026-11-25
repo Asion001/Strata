@@ -5,18 +5,29 @@ export class ApiError extends Error {
   }
 }
 
-export async function api<T = any>(method: string, url: string, body?: unknown): Promise<T> {
+import { untrack } from 'svelte';
+import { session } from './session.svelte';
+
+import { OFFLINE_AT } from './offline/keys';
+
+export async function api<T = any>(method: string, url: string, body?: unknown, meta?: { offlineAt?: string | null }): Promise<T> {
   const init: RequestInit = { method, headers: { 'x-strata': '1' }, credentials: 'same-origin' };
+  // The service worker keeps listings per user: it needs to know whose.
+  // (Read untracked: a page's loading effect mustn't re-run when it changes.)
+  const user = untrack(() => session.user?.id);
+  if (method === 'GET' && user) (init.headers as Record<string, string>)['x-strata-user'] = String(user);
   if (body !== undefined) {
     (init.headers as Record<string, string>)['content-type'] = 'application/json';
     init.body = JSON.stringify(body);
   }
   const r = await fetch(url, init);
+  if (meta) meta.offlineAt = r.headers.get(OFFLINE_AT);
   if (!r.ok) {
     let msg = r.statusText;
     try {
       msg = (await r.json()).error ?? msg;
     } catch {}
+    if (r.status === 401 && !url.startsWith('/api/public/')) forgetOfflineUser();
     if (r.status === 401 && !url.startsWith('/api/auth/') && !url.startsWith('/api/public/')) {
       location.href = '/login?next=' + encodeURIComponent(location.pathname + location.search);
     }
@@ -64,4 +75,13 @@ export function previewUrl(path: string) {
 }
 export function thumbUrl(path: string, etag: string | null, size = 128) {
   return `/api/files/thumb?path=${enc(path)}&size=${size}&v=${enc(etag ?? '')}`;
+}
+
+/** The session is gone (401): this device no longer opens offline as that
+ *  user (their cached data stays until a sign-out or another sign-in). */
+export function forgetOfflineUser() {
+  try {
+    localStorage.removeItem('strata-last-user');
+  } catch {}
+  if (typeof caches !== 'undefined') void caches.delete('strata-meta').catch(() => false);
 }
