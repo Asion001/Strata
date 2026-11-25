@@ -1189,7 +1189,7 @@
                 }
               }
             },
-            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder)"
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
           },
           "404": {
             "content": {
@@ -1200,6 +1200,16 @@
               }
             },
             "description": "Not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "In conflict with what is there"
           },
           "500": {
             "content": {
@@ -1289,7 +1299,7 @@
                 }
               }
             },
-            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder)"
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
           },
           "404": {
             "content": {
@@ -1418,7 +1428,7 @@
                 }
               }
             },
-            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder)"
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
           },
           "404": {
             "content": {
@@ -1429,6 +1439,16 @@
               }
             },
             "description": "Not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "In conflict with what is there"
           },
           "500": {
             "content": {
@@ -1517,7 +1537,7 @@
                 }
               }
             },
-            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder)"
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
           },
           "404": {
             "content": {
@@ -1528,6 +1548,16 @@
               }
             },
             "description": "Not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "In conflict with what is there"
           },
           "413": {
             "content": {
@@ -1617,6 +1647,16 @@
             },
             "description": "Bad request (a parameter or the body)"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -1626,6 +1666,16 @@
               }
             },
             "description": "Not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "In conflict with what is there"
           },
           "413": {
             "content": {
@@ -1698,6 +1748,16 @@
             },
             "description": "Bad request (a parameter or the body)"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -1707,6 +1767,16 @@
               }
             },
             "description": "Not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "In conflict with what is there"
           },
           "500": {
             "content": {
@@ -1767,7 +1837,7 @@
                 }
               }
             },
-            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder)"
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
           },
           "404": {
             "content": {
@@ -1778,6 +1848,16 @@
               }
             },
             "description": "Not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "In conflict with what is there"
           },
           "500": {
             "content": {
@@ -1855,7 +1935,7 @@
                 }
               }
             },
-            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder)"
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
           },
           "404": {
             "content": {
@@ -1866,6 +1946,16 @@
               }
             },
             "description": "Not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "In conflict with what is there"
           },
           "413": {
             "content": {
@@ -1982,7 +2072,7 @@
                 }
               }
             },
-            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder)"
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
           },
           "404": {
             "content": {
@@ -1993,6 +2083,16 @@
               }
             },
             "description": "Not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "In conflict with what is there"
           },
           "410": {
             "content": {
@@ -2073,7 +2173,7 @@
                 }
               }
             },
-            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder)"
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
           },
           "404": {
             "content": {
@@ -2084,6 +2184,16 @@
               }
             },
             "description": "Not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "In conflict with what is there"
           },
           "500": {
             "content": {
@@ -2185,7 +2295,7 @@
                 }
               }
             },
-            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder)"
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
           },
           "404": {
             "content": {
@@ -2313,7 +2423,7 @@
                 }
               }
             },
-            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder)"
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
           },
           "404": {
             "content": {
@@ -2324,6 +2434,16 @@
               }
             },
             "description": "Not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "In conflict with what is there"
           },
           "413": {
             "content": {
@@ -2432,7 +2552,7 @@
                 }
               }
             },
-            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder)"
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
           },
           "404": {
             "content": {
@@ -2529,7 +2649,7 @@
                 }
               }
             },
-            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder)"
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
           },
           "404": {
             "content": {
@@ -2540,6 +2660,16 @@
               }
             },
             "description": "Not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "In conflict with what is there"
           },
           "500": {
             "content": {
@@ -2626,7 +2756,7 @@
                 }
               }
             },
-            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder)"
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
           },
           "404": {
             "content": {
@@ -2755,7 +2885,7 @@
                 }
               }
             },
-            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder)"
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
           },
           "404": {
             "content": {
@@ -2766,6 +2896,16 @@
               }
             },
             "description": "Not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "In conflict with what is there"
           },
           "500": {
             "content": {
@@ -2850,17 +2990,17 @@
         "responses": {
           "200": {
             "content": {
-              "application/octet-stream": {
+              "*/*": {
                 "schema": {
                   "$ref": "#/components/schemas/Binary"
                 }
               }
             },
-            "description": "The file"
+            "description": "The file, as its sniffed type"
           },
           "206": {
             "content": {
-              "application/octet-stream": {
+              "*/*": {
                 "schema": {
                   "$ref": "#/components/schemas/Binary"
                 }
@@ -2899,7 +3039,7 @@
                 }
               }
             },
-            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder)"
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
           },
           "404": {
             "content": {
@@ -3054,7 +3194,7 @@
                 }
               }
             },
-            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder)"
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
           },
           "404": {
             "content": {
@@ -3212,7 +3352,7 @@
                 }
               }
             },
-            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder)"
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
           },
           "404": {
             "content": {
@@ -3350,7 +3490,7 @@
                 }
               }
             },
-            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder)"
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
           },
           "404": {
             "content": {
@@ -3491,7 +3631,7 @@
                 }
               }
             },
-            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder)"
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
           },
           "404": {
             "content": {
@@ -3600,7 +3740,7 @@
                 }
               }
             },
-            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder)"
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
           },
           "404": {
             "content": {
@@ -3611,6 +3751,16 @@
               }
             },
             "description": "Not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "In conflict with what is there"
           },
           "500": {
             "content": {
@@ -3698,7 +3848,7 @@
                 }
               }
             },
-            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder)"
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
           },
           "404": {
             "content": {
@@ -3836,7 +3986,7 @@
                 }
               }
             },
-            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder)"
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
           },
           "404": {
             "content": {
@@ -3974,7 +4124,7 @@
                 }
               }
             },
-            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder)"
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
           },
           "404": {
             "content": {
@@ -3985,6 +4135,16 @@
               }
             },
             "description": "Not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "In conflict with what is there"
           },
           "500": {
             "content": {
@@ -4094,7 +4254,7 @@
                 }
               }
             },
-            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder)"
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
           },
           "404": {
             "content": {
@@ -4105,6 +4265,16 @@
               }
             },
             "description": "Not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "In conflict with what is there"
           },
           "500": {
             "content": {
@@ -4164,6 +4334,16 @@
             },
             "description": "Bad request (a parameter or the body)"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -4173,6 +4353,16 @@
               }
             },
             "description": "Not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "In conflict with what is there"
           },
           "500": {
             "content": {
@@ -4246,7 +4436,7 @@
                 }
               }
             },
-            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder)"
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
           },
           "404": {
             "content": {
@@ -4257,6 +4447,16 @@
               }
             },
             "description": "Not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "In conflict with what is there"
           },
           "500": {
             "content": {
@@ -4346,7 +4546,7 @@
                 }
               }
             },
-            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder)"
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
           },
           "404": {
             "content": {
@@ -4485,7 +4685,7 @@
                 }
               }
             },
-            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder)"
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
           },
           "404": {
             "content": {
@@ -4584,7 +4784,7 @@
                 }
               }
             },
-            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder)"
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
           },
           "404": {
             "content": {
@@ -4595,6 +4795,16 @@
               }
             },
             "description": "Not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "In conflict with what is there"
           },
           "500": {
             "content": {
@@ -4680,6 +4890,16 @@
             },
             "description": "Bad request (a parameter or the body)"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -4689,6 +4909,16 @@
               }
             },
             "description": "Not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "In conflict with what is there"
           },
           "500": {
             "content": {
@@ -4768,7 +4998,7 @@
         "responses": {
           "200": {
             "content": {
-              "application/octet-stream": {
+              "*/*": {
                 "schema": {
                   "$ref": "#/components/schemas/Binary"
                 }
@@ -4778,7 +5008,7 @@
           },
           "206": {
             "content": {
-              "application/octet-stream": {
+              "*/*": {
                 "schema": {
                   "$ref": "#/components/schemas/Binary"
                 }
@@ -4808,6 +5038,16 @@
               }
             },
             "description": "A password-protected share without its key"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
           },
           "404": {
             "content": {
@@ -4921,6 +5161,16 @@
               }
             },
             "description": "A password-protected share without its key"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
           },
           "404": {
             "content": {
@@ -5042,6 +5292,16 @@
             },
             "description": "A password-protected share without its key"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -5051,6 +5311,16 @@
               }
             },
             "description": "Not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "In conflict with what is there"
           },
           "500": {
             "content": {
@@ -5123,6 +5393,16 @@
             },
             "description": "Bad request (a parameter or the body)"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -5132,6 +5412,16 @@
               }
             },
             "description": "Not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "In conflict with what is there"
           },
           "413": {
             "content": {
@@ -5241,7 +5531,7 @@
                 }
               }
             },
-            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder)"
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
           },
           "404": {
             "content": {
@@ -5252,6 +5542,16 @@
               }
             },
             "description": "Not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "In conflict with what is there"
           },
           "500": {
             "content": {
@@ -5322,7 +5622,7 @@
                 }
               }
             },
-            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder)"
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
           },
           "404": {
             "content": {
@@ -5333,6 +5633,16 @@
               }
             },
             "description": "Not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "In conflict with what is there"
           },
           "500": {
             "content": {
@@ -5416,7 +5726,7 @@
                 }
               }
             },
-            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder)"
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
           },
           "404": {
             "content": {
@@ -5427,6 +5737,16 @@
               }
             },
             "description": "Not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "In conflict with what is there"
           },
           "413": {
             "content": {
@@ -5545,7 +5865,7 @@
                 }
               }
             },
-            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder)"
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
           },
           "404": {
             "content": {
@@ -5556,6 +5876,16 @@
               }
             },
             "description": "Not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "In conflict with what is there"
           },
           "500": {
             "content": {
@@ -5653,7 +5983,7 @@
                 }
               }
             },
-            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder)"
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
           },
           "404": {
             "content": {
@@ -5791,7 +6121,7 @@
                 }
               }
             },
-            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder)"
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
           },
           "404": {
             "content": {
@@ -5802,6 +6132,16 @@
               }
             },
             "description": "Not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "In conflict with what is there"
           },
           "500": {
             "content": {
@@ -5877,7 +6217,7 @@
                 }
               }
             },
-            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder)"
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
           },
           "404": {
             "content": {
@@ -5888,6 +6228,16 @@
               }
             },
             "description": "Not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "In conflict with what is there"
           },
           "500": {
             "content": {
@@ -5994,7 +6344,7 @@
                 }
               }
             },
-            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder)"
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
           },
           "404": {
             "content": {
@@ -6005,6 +6355,16 @@
               }
             },
             "description": "Not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "In conflict with what is there"
           },
           "413": {
             "content": {
@@ -6122,7 +6482,7 @@
                 }
               }
             },
-            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder)"
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
           },
           "404": {
             "content": {
@@ -6202,6 +6562,16 @@
             },
             "description": "Bad request (a parameter or the body)"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -6211,6 +6581,16 @@
               }
             },
             "description": "Not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "In conflict with what is there"
           },
           "500": {
             "content": {
@@ -6264,7 +6644,7 @@
                 }
               }
             },
-            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder)"
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
           },
           "404": {
             "content": {
@@ -6275,6 +6655,16 @@
               }
             },
             "description": "Not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "In conflict with what is there"
           },
           "500": {
             "content": {
@@ -6324,6 +6714,16 @@
             },
             "description": "Bad request (a parameter or the body)"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -6333,6 +6733,16 @@
               }
             },
             "description": "Not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "In conflict with what is there"
           },
           "500": {
             "content": {

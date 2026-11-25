@@ -1022,7 +1022,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder) */
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -1033,6 +1033,15 @@ export interface operations {
             };
             /** @description Not found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description In conflict with what is there */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1090,7 +1099,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder) */
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -1192,7 +1201,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder) */
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -1203,6 +1212,15 @@ export interface operations {
             };
             /** @description Not found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description In conflict with what is there */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1262,7 +1280,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder) */
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -1273,6 +1291,15 @@ export interface operations {
             };
             /** @description Not found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description In conflict with what is there */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1349,8 +1376,26 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
             /** @description Not found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description In conflict with what is there */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1423,8 +1468,26 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
             /** @description Not found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description In conflict with what is there */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1478,7 +1541,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder) */
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -1489,6 +1552,15 @@ export interface operations {
             };
             /** @description Not found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description In conflict with what is there */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1546,7 +1618,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder) */
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -1557,6 +1629,15 @@ export interface operations {
             };
             /** @description Not found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description In conflict with what is there */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1640,7 +1721,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder) */
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -1651,6 +1732,15 @@ export interface operations {
             };
             /** @description Not found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description In conflict with what is there */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1713,7 +1803,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder) */
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -1724,6 +1814,15 @@ export interface operations {
             };
             /** @description Not found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description In conflict with what is there */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1781,7 +1880,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder) */
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -1885,7 +1984,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder) */
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -1896,6 +1995,15 @@ export interface operations {
             };
             /** @description Not found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description In conflict with what is there */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1978,7 +2086,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder) */
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -1989,6 +2097,15 @@ export interface operations {
             };
             /** @description Not found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description In conflict with what is there */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2048,7 +2165,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder) */
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -2149,7 +2266,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder) */
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -2224,7 +2341,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder) */
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -2235,6 +2352,15 @@ export interface operations {
             };
             /** @description Not found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description In conflict with what is there */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2271,13 +2397,13 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description The file */
+            /** @description The file, as its sniffed type */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/octet-stream": components["schemas"]["Binary"];
+                    "*/*": components["schemas"]["Binary"];
                 };
             };
             /** @description A byte range */
@@ -2286,7 +2412,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/octet-stream": components["schemas"]["Binary"];
+                    "*/*": components["schemas"]["Binary"];
                 };
             };
             /** @description Not modified */
@@ -2314,7 +2440,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder) */
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -2415,7 +2541,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder) */
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -2544,7 +2670,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder) */
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -2655,7 +2781,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder) */
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -2773,7 +2899,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder) */
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -2857,7 +2983,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder) */
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -2868,6 +2994,15 @@ export interface operations {
             };
             /** @description Not found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description In conflict with what is there */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2934,7 +3069,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder) */
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -3045,7 +3180,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder) */
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -3154,7 +3289,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder) */
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -3165,6 +3300,15 @@ export interface operations {
             };
             /** @description Not found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description In conflict with what is there */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -3238,7 +3382,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder) */
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -3249,6 +3393,15 @@ export interface operations {
             };
             /** @description Not found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description In conflict with what is there */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -3301,8 +3454,26 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
             /** @description Not found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description In conflict with what is there */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -3365,7 +3536,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder) */
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -3376,6 +3547,15 @@ export interface operations {
             };
             /** @description Not found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description In conflict with what is there */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -3433,7 +3613,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder) */
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -3542,7 +3722,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder) */
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -3616,7 +3796,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder) */
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -3627,6 +3807,15 @@ export interface operations {
             };
             /** @description Not found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description In conflict with what is there */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -3684,8 +3873,26 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
             /** @description Not found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description In conflict with what is there */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -3734,7 +3941,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/octet-stream": components["schemas"]["Binary"];
+                    "*/*": components["schemas"]["Binary"];
                 };
             };
             206: {
@@ -3742,7 +3949,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/octet-stream": components["schemas"]["Binary"];
+                    "*/*": components["schemas"]["Binary"];
                 };
             };
             /** @description Not modified */
@@ -3763,6 +3970,15 @@ export interface operations {
             };
             /** @description A password-protected share without its key */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -3861,6 +4077,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
             /** @description Not found */
             404: {
                 headers: {
@@ -3946,8 +4171,26 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
             /** @description Not found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description In conflict with what is there */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -4006,8 +4249,26 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
             /** @description Not found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description In conflict with what is there */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -4091,7 +4352,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder) */
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -4102,6 +4363,15 @@ export interface operations {
             };
             /** @description Not found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description In conflict with what is there */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -4155,7 +4425,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder) */
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -4166,6 +4436,15 @@ export interface operations {
             };
             /** @description Not found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description In conflict with what is there */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -4223,7 +4502,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder) */
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -4234,6 +4513,15 @@ export interface operations {
             };
             /** @description Not found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description In conflict with what is there */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -4324,7 +4612,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder) */
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -4335,6 +4623,15 @@ export interface operations {
             };
             /** @description Not found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description In conflict with what is there */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -4392,7 +4689,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder) */
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -4501,7 +4798,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder) */
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -4512,6 +4809,15 @@ export interface operations {
             };
             /** @description Not found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description In conflict with what is there */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -4575,7 +4881,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder) */
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -4586,6 +4892,15 @@ export interface operations {
             };
             /** @description Not found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description In conflict with what is there */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -4647,7 +4962,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder) */
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -4658,6 +4973,15 @@ export interface operations {
             };
             /** @description Not found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description In conflict with what is there */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -4748,7 +5072,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder) */
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -4821,8 +5145,26 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
             /** @description Not found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description In conflict with what is there */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -4875,7 +5217,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder) */
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -4886,6 +5228,15 @@ export interface operations {
             };
             /** @description Not found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description In conflict with what is there */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -4930,8 +5281,26 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
             /** @description Not found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description In conflict with what is there */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

@@ -10,21 +10,31 @@ services:
       STRATA_ADMIN_USER: admin
       STRATA_ADMIN_PASSWORD: ${STRATA_ADMIN_PASSWORD:?}
       STRATA_COOKIE_SECURE: "false"
-    ports: ["127.0.0.1:${STRATA_PORT:-18090}:8080"]
-    # No names outside this stack resolve: connections the fuzzer makes to
-    # made-up hosts (or to AWS) fail at once instead of reaching out.
-    dns: ["127.0.0.1"]
+    # Only on an internal network: connections the fuzzer makes to made-up
+    # hosts, AWS or IP addresses can't reach out. The gateway publishes it.
+    networks: [inner]
     depends_on:
       db: { condition: service_healthy }
       minio: { condition: service_started }
+  gateway:
+    image: alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e
+    command: ["TCP-LISTEN:8080,fork,reuseaddr", "TCP:strata:8080"]
+    ports: ["127.0.0.1:${STRATA_PORT:-18090}:8080"]
+    networks: [inner, outer]
+    depends_on: [strata]
   db:
     image: postgres:18-alpine
+    networks: [inner]
     environment: { POSTGRES_USER: strata, POSTGRES_PASSWORD: strata, POSTGRES_DB: strata }
     healthcheck: { test: ["CMD", "pg_isready", "-U", "strata"], interval: 2s, retries: 30 }
   minio:
     # (The official images are no longer published; Chainguard's, pinned.)
     image: cgr.dev/chainguard/minio:latest@sha256:304e0bbeb70a9aa0c40ff26d5a9c0a24296019c6d326ba8b75214fb73441d6e9
     command: ["server", "/data"]
+    networks: [inner]
     environment:
       MINIO_ROOT_USER: ${MINIO_USER:?}
       MINIO_ROOT_PASSWORD: ${MINIO_PASSWORD:?}
+networks:
+  inner: { internal: true }
+  outer: {}

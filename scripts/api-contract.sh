@@ -28,7 +28,7 @@ cleanup() {
 trap cleanup EXIT
 
 "${COMPOSE[@]}" up -d --build --wait db minio
-"${COMPOSE[@]}" up -d --build strata
+"${COMPOSE[@]}" up -d --build strata gateway
 for _ in $(seq 120); do curl -fsS "$B/healthz" >/dev/null 2>&1 && break; sleep 1; done
 curl -fsS "$B/healthz" >/dev/null
 

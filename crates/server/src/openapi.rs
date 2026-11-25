@@ -291,8 +291,8 @@ fn stat_file() {}
         ("Range" = Option<String>, Header, description = "One byte range (bytes=a-b, a-, -n)"),
         ("If-Range" = Option<String>, Header), ("If-None-Match" = Option<String>, Header)),
     responses((status = 409, description = "The file changed while being read", body = ErrorBody), 
-        (status = 200, description = "The file", content_type = "application/octet-stream", body = Binary),
-        (status = 206, description = "A byte range", content_type = "application/octet-stream", body = Binary),
+        (status = 200, description = "The file, as its sniffed type", content_type = "*/*", body = Binary),
+        (status = 206, description = "A byte range", content_type = "*/*", body = Binary),
         (status = 304, description = "Not modified"),
         (status = 416, description = "Range not satisfiable"),
         (status = 503, body = ErrorBody)))]
@@ -383,8 +383,8 @@ fn unlock_share() {}
 #[utoipa::path(get, path = "/api/public/{token}/content", tag = "public",
     params(("token" = String, Path), ("path" = Option<String>, Query), ("k" = Option<String>, Query),
         ("download" = Option<String>, Query), ("Range" = Option<String>, Header)),
-    responses((status = 409, description = "The file changed while being read", body = ErrorBody), (status = 401, description = "A password-protected share without its key", body = ErrorBody), (status = 200, content_type = "application/octet-stream", body = Binary),
-        (status = 206, content_type = "application/octet-stream", body = Binary),
+    responses((status = 409, description = "The file changed while being read", body = ErrorBody), (status = 401, description = "A password-protected share without its key", body = ErrorBody), (status = 200, content_type = "*/*", body = Binary),
+        (status = 206, content_type = "*/*", body = Binary),
         (status = 304, description = "Not modified"), (status = 416, description = "Range not satisfiable"),
         (status = 503, body = ErrorBody)))]
 fn share_content() {}
@@ -477,12 +477,14 @@ impl Modify for Defaults {
                 add("400", "Bad request (a parameter or the body)");
                 if !public {
                     add("401", "Not signed in");
-                    add(
-                        "403",
-                        "Not allowed (or a cookie request without X-Strata, or a read-only folder)",
-                    );
                 }
+                // (Storage can refuse too, on any operation that touches it.)
+                add(
+                    "403",
+                    "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)",
+                );
                 add("404", "Not found");
+                add("409", "In conflict with what is there");
                 if has_body {
                     add("413", "The body is too large");
                     add("415", "The body has the wrong content type");
@@ -715,27 +717,55 @@ mod tests {
         );
     }
 
-    /// Every route the router serves is documented, and nothing else is.
+    /// Every route the router serves, with each of its methods, is
+    /// documented, and nothing else is.
     #[test]
     fn every_route_is_documented() {
-        let src = include_str!("routes.rs");
-        let mut routes: Vec<String> = Vec::new();
-        let mut rest = src;
-        while let Some(i) = rest.find(".route(") {
-            rest = &rest[i + 7..];
-            let start = rest.find('"').unwrap() + 1;
-            let end = start + rest[start..].find('"').unwrap();
-            let p = &rest[start..end];
-            routes.push(if p == "/healthz" || p.starts_with("/api/") {
+        // The `.route("path", get(..).post(..))` calls in routes.rs (not
+        // in comments).
+        let code: String = include_str!("routes.rs")
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut routes = Vec::new();
+        let parts: Vec<&str> = code.split(".route(").skip(1).collect();
+        for part in parts {
+            let start = part.find('"').unwrap() + 1;
+            let end = start + part[start..].find('"').unwrap();
+            let p = &part[start..end];
+            let path = if p == "/healthz" {
                 p.to_string()
             } else {
                 format!("/api{p}")
-            });
+            };
+            let handlers = &part[end..];
+            for m in ["get", "put", "post", "delete"] {
+                // `get(`, `.post(` or `routing::delete(`, as a whole word.
+                let called = handlers.match_indices(&format!("{m}(")).any(|(k, _)| {
+                    k == 0 || !handlers[..k].ends_with(|c: char| c.is_alphanumeric() || c == '_')
+                });
+                if called {
+                    routes.push(format!("{} {path}", m.to_uppercase()));
+                }
+            }
         }
         routes.sort();
         routes.dedup();
         let doc = ApiDoc::openapi();
-        let mut documented: Vec<String> = doc.paths.paths.keys().cloned().collect();
+        let mut documented = Vec::new();
+        for (path, item) in &doc.paths.paths {
+            for (m, op) in [
+                ("GET", &item.get),
+                ("PUT", &item.put),
+                ("POST", &item.post),
+                ("DELETE", &item.delete),
+            ] {
+                if op.is_some() {
+                    documented.push(format!("{m} {path}"));
+                }
+            }
+        }
         documented.sort();
         assert_eq!(routes, documented);
     }
