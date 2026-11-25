@@ -196,6 +196,16 @@ pub async fn create(
     Json(req): Json<UpsertReq>,
 ) -> ApiResult<Json<ConnectionView>> {
     validate(&u, &req.name, &req.config)?;
+    // Only the connection's own keys are ever used (never the server's).
+    if let ConnectionConfig::S3 {
+        access_key_id,
+        secret_access_key,
+        ..
+    } = &req.config
+        && (access_key_id.trim().is_empty() || secret_access_key.is_empty())
+    {
+        return Err(bad("an S3 connection needs an access key and its secret"));
+    }
     req.config
         .create_local_root(&st.cfg.local_base)
         .map_err(|e| bad(format!("invalid config: {e}")))?;

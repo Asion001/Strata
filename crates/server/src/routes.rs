@@ -45,7 +45,6 @@ async fn openapi_json() -> axum::response::Response {
 /// axum's own rejections (a body that isn't JSON, a bad query or path) are
 /// plain text: answered as the API's JSON error instead, like every other.
 async fn json_rejections(resp: axum::response::Response) -> axum::response::Response {
-    use axum::response::IntoResponse;
     let plain = resp
         .headers()
         .get(header::CONTENT_TYPE)
@@ -54,16 +53,24 @@ async fn json_rejections(resp: axum::response::Response) -> axum::response::Resp
     if !resp.status().is_client_error() || !plain {
         return resp;
     }
-    let status = resp.status();
-    let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+    // (Only the body changes: status, headers and extensions stay.)
+    let (mut parts, body) = resp.into_parts();
+    let body = axum::body::to_bytes(body, 64 * 1024)
         .await
         .unwrap_or_default();
     let msg = String::from_utf8_lossy(&body).trim().to_string();
-    (
-        status,
-        Json(json!({ "error": if msg.is_empty() { status.to_string() } else { msg } })),
-    )
-        .into_response()
+    let msg = if msg.is_empty() {
+        parts.status.to_string()
+    } else {
+        msg
+    };
+    let json = serde_json::to_vec(&json!({ "error": msg })).unwrap_or_default();
+    parts.headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    parts.headers.remove(header::CONTENT_LENGTH);
+    axum::response::Response::from_parts(parts, axum::body::Body::from(json))
 }
 
 pub fn router(st: AppState) -> Router {

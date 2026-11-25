@@ -2911,6 +2911,16 @@
             },
             "description": "Not found"
           },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The file changed while being read"
+          },
           "416": {
             "description": "Range not satisfiable"
           },
@@ -3077,6 +3087,13 @@
             "description": "Changed by someone else"
           },
           "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
             "description": "Too large to edit here"
           },
           "415": {
@@ -3345,6 +3362,16 @@
             },
             "description": "Not found"
           },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "A folder holds mount points, or the folder is busy"
+          },
           "413": {
             "content": {
               "application/json": {
@@ -3475,6 +3502,16 @@
               }
             },
             "description": "Not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The file changed while being read"
           },
           "500": {
             "content": {
@@ -4782,6 +4819,16 @@
             },
             "description": "Not found"
           },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The file changed while being read"
+          },
           "416": {
             "description": "Range not satisfiable"
           },
@@ -4884,6 +4931,16 @@
               }
             },
             "description": "Not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The file changed while being read"
           },
           "500": {
             "content": {
@@ -5950,6 +6007,13 @@
             "description": "Not found"
           },
           "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
             "description": "Larger than a chunk can be"
           },
           "415": {

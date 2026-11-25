@@ -290,7 +290,7 @@ fn stat_file() {}
     params(("path" = Option<String>, Query), ("download" = Option<String>, Query, description = "1: as an attachment"),
         ("Range" = Option<String>, Header, description = "One byte range (bytes=a-b, a-, -n)"),
         ("If-Range" = Option<String>, Header), ("If-None-Match" = Option<String>, Header)),
-    responses(
+    responses((status = 409, description = "The file changed while being read", body = ErrorBody), 
         (status = 200, description = "The file", content_type = "application/octet-stream", body = Binary),
         (status = 206, description = "A byte range", content_type = "application/octet-stream", body = Binary),
         (status = 304, description = "Not modified"),
@@ -307,7 +307,7 @@ fn get_content() {}
         (status = 200, body = SavedBody),
         (status = 409, body = ErrorBody),
         (status = 412, description = "Changed by someone else", body = ErrorBody),
-        (status = 413, description = "Too large to edit here"),
+        (status = 413, description = "Too large to edit here", body = ErrorBody),
         (status = 428, description = "A precondition header is missing", body = ErrorBody),
         (status = 503, body = ErrorBody)))]
 fn put_content() {}
@@ -316,7 +316,7 @@ fn put_content() {}
     responses((status = 200, content_type = "image/jpeg", body = Binary), (status = 304, description = "Not modified"),
         (status = 503, body = ErrorBody)))]
 fn thumbnail() {}
-#[utoipa::path(get, path = "/api/files/image", tag = "files", params(("path" = Option<String>, Query)), responses(
+#[utoipa::path(get, path = "/api/files/image", tag = "files", params(("path" = Option<String>, Query)), responses((status = 409, description = "The file changed while being read", body = ErrorBody), 
     (status = 200, description = "The file, as an image (SVG too)", content_type = "image/*", body = Binary),
     (status = 304, description = "Not modified"), (status = 503, body = ErrorBody)))]
 fn get_image() {}
@@ -329,7 +329,7 @@ fn move_file() {}
 #[utoipa::path(post, path = "/api/files/copy", tag = "files", request_body = FromTo, responses(
     (status = 200, body = PathResultBody), (status = 409, body = ErrorBody), (status = 503, body = ErrorBody)))]
 fn copy_file() {}
-#[utoipa::path(post, path = "/api/files/delete", tag = "files", request_body = DeleteBody, responses(
+#[utoipa::path(post, path = "/api/files/delete", tag = "files", request_body = DeleteBody, responses((status = 409, description = "A folder holds mount points, or the folder is busy", body = ErrorBody), 
     (status = 200, body = DeletedBody), (status = 503, body = ErrorBody)))]
 fn delete_files() {}
 #[utoipa::path(get, path = "/api/search", tag = "files",
@@ -348,7 +348,7 @@ fn cancel_upload() {}
 #[utoipa::path(put, path = "/api/uploads/{id}/chunks/{hash}", tag = "uploads",
     params(("id" = String, Path), ("hash" = String, Path, description = "BLAKE3 of the chunk (hex)")),
     request_body(content = Binary, content_type = "application/octet-stream"),
-    responses((status = 200, body = EmptyBody), (status = 413, description = "Larger than a chunk can be"),
+    responses((status = 200, body = EmptyBody), (status = 413, description = "Larger than a chunk can be", body = ErrorBody),
         (status = 503, body = ErrorBody)))]
 fn put_chunk() {}
 #[utoipa::path(post, path = "/api/uploads/{id}/commit", tag = "uploads", params(("id" = String, Path)), responses(
@@ -383,7 +383,7 @@ fn unlock_share() {}
 #[utoipa::path(get, path = "/api/public/{token}/content", tag = "public",
     params(("token" = String, Path), ("path" = Option<String>, Query), ("k" = Option<String>, Query),
         ("download" = Option<String>, Query), ("Range" = Option<String>, Header)),
-    responses((status = 401, description = "A password-protected share without its key", body = ErrorBody), (status = 200, content_type = "application/octet-stream", body = Binary),
+    responses((status = 409, description = "The file changed while being read", body = ErrorBody), (status = 401, description = "A password-protected share without its key", body = ErrorBody), (status = 200, content_type = "application/octet-stream", body = Binary),
         (status = 206, content_type = "application/octet-stream", body = Binary),
         (status = 304, description = "Not modified"), (status = 416, description = "Range not satisfiable"),
         (status = 503, body = ErrorBody)))]
@@ -395,7 +395,7 @@ fn share_content() {}
 fn share_thumb() {}
 #[utoipa::path(get, path = "/api/public/{token}/image", tag = "public",
     params(("token" = String, Path), ("path" = Option<String>, Query), ("k" = Option<String>, Query)),
-    responses((status = 401, description = "A password-protected share without its key", body = ErrorBody), (status = 200, content_type = "image/*", body = Binary), (status = 304, description = "Not modified"),
+    responses((status = 409, description = "The file changed while being read", body = ErrorBody), (status = 401, description = "A password-protected share without its key", body = ErrorBody), (status = 200, content_type = "image/*", body = Binary), (status = 304, description = "Not modified"),
         (status = 503, body = ErrorBody)))]
 fn share_image() {}
 
