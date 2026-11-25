@@ -832,20 +832,101 @@ async fn restore_never_lands_under_or_on_a_new_mount() {
 }
 
 #[tokio::test]
-async fn orphan_trash_folders_are_swept() {
+async fn orphan_trash_folders_are_set_aside_and_doomed_ones_removed() {
     let Some(t) = app().await else { return };
     local_conn(&t, "Disk", "disk").await;
-    let orphan = t.dir.path().join("local/disk/.strata-trash/987654");
+    let trash = t.dir.path().join("local/disk/.strata-trash");
+    let orphan = trash.join("987654");
     std::fs::create_dir_all(&orphan).unwrap();
     std::fs::write(orphan.join("left.txt"), b"left").unwrap();
-    let other = t.dir.path().join("local/disk/.strata-trash/notes");
+    let doomed = trash.join("purging-5");
+    std::fs::create_dir_all(&doomed).unwrap();
+    std::fs::write(doomed.join("x"), b"x").unwrap();
+    let other = trash.join("notes");
     std::fs::create_dir_all(&other).unwrap();
-    assert_eq!(strata_server::trash::reconcile(&t.st).await.unwrap(), 1);
-    assert!(!orphan.exists());
-    assert!(
-        other.exists(),
-        "only folders named like trash ids are swept"
+    assert_eq!(strata_server::trash::reconcile(&t.st).await.unwrap(), 2);
+    assert!(!orphan.exists() && !doomed.exists());
+    assert!(other.exists(), "only Strata's names are touched");
+    // The orphan's files are kept, never deleted.
+    let aside: Vec<_> = std::fs::read_dir(&trash)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .filter(|n| n.starts_with("orphan-987654-"))
+        .collect();
+    assert_eq!(aside.len(), 1, "{aside:?}");
+    assert_eq!(
+        std::fs::read(trash.join(&aside[0]).join("left.txt")).unwrap(),
+        b"left"
     );
+}
+
+#[tokio::test]
+async fn a_left_over_trash_folder_is_never_mixed_with_a_new_item() {
+    let Some(t) = app().await else { return };
+    let cid = local_conn(&t, "Disk", "disk").await;
+    let disk = t.dir.path().join("local/disk");
+    std::fs::create_dir_all(&disk).unwrap();
+    std::fs::write(disk.join("a.txt"), b"new").unwrap();
+    t.ok(
+        "POST",
+        "/api/mounts",
+        json!({"path": "Disk", "connection_id": cid, "mode": "raw"}),
+    )
+    .await;
+    // As after a database restore: the next id's folder already holds files.
+    let next: i64 = count(&t, "SELECT nextval('trash_id_seq')").await + 1;
+    let stale = disk.join(format!(".strata-trash/{next}"));
+    std::fs::create_dir_all(&stale).unwrap();
+    std::fs::write(stale.join("a.txt"), b"old").unwrap();
+    delete(&t, &["Disk/a.txt"]).await;
+    let id = id_of(&items(&t).await, "Disk/a.txt");
+    assert_eq!(id, next);
+    assert_eq!(std::fs::read(stale.join("a.txt")).unwrap(), b"new");
+    let aside = std::fs::read_dir(disk.join(".strata-trash"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| {
+            p.file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("orphan-")
+        })
+        .expect("the old folder is set aside");
+    assert_eq!(std::fs::read(aside.join("a.txt")).unwrap(), b"old");
+    // A purge leaves nothing behind.
+    t.ok("DELETE", &format!("/api/trash/{id}"), json!({})).await;
+    assert!(!stale.exists());
+    assert!(!disk.join(format!(".strata-trash/purging-{id}")).exists());
+}
+
+#[tokio::test]
+async fn a_connection_with_raw_trash_cannot_be_repointed() {
+    let Some(t) = app().await else { return };
+    let cid = local_conn(&t, "Disk", "disk").await;
+    std::fs::create_dir_all(t.dir.path().join("local/disk")).unwrap();
+    std::fs::write(t.dir.path().join("local/disk/a.txt"), b"a").unwrap();
+    t.ok(
+        "POST",
+        "/api/mounts",
+        json!({"path": "Disk", "connection_id": cid, "mode": "raw"}),
+    )
+    .await;
+    delete(&t, &["Disk/a.txt"]).await;
+    let moved = json!({"name": "Disk", "config": {"kind": "local", "path": "elsewhere"}});
+    let (s, v) = t
+        .json("PUT", &format!("/api/connections/{cid}"), moved.clone())
+        .await;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    // A rename is fine, and once the trash is empty so is a new folder.
+    t.ok(
+        "PUT",
+        &format!("/api/connections/{cid}"),
+        json!({"name": "Disk 2", "config": {"kind": "local", "path": "disk"}}),
+    )
+    .await;
+    t.ok("POST", "/api/trash/empty", json!({})).await;
+    t.ok("PUT", &format!("/api/connections/{cid}"), moved).await;
 }
 
 #[tokio::test]

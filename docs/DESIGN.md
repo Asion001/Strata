@@ -167,7 +167,13 @@ links come back with an item restored to the same path (hashed rows keep their
 ids; for raw items, links to the item itself). Trash on an unmounted disk is
 never taken as empty: a missing item counts as gone only while the trash folder
 or the connection's root marker is there. A connection with trashed items is
-deleted only with `?purge_trash=true`; deleting a user removes their trash.
+deleted only with `?purge_trash=true`, and one with raw trash can't be pointed
+at another folder; deleting a user removes their trash. A purge renames the
+item to `.strata-trash/purging-<id>` under the volume lock and removes it
+after. The background job removes left-over `purging-*` folders and sets
+`.strata-trash/<id>` folders no row knows aside as `orphan-<id>-<time>` (kept
+for an admin, never deleted: a database restored from backup can leave real
+files there).
 
 ### Write ordering
 Tree changes of one volume (including raw backend renames, the atomic close of

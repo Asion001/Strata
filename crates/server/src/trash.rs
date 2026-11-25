@@ -74,6 +74,35 @@ fn item_dir(root: &Path, id: i64) -> PathBuf {
     root.join(TRASH_DIR).join(id.to_string())
 }
 
+/// Where a purge moves an item before removing it outside the volume lock.
+/// Whatever is found under this name is doomed (the sweep finishes it).
+fn doomed_dir(root: &Path, id: i64) -> PathBuf {
+    root.join(TRASH_DIR).join(format!("purging-{id}"))
+}
+
+/// Move a `.strata-trash/<id>` folder no row knows out of the way, keeping
+/// its contents (it may hold files after a database restore from backup).
+async fn set_aside(root: &Path, id: i64) -> std::io::Result<()> {
+    let secs = Utc::now().timestamp();
+    let to = root.join(TRASH_DIR).join(format!("orphan-{id}-{secs}"));
+    tokio::fs::rename(item_dir(root, id), to).await
+}
+
+/// Make a fresh, empty `.strata-trash/<id>` folder. One left over from a
+/// database restore is set aside first, never mixed with or replaced.
+async fn make_item_dir(root: &Path, id: i64) -> std::io::Result<PathBuf> {
+    let dir = item_dir(root, id);
+    tokio::fs::create_dir_all(root.join(TRASH_DIR)).await?;
+    match tokio::fs::create_dir(&dir).await {
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            set_aside(root, id).await?;
+            tokio::fs::create_dir(&dir).await?;
+        }
+        r => r?,
+    }
+    Ok(dir)
+}
+
 fn subtree_like(rel: &str) -> String {
     format!("{}/%", vfs::like_escape(rel))
 }
@@ -225,7 +254,7 @@ pub async fn trash(
             let src = root.join(paths::join(&m.base_path, rel));
             let dir = item_dir(root, id);
             let moved = async {
-                tokio::fs::create_dir_all(&dir).await?;
+                make_item_dir(root, id).await?;
                 tokio::fs::rename(&src, dir.join(name)).await
             }
             .await;
@@ -352,6 +381,11 @@ async fn free_name(
         } else {
             restored_name(name, is_dir, n)
         };
+        if candidate.len() > 255 {
+            return Err(conflict(
+                "the name is too long to add \"(restored)\"; rename the item that has its name, then try again",
+            ));
+        }
         if all
             .iter()
             .any(|x| x.path == paths::join(&user_parent, &candidate))
@@ -614,15 +648,20 @@ pub async fn purge(st: &AppState, id: i64) -> ApiResult<()> {
     if !still {
         return Err(ApiError::NotFound);
     }
-    if let Some(root) = root {
-        // Files first, then the row: a crash in between leaves a row whose
-        // item is gone, which reconcile drops.
-        match tokio::fs::remove_dir_all(item_dir(&root, id)).await {
-            Ok(()) => {}
+    let mut doomed = None;
+    if let Some(root) = &root {
+        // Out of the way first, then the row; the files are removed after
+        // the lock is released (a big folder must not block the volume). A
+        // crash in between leaves a row whose item is gone, which reconcile
+        // drops, or a doomed folder, which the sweep removes.
+        let to = doomed_dir(root, id);
+        let _ = tokio::fs::remove_dir_all(&to).await; // a stale one
+        match tokio::fs::rename(item_dir(root, id), &to).await {
+            Ok(()) => doomed = Some(to),
             // Gone, but only believe it while the trash folder is there: a
             // disk that isn't mounted right now hides it too.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                if !trash_reachable(st, connection_id, &root).await {
+                if !trash_reachable(st, connection_id, root).await {
                     return Err(ApiError::Unavailable(
                         "this storage is not available right now; try again later".into(),
                     ));
@@ -635,7 +674,13 @@ pub async fn purge(st: &AppState, id: i64) -> ApiResult<()> {
         .bind(id)
         .execute(&st.db)
         .await?;
-    lock.release().await
+    lock.release().await?;
+    if let Some(to) = doomed
+        && let Err(e) = tokio::fs::remove_dir_all(&to).await
+    {
+        tracing::warn!("trash {id}: removing the purged files failed, the sweep will: {e}");
+    }
+    Ok(())
 }
 
 /// Can we trust what we see in a local connection's trash folder? Not while
@@ -741,10 +786,13 @@ async fn reconcile_one(
     }
 }
 
-/// Remove `.strata-trash/<id>` folders that no row knows (their owner was
-/// deleted while the item was being moved). A row is always written before
-/// its folder is made and removed only after it, so a folder without a row
-/// is never one in use. Best effort; returns how many were removed.
+/// Tidy the trash folders of local connections: remove what a purge left
+/// doomed, and set aside `.strata-trash/<id>` folders that no row knows
+/// (their owner was deleted while the item was moving, or the database was
+/// restored from a backup). A row is always written before its folder is
+/// made and removed only after it, so a folder without a row is never one in
+/// use. Set-aside folders keep their files (`orphan-<id>-<time>`) for an
+/// admin to look at. Best effort; returns how many folders were handled.
 async fn sweep_orphans(st: &AppState) -> usize {
     let Ok(conns) = sqlx::query_scalar::<_, i64>("SELECT id FROM connections WHERE kind = 'local'")
         .fetch_all(&st.db)
@@ -752,7 +800,7 @@ async fn sweep_orphans(st: &AppState) -> usize {
     else {
         return 0;
     };
-    let mut removed = 0;
+    let mut handled = 0;
     for cid in conns {
         let Ok(root) = local_root(st, cid).await else {
             continue;
@@ -761,7 +809,18 @@ async fn sweep_orphans(st: &AppState) -> usize {
             continue;
         };
         while let Ok(Some(e)) = rd.next_entry().await {
-            let Some(id) = e.file_name().to_str().and_then(|n| n.parse::<i64>().ok()) else {
+            let name = e.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if name
+                .strip_prefix("purging-")
+                .is_some_and(|n| n.parse::<i64>().is_ok())
+            {
+                if tokio::fs::remove_dir_all(e.path()).await.is_ok() {
+                    handled += 1;
+                }
+                continue;
+            }
+            let Ok(id) = name.parse::<i64>() else {
                 continue;
             };
             let known: bool =
@@ -773,12 +832,21 @@ async fn sweep_orphans(st: &AppState) -> usize {
                     Ok(k) => k,
                     Err(_) => continue,
                 };
-            if !known && tokio::fs::remove_dir_all(e.path()).await.is_ok() {
-                removed += 1;
+            if known {
+                continue;
+            }
+            match set_aside(&root, id).await {
+                Ok(()) => {
+                    tracing::warn!(
+                        "trash folder {id} of connection {cid} has no record; set aside as orphan-{id}-*"
+                    );
+                    handled += 1;
+                }
+                Err(e) => tracing::warn!("setting aside trash folder {id} failed: {e}"),
             }
         }
     }
-    removed
+    handled
 }
 
 /// Drop a trash row whose storage can't be reached, removing its files if

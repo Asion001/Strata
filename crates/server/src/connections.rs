@@ -277,6 +277,20 @@ pub async fn update(
     // (an unmounted disk's folder must not be created again).
     let repointed = req.config != old;
     if repointed {
+        // A raw trash lives in the connection's folder: re-pointed, its
+        // items could no longer be found (and reconcile would drop them).
+        let raw_trash: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM trash t JOIN volumes v ON v.id = t.volume_id
+             WHERE v.connection_id = $1 AND v.mode = 'raw'",
+        )
+        .bind(id)
+        .fetch_one(&st.db)
+        .await?;
+        if raw_trash > 0 {
+            return Err(conflict(format!(
+                "{raw_trash} deleted item(s) from this connection are still in the trash; restore or delete them before pointing it somewhere else"
+            )));
+        }
         req.config
             .create_local_root(&st.cfg.local_base)
             .map_err(|e| bad(format!("invalid config: {e}")))?;
