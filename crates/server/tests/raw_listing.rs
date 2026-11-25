@@ -117,6 +117,30 @@ async fn stale_listing_is_served_from_cache_and_rescanned_in_background() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
+    // A scanned folder removed outside Strata stops showing its old
+    // children once the background rescan has run.
+    std::fs::write(disk.join("dl/sub/f.txt"), b"f").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while t.names("D/dl/sub").await != vec!["f.txt"] {
+        assert!(Instant::now() < deadline, "f.txt never showed up");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    std::fs::remove_dir_all(disk.join("dl/sub")).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let (s, v) = t.get("/api/files/list?path=D%2Fdl%2Fsub").await;
+        if s == axum::http::StatusCode::NOT_FOUND
+            || v["entries"].as_array().is_some_and(|e| e.is_empty())
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "vanished folder kept its children"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
     // A folder that never was scanned and does not exist is still an error.
     let (s, _) = t.get("/api/files/list?path=D%2Fnope").await;
     assert_eq!(s, axum::http::StatusCode::NOT_FOUND);

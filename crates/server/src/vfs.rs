@@ -319,8 +319,14 @@ pub async fn maybe_scan(st: &AppState, m: &Mount, rel: &str) -> ApiResult<()> {
     Ok(())
 }
 
-/// Start a rescan of a raw folder unless one is already running.
+/// Start a rescan of a raw folder unless one is already running. At most
+/// `RESCAN_SLOTS` run at a time, so many stale opens can't queue up in front
+/// of writes on the volume lock; an open that finds no free slot is answered
+/// from the cache and the next open tries again.
 fn rescan_in_background(st: &AppState, m: &Mount, rel: &str) {
+    let Ok(slot) = st.rescan_slots.clone().try_acquire_owned() else {
+        return;
+    };
     let key = (m.volume_id, rel.to_string());
     if st.rescans.insert(key.clone(), ()).is_some() {
         return;
@@ -335,9 +341,17 @@ fn rescan_in_background(st: &AppState, m: &Mount, rel: &str) {
     let done = Done(st.clone(), key);
     let (st, m, rel) = (st.clone(), m.clone(), rel.to_string());
     tokio::spawn(async move {
-        let _done = done;
+        let (_done, _slot) = (done, slot);
         if let Err(e) = scan_dir_inner(&st, &m, &rel, true).await {
             tracing::warn!("background rescan of volume {} {rel:?}: {e}", m.volume_id);
+            // The folder may be gone or no longer a folder: forget the scan,
+            // so the next open rescans in the request and reports the error
+            // instead of serving the old listing again.
+            let _ = sqlx::query("DELETE FROM raw_scans WHERE volume_id = $1 AND dir = $2")
+                .bind(m.volume_id)
+                .bind(&rel)
+                .execute(&st.db)
+                .await;
         }
     });
 }

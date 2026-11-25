@@ -67,6 +67,8 @@ pub struct Inner {
     /// Raw folders (volume id, dir) with a background rescan running, so
     /// repeated opens of a stale folder start only one.
     pub rescans: DashMap<(i64, String), ()>,
+    /// Background rescans allowed to run at once (see `vfs::maybe_scan`).
+    pub rescan_slots: Arc<tokio::sync::Semaphore>,
     /// Server-local folder for chunks of uploads into raw volumes
     /// (`<staging>/<upload id>/<chunk hash>`).
     pub staging: std::path::PathBuf,
@@ -122,6 +124,7 @@ impl AppState {
             layout_lock: Arc::new(tokio::sync::Mutex::new(())),
             lock_permits: Arc::new(tokio::sync::Semaphore::new(8)),
             rescans: DashMap::new(),
+            rescan_slots: Arc::new(tokio::sync::Semaphore::new(2)),
             staging,
         }));
         crate::health::load(&st).await?;
