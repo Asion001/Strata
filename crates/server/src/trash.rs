@@ -201,7 +201,16 @@ pub async fn trash(
                     .bind(id)
                     .execute(&st.db)
                     .await;
-                return Err(io_error(e));
+                return Err(if e.kind() == std::io::ErrorKind::CrossesDevices {
+                    // A disk mounted inside the connection: no rename to the
+                    // trash folder is possible. Say so; the client may then
+                    // delete permanently.
+                    conflict(
+                        "this folder is on another disk than its connection, so it can't go to the trash; delete it permanently instead",
+                    )
+                } else {
+                    io_error(e)
+                });
             }
             sqlx::query("UPDATE trash SET ready = TRUE WHERE id = $1")
                 .bind(id)
@@ -239,8 +248,9 @@ async fn row_again(st: &AppState, id: i64) -> ApiResult<Row> {
     .ok_or(ApiError::NotFound)
 }
 
-/// "name (restored).ext", then "name (restored 2).ext", ...
-pub fn restored_name(name: &str, n: u32) -> String {
+/// "name (restored).ext", then "name (restored 2).ext", ... Folders keep
+/// their whole name: "v1.2 (restored)".
+pub fn restored_name(name: &str, is_dir: bool, n: u32) -> String {
     let tag = if n <= 1 {
         "restored".to_string()
     } else {
@@ -248,19 +258,25 @@ pub fn restored_name(name: &str, n: u32) -> String {
     };
     // A leading dot is part of the name (".env"), not an extension.
     match name.rfind('.') {
-        Some(i) if i > 0 => format!("{} ({tag}){}", &name[..i], &name[i..]),
+        Some(i) if i > 0 && !is_dir => format!("{} ({tag}){}", &name[..i], &name[i..]),
         _ => format!("{name} ({tag})"),
     }
 }
 
 /// The original name if it is free in `parent`, else the first free
 /// "(restored)" variant. Caller holds the volume lock.
-async fn free_name(st: &AppState, m: &Mount, parent: &str, name: &str) -> ApiResult<String> {
+async fn free_name(
+    st: &AppState,
+    m: &Mount,
+    parent: &str,
+    name: &str,
+    is_dir: bool,
+) -> ApiResult<String> {
     for n in 0..1000 {
         let candidate = if n == 0 {
             name.to_string()
         } else {
-            restored_name(name, n)
+            restored_name(name, is_dir, n)
         };
         match vfs::stat(st, m, &paths::join(parent, &candidate)).await {
             Err(ApiError::NotFound) => return Ok(candidate),
@@ -303,17 +319,32 @@ pub async fn restore(st: &AppState, user_id: i64, id: i64) -> ApiResult<String> 
         .ok_or_else(|| conflict("the storage this came from is no longer mounted"))?;
     vfs::ensure_writable(st, &m).await?;
     let (parent, _) = paths::split(&row.rel_path).ok_or_else(|| bad("invalid trash entry"))?;
-    if !parent.is_empty() {
-        vfs::mkdir_in(st, &m, parent).await?;
-    }
     let root = if m.is_hashed() {
         None
     } else {
         Some(local_root(st, m.connection_id).await?)
     };
-    let lock = vfs::lock_volume(st, m.volume_id).await?;
+    // Missing parents are created first (mkdir takes the volume lock itself),
+    // then checked again under the lock: a delete may remove them in between.
+    let mut tries = 0;
+    let lock = loop {
+        if !parent.is_empty() {
+            vfs::mkdir_in(st, &m, parent).await?;
+        }
+        let lock = vfs::lock_volume(st, m.volume_id).await?;
+        if parent.is_empty() || vfs::stat(st, &m, parent).await.is_ok_and(|n| n.is_dir) {
+            break lock;
+        }
+        lock.release().await?;
+        tries += 1;
+        if tries == 3 {
+            return Err(conflict(
+                "the folder it goes back to keeps changing; try again",
+            ));
+        }
+    };
     let row = row_again(st, id).await?;
-    let name = free_name(st, &m, parent, &row.name).await?;
+    let name = free_name(st, &m, parent, &row.name, row.is_dir).await?;
     let new_rel = paths::join(parent, &name);
     match &root {
         None => {
@@ -403,7 +434,15 @@ async fn purge(st: &AppState, id: i64) -> ApiResult<()> {
         // item is gone, which reconcile drops.
         match tokio::fs::remove_dir_all(item_dir(&root, id)).await {
             Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            // Gone, but only believe it while the trash folder is there: a
+            // disk that isn't mounted right now hides it too.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if !trash_reachable(st, connection_id, &root).await {
+                    return Err(ApiError::Unavailable(
+                        "this storage is not available right now; try again later".into(),
+                    ));
+                }
+            }
             Err(e) => return Err(io_error(e)),
         }
     }
@@ -414,21 +453,34 @@ async fn purge(st: &AppState, id: i64) -> ApiResult<()> {
     lock.release().await
 }
 
-/// Settle raw trash rows after a crash: a row whose rename never happened is
-/// dropped (the item is still in place); one whose rename did is made ready;
-/// a ready row whose item is gone from disk is dropped. Each row is checked
-/// under its volume lock, so an operation still in progress (which holds the
-/// lock from writing the row to finishing) is never mistaken for a crash.
+/// Can we trust what we see in a local connection's trash folder? Not while
+/// the connection is offline or the folder is missing (a disk not mounted
+/// right now shows an empty mount point).
+async fn trash_reachable(st: &AppState, connection_id: i64, root: &Path) -> bool {
+    !st.is_offline(connection_id)
+        && tokio::fs::metadata(root.join(TRASH_DIR))
+            .await
+            .is_ok_and(|m| m.is_dir())
+}
+
+/// Settle raw trash rows after a crash, each under its volume lock (an
+/// operation in progress holds it from writing the row to finishing, so it
+/// is never mistaken for a crash):
+///
+/// * not ready, item in the trash folder: the rename happened; mark ready;
+/// * not ready, item still in its place: the rename never happened; drop;
+/// * item in neither place, or a ready row whose item is gone: drop, but only
+///   while the trash folder can be trusted (see `trash_reachable`).
 pub async fn reconcile(st: &AppState) -> ApiResult<usize> {
-    let rows: Vec<(i64, i64, i64, String, String)> = sqlx::query_as(
-        "SELECT t.id, t.volume_id, v.connection_id, t.rel_path, t.name
+    let rows: Vec<(i64, i64, i64, String, String, String)> = sqlx::query_as(
+        "SELECT t.id, t.volume_id, v.connection_id, v.base_path, t.rel_path, t.name
          FROM trash t JOIN volumes v ON v.id = t.volume_id
          WHERE v.mode = 'raw'",
     )
     .fetch_all(&st.db)
     .await?;
     let mut fixed = 0;
-    for (id, volume_id, connection_id, rel, name) in rows {
+    for (id, volume_id, connection_id, base, rel, name) in rows {
         let Ok(root) = local_root(st, connection_id).await else {
             continue;
         };
@@ -442,17 +494,24 @@ pub async fn reconcile(st: &AppState) -> ApiResult<usize> {
             lock.release().await?;
             continue;
         };
-        let there = tokio::fs::symlink_metadata(item_dir(&root, id).join(&name))
-            .await
-            .is_ok();
-        if there && !ready {
-            sqlx::query("UPDATE trash SET ready = TRUE WHERE id = $1")
-                .bind(id)
-                .execute(&st.db)
-                .await?;
-            vfs::delete_subtree_rows(st, volume_id, &rel).await?;
-            fixed += 1;
-        } else if !there {
+        let exists = |p: PathBuf| async move { tokio::fs::symlink_metadata(p).await.is_ok() };
+        let in_trash = exists(item_dir(&root, id).join(&name)).await;
+        let drop_row = if in_trash {
+            if !ready {
+                sqlx::query("UPDATE trash SET ready = TRUE WHERE id = $1")
+                    .bind(id)
+                    .execute(&st.db)
+                    .await?;
+                vfs::delete_subtree_rows(st, volume_id, &rel).await?;
+                fixed += 1;
+            }
+            false
+        } else if !ready && exists(root.join(paths::join(&base, &rel))).await {
+            true
+        } else {
+            trash_reachable(st, connection_id, &root).await
+        };
+        if drop_row {
             sqlx::query("DELETE FROM trash WHERE id = $1")
                 .bind(id)
                 .execute(&st.db)
@@ -463,6 +522,33 @@ pub async fn reconcile(st: &AppState) -> ApiResult<usize> {
         lock.release().await?;
     }
     Ok(fixed)
+}
+
+/// A user's raw trash items, to remove from disk once the user is deleted
+/// (their rows go with the account).
+pub async fn raw_items_of_user(st: &AppState, user_id: i64) -> ApiResult<Vec<(i64, i64)>> {
+    Ok(sqlx::query_as(
+        "SELECT t.id, v.connection_id FROM trash t JOIN volumes v ON v.id = t.volume_id
+         WHERE t.owner_id = $1 AND v.mode = 'raw'",
+    )
+    .bind(user_id)
+    .fetch_all(&st.db)
+    .await?)
+}
+
+/// Remove raw trash items (id, connection) whose rows are already gone.
+/// Best effort: a failure is logged and leaves only hidden files behind.
+pub async fn remove_raw_items(st: &AppState, items: &[(i64, i64)]) {
+    for &(id, connection_id) in items {
+        let Ok(root) = local_root(st, connection_id).await else {
+            continue;
+        };
+        match tokio::fs::remove_dir_all(item_dir(&root, id)).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => tracing::warn!("removing trash item {id} failed: {e}"),
+        }
+    }
 }
 
 /// Purge everything past its retention date. Returns how many were purged.
@@ -572,10 +658,11 @@ mod tests {
 
     #[test]
     fn restored_names() {
-        assert_eq!(restored_name("a.txt", 1), "a (restored).txt");
-        assert_eq!(restored_name("a.txt", 2), "a (restored 2).txt");
-        assert_eq!(restored_name("photos", 1), "photos (restored)");
-        assert_eq!(restored_name(".env", 1), ".env (restored)");
-        assert_eq!(restored_name("a.tar.gz", 3), "a.tar (restored 3).gz");
+        assert_eq!(restored_name("a.txt", false, 1), "a (restored).txt");
+        assert_eq!(restored_name("a.txt", false, 2), "a (restored 2).txt");
+        assert_eq!(restored_name("photos", true, 1), "photos (restored)");
+        assert_eq!(restored_name("v1.2", true, 1), "v1.2 (restored)");
+        assert_eq!(restored_name(".env", false, 1), ".env (restored)");
+        assert_eq!(restored_name("a.tar.gz", false, 3), "a.tar (restored 3).gz");
     }
 }

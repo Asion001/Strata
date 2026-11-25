@@ -408,6 +408,19 @@ pub async fn delete(
             "this connection holds hashed volumes with files; mount them again and delete the files first",
         ));
     }
+    // Trashed items keep their volume until they are restored or purged
+    // (hashed ones hold blobs, raw ones files under `.strata-trash`).
+    let trashed: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM trash t JOIN volumes v ON v.id = t.volume_id WHERE v.connection_id = $1",
+    )
+    .bind(id)
+    .fetch_one(&st.db)
+    .await?;
+    if trashed > 0 {
+        return Err(conflict(format!(
+            "{trashed} deleted item(s) from this connection are still in a trash; restore or purge them first"
+        )));
+    }
     // A local connection's marker goes with it (best effort, below).
     // (Its operator, rooted at the folder, built before the row goes.)
     let local_op = match st.connection_config(id).await {

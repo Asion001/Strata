@@ -151,6 +151,14 @@ async fn restore_takes_a_free_name_and_recreates_parents() {
     let id = id_of(&items(&t).await, "F");
     assert_eq!(restore(&t, id).await, "F (restored)");
     assert_eq!(t.download("F (restored)/1/2.txt").await, b"two");
+    // Folder names keep their dots.
+    t.ok("POST", "/api/files/mkdir", json!({"path": "v1.2"}))
+        .await;
+    delete(&t, &["v1.2"]).await;
+    t.ok("POST", "/api/files/mkdir", json!({"path": "v1.2"}))
+        .await;
+    let id = id_of(&items(&t).await, "v1.2");
+    assert_eq!(restore(&t, id).await, "v1.2 (restored)");
 }
 
 #[tokio::test]
@@ -466,4 +474,148 @@ async fn trash_folder_is_reserved_for_local_connections_and_mounts() {
         )
         .await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn unreachable_trash_folder_is_never_read_as_empty() {
+    let Some(t) = app().await else { return };
+    let cid = local_conn(&t, "Disk", "disk").await;
+    let disk = t.dir.path().join("local/disk");
+    std::fs::create_dir_all(&disk).unwrap();
+    std::fs::write(disk.join("a.txt"), b"a").unwrap();
+    t.ok(
+        "POST",
+        "/api/mounts",
+        json!({"path": "Disk", "connection_id": cid, "mode": "raw"}),
+    )
+    .await;
+    delete(&t, &["Disk/a.txt"]).await;
+    let id = id_of(&items(&t).await, "Disk/a.txt");
+    // The disk is "unmounted": its trash folder is not there right now.
+    let tdir = disk.join(".strata-trash");
+    let away = t.dir.path().join("away");
+    std::fs::rename(&tdir, &away).unwrap();
+    assert_eq!(strata_server::trash::reconcile(&t.st).await.unwrap(), 0);
+    let (s, _) = t
+        .json("DELETE", &format!("/api/trash/{id}"), json!({}))
+        .await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(items(&t).await.len(), 1, "the row survives");
+    // Back again: everything is where it was.
+    std::fs::rename(&away, &tdir).unwrap();
+    assert_eq!(restore(&t, id).await, "Disk/a.txt");
+    assert_eq!(std::fs::read(disk.join("a.txt")).unwrap(), b"a");
+}
+
+#[tokio::test]
+async fn connection_with_trashed_items_cannot_be_deleted() {
+    let Some(t) = app().await else { return };
+    let cid = local_conn(&t, "Store", "store").await;
+    let v = t
+        .ok(
+            "POST",
+            "/api/mounts",
+            json!({"path": "S", "connection_id": cid, "mode": "hashed"}),
+        )
+        .await;
+    t.upload("S/a.txt", b"a").await;
+    delete(&t, &["S/a.txt"]).await;
+    let mid = v["id"].as_i64().unwrap();
+    t.ok("DELETE", &format!("/api/mounts/{mid}"), json!({}))
+        .await;
+    let (s, v) = t
+        .json("DELETE", &format!("/api/connections/{cid}"), json!({}))
+        .await;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    t.ok("POST", "/api/trash/empty", json!({})).await;
+    t.ok("DELETE", &format!("/api/connections/{cid}"), json!({}))
+        .await;
+}
+
+#[tokio::test]
+async fn deleting_a_user_removes_their_raw_trash_from_disk() {
+    let Some(t) = app().await else { return };
+    let cid = local_conn(&t, "Disk", "disk").await;
+    let disk = t.dir.path().join("local/disk");
+    std::fs::create_dir_all(&disk).unwrap();
+    std::fs::write(disk.join("bob.txt"), b"bob").unwrap();
+    let v = t
+        .ok(
+            "POST",
+            "/api/admin/users",
+            json!({"username": "bob", "password": "bobpassword"}),
+        )
+        .await;
+    let bob_id = v["id"].as_i64().unwrap();
+    // The admin shares the connection's folder with bob through his own mount.
+    sqlx::query("UPDATE connections SET owner_id = $1 WHERE id = $2")
+        .bind(bob_id)
+        .bind(cid)
+        .execute(&t.st.db)
+        .await
+        .unwrap();
+    let mut bob = TestApp {
+        router: t.router.clone(),
+        st: t.st.clone(),
+        cookie: None,
+        dir: tempfile::tempdir().unwrap(),
+    };
+    bob.login("bob", "bobpassword").await;
+    bob.ok(
+        "POST",
+        "/api/mounts",
+        json!({"path": "Disk", "connection_id": cid, "mode": "raw"}),
+    )
+    .await;
+    delete(&bob, &["Disk/bob.txt"]).await;
+    let id = id_of(&items(&bob).await, "Disk/bob.txt");
+    let item = disk.join(format!(".strata-trash/{id}"));
+    assert!(item.exists());
+    // Bob still owns the connection: the delete is refused, the trash kept.
+    let (s, _) = t
+        .json("DELETE", &format!("/api/admin/users/{bob_id}"), json!({}))
+        .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert!(item.exists(), "a refused delete keeps the trash");
+    sqlx::query("UPDATE connections SET owner_id = (SELECT id FROM users WHERE username = 'admin') WHERE id = $1")
+        .bind(cid)
+        .execute(&t.st.db)
+        .await
+        .unwrap();
+    t.ok("DELETE", &format!("/api/admin/users/{bob_id}"), json!({}))
+        .await;
+    assert!(!item.exists());
+}
+
+#[tokio::test]
+async fn item_on_another_disk_is_refused_not_lost() {
+    let Some(t) = app().await else { return };
+    // A folder on another filesystem (tmpfs), reached through a symlink.
+    let Ok(other) = tempfile::tempdir_in("/dev/shm") else {
+        return;
+    };
+    let cid = local_conn(&t, "Disk", "disk").await;
+    let disk = t.dir.path().join("local/disk");
+    std::fs::create_dir_all(&disk).unwrap();
+    std::fs::write(other.path().join("far.txt"), b"far").unwrap();
+    std::os::unix::fs::symlink(other.path(), disk.join("other")).unwrap();
+    t.ok(
+        "POST",
+        "/api/mounts",
+        json!({"path": "Disk", "connection_id": cid, "mode": "raw"}),
+    )
+    .await;
+    let (s, v) = t
+        .json(
+            "POST",
+            "/api/files/delete",
+            json!({"paths": ["Disk/other/far.txt"]}),
+        )
+        .await;
+    if s == StatusCode::NOT_FOUND {
+        return; // this backend does not follow symlinked folders
+    }
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    assert_eq!(std::fs::read(other.path().join("far.txt")).unwrap(), b"far");
+    assert!(items(&t).await.is_empty());
 }

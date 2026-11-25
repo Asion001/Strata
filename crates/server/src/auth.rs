@@ -448,6 +448,9 @@ pub async fn admin_delete_user(
     if owns_default {
         return Err(bad("this user owns the server storage connection"));
     }
+    // Their raw trash items live on disk: note them now, remove them once the
+    // delete has gone through (a refused delete keeps them).
+    let raw_trash = crate::trash::raw_items_of_user(&st, id).await?;
     // Mounts go with the user; volumes (and their data) stay. One transaction,
     // so a refused delete leaves the account exactly as it was.
     let mut tx = st.db.begin().await?;
@@ -471,6 +474,7 @@ pub async fn admin_delete_user(
     }
     tx.commit().await?;
     crate::mounts::invalidate(&st, id);
+    crate::trash::remove_raw_items(&st, &raw_trash).await;
     Ok(Json(json!({})))
 }
 
