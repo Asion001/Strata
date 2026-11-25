@@ -1,7 +1,7 @@
 <script lang="ts">
   import { confirmDialog } from '$lib/dialogs.svelte';
   import { toastError } from '$lib/toast.svelte';
-  import { api } from '$lib/api';
+  import { api, ApiError } from '$lib/api';
   import { session } from '$lib/session.svelte';
   import { cn } from '$lib/utils';
   import Button from '$lib/components/ui/button/button.svelte';
@@ -99,9 +99,25 @@
     return () => { closed = true; ws?.close(); };
   });
   async function del(c: Conn) {
-    const ok = await confirmDialog({ title: `Delete connection “${c.name}”?`, body: 'Unmounted hashed volumes on it lose their file index, and deleted items from it that are still in the trash are removed for good.', confirm: 'Delete', danger: true });
+    const ok = await confirmDialog({ title: `Delete connection “${c.name}”?`, body: 'Unmounted hashed volumes on it lose their file index.', confirm: 'Delete', danger: true });
     if (!ok) return;
-    try { await api('DELETE', `/api/connections/${c.id}?purge_trash=true`); await load(); } catch (e) { toastError(e); }
+    try {
+      await api('DELETE', `/api/connections/${c.id}`);
+    } catch (e) {
+      // Deleted items from it are still in someone's trash: say how many and
+      // ask again before removing them for good.
+      if (!(e instanceof ApiError && e.status === 409 && e.message.includes('purge_trash'))) return toastError(e);
+      const n = e.message.match(/^\d+/)?.[0] ?? 'Some';
+      const purge = await confirmDialog({
+        title: 'Remove deleted items for good?',
+        body: `${n} deleted item(s) from this connection are still in the trash (yours or other users’). Deleting the connection removes them permanently.`,
+        confirm: 'Delete connection and items',
+        danger: true
+      });
+      if (!purge) return;
+      try { await api('DELETE', `/api/connections/${c.id}?purge_trash=true`); } catch (e2) { return toastError(e2); }
+    }
+    await load();
   }
   const fields: Record<string, [string, string, string?][]> = {
     local: [['path', 'Folder (relative to the server storage base)']],

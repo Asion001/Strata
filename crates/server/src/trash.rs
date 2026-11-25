@@ -270,12 +270,14 @@ async fn finish_raw_trash(
     rel: &str,
     is_dir: bool,
 ) -> ApiResult<()> {
+    // Ready last: if a step fails, reconcile repeats them all.
+    vfs::delete_subtree_rows(st, volume_id, rel).await?;
+    journal::record_volume(st, volume_id, vec![Change::delete(rel, is_dir)]).await?;
     sqlx::query("UPDATE trash SET ready = TRUE WHERE id = $1")
         .bind(id)
         .execute(&st.db)
         .await?;
-    vfs::delete_subtree_rows(st, volume_id, rel).await?;
-    journal::record_volume(st, volume_id, vec![Change::delete(rel, is_dir)]).await
+    Ok(())
 }
 
 async fn owned_row(st: &AppState, user_id: i64, id: i64) -> ApiResult<Row> {
@@ -320,17 +322,37 @@ pub fn restored_name(name: &str, is_dir: bool, n: u32) -> String {
 /// "(restored)" variant. Caller holds the volume lock.
 async fn free_name(
     st: &AppState,
+    user_id: i64,
     m: &Mount,
     parent: &str,
     name: &str,
     is_dir: bool,
 ) -> ApiResult<String> {
+    // Something the user mounted since then may cover the place: the parent
+    // (refuse, it would be hidden) or the name itself (taken).
+    let all = mounts::user_mounts(st, user_id).await?;
+    let user_parent = paths::join(&m.path, parent);
+    let covers = |p: &str| {
+        all.iter()
+            .any(|x| x.path.len() > m.path.len() && paths::strip_prefix(p, &x.path).is_some())
+    };
+    if covers(&user_parent) {
+        return Err(conflict(
+            "something is mounted where this was; remove that mount to restore it",
+        ));
+    }
     for n in 0..1000 {
         let candidate = if n == 0 {
             name.to_string()
         } else {
             restored_name(name, is_dir, n)
         };
+        if all
+            .iter()
+            .any(|x| x.path == paths::join(&user_parent, &candidate))
+        {
+            continue;
+        }
         match vfs::stat(st, m, &paths::join(parent, &candidate)).await {
             Err(ApiError::NotFound) => return Ok(candidate),
             Err(e) => return Err(e),
@@ -421,7 +443,7 @@ pub async fn restore(st: &AppState, user_id: i64, id: i64) -> ApiResult<String> 
         }
     };
     let row = row_again(st, id).await?;
-    let name = free_name(st, &m, parent, &row.name, row.is_dir).await?;
+    let name = free_name(st, user_id, &m, parent, &row.name, row.is_dir).await?;
     let new_rel = paths::join(parent, &name);
     match &root {
         None => {
@@ -492,12 +514,45 @@ pub async fn restore(st: &AppState, user_id: i64, id: i64) -> ApiResult<String> 
                     }
                     _ => io_error(e),
                 })?;
-            let n = vfs::stat(st, &m, &new_rel).await?;
-            vfs::cache_node(st, &m, &new_rel, &n).await?;
-            if name == row.name {
-                // Links to the item itself follow it back (its cache row is
-                // new); links to entries inside a folder stay broken.
-                sqlx::query(
+            // The item is back: from here on, a failure must not leave it
+            // listed in the trash too.
+            if let Err(e) =
+                finish_raw_restore(st, &m, id, parent, &name, &new_rel, name == row.name, &dir)
+                    .await
+            {
+                tracing::warn!("restore {id}: bookkeeping after the move failed: {e}");
+                let _ = sqlx::query("DELETE FROM trash WHERE id = $1")
+                    .bind(id)
+                    .execute(&st.db)
+                    .await;
+            }
+        }
+    }
+    journal::record_volume(st, m.volume_id, vec![Change::create(&new_rel, row.is_dir)]).await?;
+    lock.release().await?;
+    Ok(paths::join(&m.path, &new_rel))
+}
+
+/// After a raw item was moved back: cache it, point its share links back
+/// (same name only), drop the trash row and folder. Caller holds the lock.
+#[allow(clippy::too_many_arguments)]
+async fn finish_raw_restore(
+    st: &AppState,
+    m: &Mount,
+    id: i64,
+    parent: &str,
+    name: &str,
+    new_rel: &str,
+    same_name: bool,
+    dir: &Path,
+) -> ApiResult<()> {
+    {
+        let n = vfs::stat(st, m, new_rel).await?;
+        vfs::cache_node(st, m, new_rel, &n).await?;
+        if same_name {
+            // Links to the item itself follow it back (its cache row is
+            // new); links to entries inside a folder stay broken.
+            sqlx::query(
                     "UPDATE shares s SET node_id = (SELECT n.id FROM nodes n
                                                    WHERE n.volume_id = $2 AND n.parent = $3 AND n.name = $4)
                      FROM trash_shares t JOIN trash tr ON tr.id = t.trash_id
@@ -506,26 +561,23 @@ pub async fn restore(st: &AppState, user_id: i64, id: i64) -> ApiResult<String> 
                 .bind(id)
                 .bind(m.volume_id)
                 .bind(parent)
-                .bind(&name)
-                .execute(&st.db)
-                .await?;
-            }
-            sqlx::query("DELETE FROM trash WHERE id = $1")
-                .bind(id)
-                .execute(&st.db)
-                .await?;
-            let _ = tokio::fs::remove_dir(&dir).await;
-            sqlx::query("DELETE FROM raw_scans WHERE volume_id = $1 AND (dir = $2 OR dir = $3)")
-                .bind(m.volume_id)
-                .bind(parent)
-                .bind(&new_rel)
+                .bind(name)
                 .execute(&st.db)
                 .await?;
         }
+        sqlx::query("DELETE FROM trash WHERE id = $1")
+            .bind(id)
+            .execute(&st.db)
+            .await?;
+        let _ = tokio::fs::remove_dir(dir).await;
+        sqlx::query("DELETE FROM raw_scans WHERE volume_id = $1 AND (dir = $2 OR dir = $3)")
+            .bind(m.volume_id)
+            .bind(parent)
+            .bind(new_rel)
+            .execute(&st.db)
+            .await?;
     }
-    journal::record_volume(st, m.volume_id, vec![Change::create(&new_rel, row.is_dir)]).await?;
-    lock.release().await?;
-    Ok(paths::join(&m.path, &new_rel))
+    Ok(())
 }
 
 /// Remove a trashed item for good. Hashed blobs are reclaimed later by GC.
@@ -604,7 +656,7 @@ pub async fn reconcile(st: &AppState) -> ApiResult<usize> {
     )
     .fetch_all(&st.db)
     .await?;
-    let mut fixed = 0;
+    let mut fixed = sweep_orphans(st).await;
     for (id, volume_id, connection_id, base, rel, name) in rows {
         match reconcile_one(st, id, volume_id, connection_id, &base, &rel, &name).await {
             Ok(true) => fixed += 1,
@@ -666,6 +718,46 @@ async fn reconcile_one(
         lock.release().await?;
         Ok(fixed)
     }
+}
+
+/// Remove `.strata-trash/<id>` folders that no row knows (their owner was
+/// deleted while the item was being moved). A row is always written before
+/// its folder is made and removed only after it, so a folder without a row
+/// is never one in use. Best effort; returns how many were removed.
+async fn sweep_orphans(st: &AppState) -> usize {
+    let Ok(conns) = sqlx::query_scalar::<_, i64>("SELECT id FROM connections WHERE kind = 'local'")
+        .fetch_all(&st.db)
+        .await
+    else {
+        return 0;
+    };
+    let mut removed = 0;
+    for cid in conns {
+        let Ok(root) = local_root(st, cid).await else {
+            continue;
+        };
+        let Ok(mut rd) = tokio::fs::read_dir(root.join(TRASH_DIR)).await else {
+            continue;
+        };
+        while let Ok(Some(e)) = rd.next_entry().await {
+            let Some(id) = e.file_name().to_str().and_then(|n| n.parse::<i64>().ok()) else {
+                continue;
+            };
+            let known: bool =
+                match sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM trash WHERE id = $1)")
+                    .bind(id)
+                    .fetch_one(&st.db)
+                    .await
+                {
+                    Ok(k) => k,
+                    Err(_) => continue,
+                };
+            if !known && tokio::fs::remove_dir_all(e.path()).await.is_ok() {
+                removed += 1;
+            }
+        }
+    }
+    removed
 }
 
 /// Drop a trash row whose storage can't be reached, removing its files if

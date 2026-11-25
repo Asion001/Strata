@@ -2,7 +2,7 @@
   import { page } from '$app/state';
   import { goto } from '$app/navigation';
   import { untrack } from 'svelte';
-  import { api, contentUrl, previewUrl, thumbUrl, type Entry } from '$lib/api';
+  import { api, ApiError, contentUrl, previewUrl, thumbUrl, type Entry } from '$lib/api';
   import { bytes, when, join, parent, isImage, isBrowserImage, isTextName } from '$lib/format';
   import { cn } from '$lib/utils';
   import FileIcon from '$lib/components/files/FileIcon.svelte';
@@ -41,7 +41,7 @@
   // The folder `entries` belong to. It lags `path` until a new listing
   // arrives, and every action on an entry joins with it, never with `path`.
   let listedPath = $state('');
-  let mount = $state<{ id: number; mode: string; connection_name: string; path: string; offline?: boolean } | null>(null);
+  let mount = $state<{ id: number; mode: string; connection_name: string; path: string; offline?: boolean; trash?: boolean } | null>(null);
   let editing = $state<string | null>(null);
   let loading = $state(false);
   let error = $state('');
@@ -400,11 +400,14 @@
     const items = withoutMounts(all, 'remove');
     if (!items.length) return null;
     const dir = listedPath;
+    // Where the server keeps a trash for this folder, deletes go there.
+    const toTrash = !!mount?.trash;
     const ok = await confirmDialog({
       title: `Delete ${names(items)}?`,
-      body: items.length === 1
+      body: (items.length === 1
         ? (items[0].is_dir ? 'The folder and everything in it will be deleted.' : 'The file will be deleted.')
-        : `${items.slice(0, 5).map((e) => e.name).join(', ')}${items.length > 5 ? `, and ${items.length - 5} more` : ''}. Folders are deleted with everything in them.`,
+        : `${items.slice(0, 5).map((e) => e.name).join(', ')}${items.length > 5 ? `, and ${items.length - 5} more` : ''}. Folders are deleted with everything in them.`)
+        + (toTrash ? ' It stays in the trash for a while and can be restored.' : ''),
       confirm: 'Delete',
       danger: true
     });
@@ -413,7 +416,25 @@
       waitForBusy();
       return null;
     }
-    return each(items, 'delete', (e) => api('POST', '/api/files/delete', { paths: [join(dir, e.name)] }), fromSelection);
+    return each(items, 'delete', (e) => deleteOne(join(dir, e.name), e.name), fromSelection);
+  }
+
+  /** Delete one path, to the trash where there is one. An item the trash
+   *  can't take (on another disk) is deleted for good only if confirmed. */
+  async function deleteOne(path: string, name: string) {
+    try {
+      await api('POST', '/api/files/delete', { paths: [path] });
+    } catch (e) {
+      if (!(e instanceof ApiError && e.status === 409 && e.message.includes('delete it permanently'))) throw e;
+      const ok = await confirmDialog({
+        title: `Delete “${name}” for good?`,
+        body: 'It is on another disk, so it can’t go to the trash. It will be deleted permanently.',
+        confirm: 'Delete permanently',
+        danger: true
+      });
+      if (!ok) throw new Error('kept');
+      await api('POST', '/api/files/delete', { paths: [path], permanent: true });
+    }
   }
 
   async function transferPicked(copy: boolean) {

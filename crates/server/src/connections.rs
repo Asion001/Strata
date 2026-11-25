@@ -440,11 +440,13 @@ pub async fn delete(
         for t in ids {
             match crate::trash::purge(&st, t).await {
                 Ok(()) | Err(ApiError::NotFound) => {}
-                // Storage gone for good (or offline): the connection goes
-                // anyway, so drop the row; files left on a disk that comes
-                // back stay hidden under `.strata-trash`.
-                Err(ApiError::Unavailable(_)) => crate::trash::forget(&st, t).await?,
-                Err(e) => return Err(e),
+                // Storage gone, offline or failing: the connection goes
+                // anyway (asked for), so drop the row and remove what can be
+                // removed; nothing is left half-deleted.
+                Err(e) => {
+                    tracing::warn!("purging trash item {t} for a connection delete failed: {e}");
+                    crate::trash::forget(&st, t).await?;
+                }
             }
         }
     }

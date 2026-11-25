@@ -141,8 +141,9 @@ age. One unreachable backend never stops GC elsewhere.
 ### Trash
 Deleting a file or folder moves it to its owner's trash (`trash` table), from
 which it can be restored, purged, or emptied; items past
-`STRATA_TRASH_DAYS` (default 30, `0` turns the trash off) are purged by the
-hourly background job. `POST /api/files/delete` with `permanent: true` skips
+`STRATA_TRASH_DAYS` (default 30) are purged by the hourly background job.
+`0` turns the trash off for new deletes; items already in the trash keep the
+purge date they were given. `POST /api/files/delete` with `permanent: true` skips
 the trash.
 
 * **Hashed volumes:** the item's `nodes` rows move to `trash_nodes` in one

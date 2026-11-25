@@ -789,3 +789,61 @@ async fn connection_on_a_vanished_disk_can_still_be_deleted() {
     .await;
     assert!(items(&t).await.is_empty());
 }
+
+#[tokio::test]
+async fn restore_never_lands_under_or_on_a_new_mount() {
+    let Some(t) = app().await else { return };
+    t.upload("Docs/a.txt", b"a").await;
+    t.upload("Pics/x.txt", b"x").await;
+    delete(&t, &["Docs", "Pics/x.txt"]).await;
+    t.ok(
+        "POST",
+        "/api/files/delete",
+        json!({"paths": ["Pics"], "permanent": true}),
+    )
+    .await;
+    let cid = local_conn(&t, "Disk", "disk").await;
+    std::fs::create_dir_all(t.dir.path().join("local/disk")).unwrap();
+    for at in ["Docs", "Pics"] {
+        t.ok(
+            "POST",
+            "/api/mounts",
+            json!({"path": at, "connection_id": cid, "mode": "raw"}),
+        )
+        .await;
+    }
+    let all = items(&t).await;
+    // The name is taken by a mount: the folder comes back beside it.
+    let docs = restore(&t, id_of(&all, "Docs")).await;
+    assert_ne!(docs, "Docs");
+    assert!(docs.starts_with("Docs"), "{docs}");
+    assert_eq!(t.download(&format!("{docs}/a.txt")).await, b"a");
+    // The parent is covered by a mount: refused, nothing written there.
+    let (s, v) = t
+        .json(
+            "POST",
+            &format!("/api/trash/{}/restore", id_of(&all, "Pics/x.txt")),
+            json!({}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    assert!(!t.dir.path().join("local/disk/x.txt").exists());
+    assert_eq!(items(&t).await.len(), 1, "the item stays in the trash");
+}
+
+#[tokio::test]
+async fn orphan_trash_folders_are_swept() {
+    let Some(t) = app().await else { return };
+    local_conn(&t, "Disk", "disk").await;
+    let orphan = t.dir.path().join("local/disk/.strata-trash/987654");
+    std::fs::create_dir_all(&orphan).unwrap();
+    std::fs::write(orphan.join("left.txt"), b"left").unwrap();
+    let other = t.dir.path().join("local/disk/.strata-trash/notes");
+    std::fs::create_dir_all(&other).unwrap();
+    assert_eq!(strata_server::trash::reconcile(&t.st).await.unwrap(), 1);
+    assert!(!orphan.exists());
+    assert!(
+        other.exists(),
+        "only folders named like trash ids are swept"
+    );
+}
