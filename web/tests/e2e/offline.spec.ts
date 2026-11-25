@@ -90,7 +90,7 @@ test('an interrupted large upload resumes without re-sending finished chunks', a
   await page.goto(`/?p=${encodeURIComponent(dir)}`);
   await controlled(page);
 
-  const data = randomBytes(24 * 1024 * 1024);
+  const data = randomBytes(48 * 1024 * 1024);
   await page.locator('input[type=file][multiple]').setInputFiles({ name: 'big.bin', mimeType: 'application/octet-stream', buffer: data });
   await expect.poll(() => confirmed.length, { timeout: 60_000 }).toBeGreaterThanOrEqual(3);
   await setOffline(ctx, page, true);

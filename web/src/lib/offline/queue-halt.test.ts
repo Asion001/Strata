@@ -31,5 +31,7 @@ describe('halt', () => {
     expect(calls).toEqual(['/api/uploads']); // (b.txt never started)
     expect(await q.drain(1, deps)).toBe('done');
     expect(calls).toHaveLength(1);
+    // Nothing more is stored after a sign-out.
+    await expect(q.keepBytes('late', new Blob(['x']))).rejects.toMatchObject({ name: 'AbortError' });
   });
 });

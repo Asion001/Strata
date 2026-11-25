@@ -65,7 +65,8 @@ export const SIGNED_OUT = 'strata-signed-out';
 export async function signOut(user: number | null, logout: () => Promise<unknown>): Promise<boolean> {
   const [queue, recent] = await Promise.all([Queue(), Recent()]);
   queue.halt();
-  await Promise.race([draining, new Promise((r) => setTimeout(r, 3000))]);
+  // (Files still being stored stop too, before anything is deleted.)
+  await Promise.race([Promise.all([draining, storing]), new Promise((r) => setTimeout(r, 3000))]);
   if (user !== null) await queue.abandonSessions(user, fetch).catch(() => {});
   let ended = true;
   // (The server answering with an error still ended nothing it can't end.)
@@ -161,8 +162,9 @@ export function pump() {
     again = true;
     return;
   }
+  const stop = (drainStop = new AbortController()).signal;
   draining = Queue()
-    .then((queue) => queue.drain(user, deps()))
+    .then((queue) => queue.drain(user, deps(), stop))
     .then((out) => {
       // Stopped by the network while the device says it is online (the
       // server was unreachable for a while): try again later by itself.
@@ -186,7 +188,17 @@ let retryDelay = 15_000;
 
 /** Start the queue for a user: what was left (app open), and again
  *  whenever the network comes back. `done`: a job finished. */
+let drainStop: AbortController | null = null;
+
 export async function startQueue(user: number, done: (j: Job) => void) {
+  // Someone else signed in in this tab: the previous user's queue stops
+  // here, and their uploads leave the list (they stay theirs, stored).
+  if (queueUser !== null && queueUser !== user) {
+    drainStop?.abort();
+    clearTimeout(retryTimer);
+    await draining;
+    uploads.jobs = [];
+  }
   queueUser = user;
   onDone = done;
   const loaded = await Queue()

@@ -699,5 +699,48 @@ describe('network and file errors', () => {
     const back = (await q.load('c'))!;
     expect([back.state, q.waiting(back)]).toEqual(['committing', false]);
   });
+
+  it('a job resumed at its commit restarts with its bytes when the session is gone', async () => {
+    const j = await fresh({ state: 'committing', chunks, session: 'old', sent: ['aa', 'bb', 'cc'] });
+    const loaded = (await q.load(j.id))!; // (without its bytes: only the commit was left)
+    const out = await q.run(loaded, deps());
+    expect(out.state).toBe('done');
+    expect([...srv.puts].sort()).toEqual(['aa', 'bb', 'cc']); // real chunks, re-read
+  });
+
+  it('a commit restart for a job dropped meanwhile stops', async () => {
+    const j = await fresh({ state: 'committing', chunks, session: 'old', sent: ['aa', 'bb', 'cc'] });
+    const f = (async (u: RequestInfo | URL, i: RequestInit = {}) => {
+      if (String(u).endsWith('/commit')) {
+        await tx('jobs', 'readwrite', (s) => void s.delete(j.id)); // (gone, as the 404 comes)
+        return Response.json({ error: 'gone' }, { status: 404 });
+      }
+      return srv.fetch(u, i);
+    }) as unknown as typeof fetch;
+    await expect(q.run(j, deps({ fetch: f }))).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
+  it('a job with no bytes here is never run', async () => {
+    const j = q.newJob(1, 'p', new Blob(['x']));
+    await q.save(j);
+    const waitingJob = (await q.load(j.id))!;
+    expect(await q.run(waitingJob, deps())).toBe(waitingJob);
+    expect(srv.log).toEqual([]);
+  });
+
+  it('a stopped run of the queue (another user signed in) aborts and starts nothing more', async () => {
+    await add(job({ id: 'a', created: 1 }));
+    await add(job({ id: 'b', created: 2 }));
+    const stop = new AbortController();
+    const f = (async (u: RequestInfo | URL, i: RequestInit = {}) => {
+      if (i.method === 'PUT') {
+        stop.abort();
+        throw Object.assign(new Error('aborted'), { name: 'AbortError' });
+      }
+      return srv.fetch(u, i);
+    }) as unknown as typeof fetch;
+    expect(await q.drain(1, deps({ fetch: f }), stop.signal)).toBe('done');
+    expect(srv.log.filter((l) => l === 'POST /api/uploads')).toHaveLength(1); // (b never started)
+  });
 });
 
