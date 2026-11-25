@@ -160,7 +160,7 @@ const deps = (): Deps => ({
   changed: (j) => {
     changed(j);
     // (Failed and cancelled ones end too: the folder shows what is there.)
-    if (!isActive(j)) onDone?.(j);
+    if (!isActive(j) && j.user === queueUser) onDone?.(j);
   }
 });
 

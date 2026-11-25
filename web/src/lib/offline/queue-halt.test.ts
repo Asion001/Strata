@@ -73,3 +73,21 @@ describe('halt while bytes are being stored as buffers', () => {
     spy.mockRestore();
   });
 });
+
+describe('halt while only a memory mark is being written', () => {
+  it('is reported as signed out', async () => {
+    vi.resetModules();
+    const fresh = await import('./queue');
+    const realPut = IDBObjectStore.prototype.put;
+    const spy = vi.spyOn(IDBObjectStore.prototype, 'put').mockImplementation(function (this: IDBObjectStore, v: unknown, k?: IDBValidKey) {
+      if (v instanceof Blob || (v && typeof v === 'object' && 'parts' in v)) throw new DOMException('no room', 'QuotaExceededError');
+      if (k === 'mem') fresh.halt();
+      return realPut.call(this, v, k);
+    });
+    try {
+      await expect(fresh.keepBytes('mem', new Blob(['x']))).rejects.toMatchObject({ name: 'AbortError' });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});

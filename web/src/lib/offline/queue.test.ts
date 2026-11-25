@@ -780,5 +780,26 @@ describe('network and file errors', () => {
     expect(out.state).toBe('failed');
     expect(changes.at(-1)!.state).toBe('failed');
   });
+
+  it('a new session is opened only while the cookie is still this user’s', async () => {
+    await expect(q.run(await fresh(), deps({ whoami: async () => 2 }))).rejects.toBeInstanceOf(q.Offline);
+    expect(srv.log.filter((l) => l === 'POST /api/uploads')).toEqual([]);
+  });
+
+  it('a user switch that stops the run ends it as done, not offline', async () => {
+    await add(job({ id: 'a' }));
+    const stop = new AbortController();
+    expect(await q.drain(1, deps({ whoami: async () => (stop.abort(), 2) }), stop.signal)).toBe('done');
+  });
+
+  it('a job cancelled right after its commit was lost stops', async () => {
+    const j = await fresh({ state: 'committing', chunks, session: 'old', sent: ['aa', 'bb', 'cc'] });
+    const d = deps({
+      changed: (x) => {
+        if (x.state === 'uploading' && x.session === null) void q.remove(x.id); // (the cancel, just then)
+      }
+    });
+    await expect(q.run(j, d)).rejects.toMatchObject({ name: 'AbortError' });
+  });
 });
 

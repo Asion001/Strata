@@ -185,7 +185,15 @@ sw.addEventListener('sync', ((event: SyncEvent) => {
       if (r.status >= 502) throw new Error(`HTTP ${r.status}`);
       if (!r.ok) return; // (signed out: the queue waits for its user)
       const me = (await r.json()) as { id: number };
-      const out = await drain(me.id, { fetch: (u, i) => fetch(u, i), chunk: (b, s) => chunkFile(b, s), sleep: (a) => new Promise((res) => setTimeout(res, 1000 * 2 ** a)) });
+      const whoami = async () => {
+        try {
+          const w = await fetch('/api/auth/me', { headers: { 'x-strata': '1' } });
+          return w.ok ? ((await w.json()) as { id: number }).id : null;
+        } catch {
+          return null;
+        }
+      };
+      const out = await drain(me.id, { fetch: (u, i) => fetch(u, i), chunk: (b, s) => chunkFile(b, s), sleep: (a) => new Promise((res) => setTimeout(res, 1000 * 2 ** a)), whoami });
       // Still offline: fail, so the browser tries again later.
       if (out === 'offline') throw new Error('offline');
     })()

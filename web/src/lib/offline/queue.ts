@@ -152,7 +152,9 @@ export async function keepBytes(id: string, blob: Blob): Promise<'blob' | 'buffe
       }
     }
     holdBytes(id, blob);
-    await put({ memory: true }).catch(() => {});
+    await put({ memory: true }).catch((e3) => {
+      if (halted) throw e3;
+    });
     return 'memory';
   }
 }
@@ -441,6 +443,9 @@ export async function run(job: Job, d: Deps, signal?: AbortSignal, restarts = 0)
       if (!j.session) {
         // (Dropped meanwhile, e.g. by a sign-out elsewhere: no new session.)
         if (!(await exists(j.id))) throw new DOMException('cancelled', 'AbortError');
+        // A new session is opened as whoever the cookie belongs to: only
+        // while that is still this job's user.
+        if (d.whoami && (await d.whoami()) !== j.user) throw new Offline('signed in as someone else');
         const r = await call(d, '/api/uploads', {
           ...json({
             path: j.path,
@@ -518,8 +523,8 @@ export async function run(job: Job, d: Deps, signal?: AbortSignal, restarts = 0)
         await go({ t: 'gone' });
         // A new session needs the chunks again: with the bytes, read anew
         // (a job resumed at its commit was loaded without them).
-        // (It exists: `go` just saved it, or would have stopped the run.)
-        const again = (await load(j.id)) as Job;
+        const again = await load(j.id);
+        if (!again) throw new DOMException('cancelled', 'AbortError'); // (cancelled just now)
         // (Its bytes gone meanwhile: it is failed now; say so.)
         if (again.state === 'failed') d.changed?.(again);
         return run(again, d, signal, restarts + 1);
@@ -547,10 +552,10 @@ export async function drain(user: number, d: Deps, stop?: AbortSignal): Promise<
     for (const j of await jobs(user)) {
       if (halted || stop?.aborted) break;
       if (!isActive(j)) continue;
-      if (d.whoami && (await d.whoami()) !== user) return 'offline'; // (not theirs now: wait)
       const cur = await load(j.id); // (cancelled meanwhile?)
       if (cur && cur.state === 'failed' && isActive(j)) d.changed?.(cur); // (its bytes are gone)
       if (!cur || !isActive(cur) || waiting(cur)) continue;
+      if (d.whoami && (await d.whoami()) !== user) return stop?.aborted ? 'done' : 'offline'; // (not theirs now: wait)
       const ctl = new AbortController();
       const abort = () => ctl.abort();
       stop?.addEventListener('abort', abort);
