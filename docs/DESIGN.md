@@ -161,7 +161,12 @@ A restore puts the item back at its old place in the volume, recreating
 missing parent folders, under "name (restored).ext" if the name is taken. A
 raw file is put back with a hard link (falling back to rename), so an entry
 created outside Strata meanwhile is never replaced. Restoring needs a mount of
-the same volume; trash rows journal as `delete`, restores as `create`.
+the same volume; trash rows journal as `delete`, restores as `create`. Share
+links come back with an item restored to the same path (hashed rows keep their
+ids; for raw items, links to the item itself). Trash on an unmounted disk is
+never taken as empty: a missing item counts as gone only while the trash folder
+or the connection's root marker is there. A connection with trashed items is
+deleted only with `?purge_trash=true`; deleting a user removes their trash.
 
 ### Write ordering
 Tree changes of one volume (including raw backend renames, the atomic close of
