@@ -17,6 +17,8 @@ CREATE TABLE trash (
     is_dir        BOOLEAN NOT NULL,
     size          BIGINT NOT NULL DEFAULT 0,
     ready         BOOLEAN NOT NULL DEFAULT FALSE,
+    -- Raw: the item's cache row id when trashed (its share links follow it back).
+    node_id       BIGINT,
     deleted_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     purge_after   TIMESTAMPTZ NOT NULL
 );
@@ -26,6 +28,8 @@ CREATE INDEX trash_volume ON trash (volume_id);
 
 CREATE TABLE trash_nodes (
     trash_id     BIGINT NOT NULL REFERENCES trash ON DELETE CASCADE,
+    -- The row's `nodes.id`, put back on restore so share links still match.
+    node_id      BIGINT NOT NULL,
     volume_id    BIGINT NOT NULL,
     parent       TEXT NOT NULL,
     name         TEXT NOT NULL,
@@ -41,3 +45,13 @@ CREATE INDEX trash_nodes_trash ON trash_nodes (trash_id);
 -- Blob GC checks these references per volume, like `nodes_chunks`.
 CREATE INDEX trash_nodes_chunks ON trash_nodes USING gin (chunks);
 CREATE INDEX trash_nodes_volume ON trash_nodes (volume_id);
+
+-- Share links that pointed into a trashed item (deleting the rows set their
+-- node_id to NULL); a restore to the same path points them back.
+CREATE TABLE trash_shares (
+    trash_id BIGINT NOT NULL REFERENCES trash ON DELETE CASCADE,
+    share_id BIGINT NOT NULL REFERENCES shares ON DELETE CASCADE,
+    node_id  BIGINT NOT NULL
+);
+CREATE INDEX trash_shares_trash ON trash_shares (trash_id);
+CREATE INDEX trash_shares_share ON trash_shares (share_id);

@@ -78,6 +78,12 @@ fn subtree_like(rel: &str) -> String {
     format!("{}/%", vfs::like_escape(rel))
 }
 
+/// Remember the share links that point into an item about to be trashed
+/// ($1 trash id, $2 volume, $3/$4 parent and name, $5 the item, $6 below it).
+const REMEMBER_SHARES: &str = "INSERT INTO trash_shares (trash_id, share_id, node_id)
+     SELECT $1, s.id, s.node_id FROM shares s JOIN nodes n ON n.id = s.node_id
+     WHERE n.volume_id = $2 AND ((n.parent = $3 AND n.name = $4) OR n.parent = $5 OR n.parent LIKE $6)";
+
 /// Move `rel` of mount `m` (shown to the user as `original_path`) to the
 /// owner's trash. The caller has checked that it is not a mount point and
 /// holds no mount points. Returns the trash id.
@@ -119,8 +125,8 @@ pub async fn trash(
             .fetch_one(&mut *tx)
             .await?;
             sqlx::query(
-                "INSERT INTO trash_nodes (trash_id, volume_id, parent, name, is_dir, size, mtime, etag, content_hash, chunks, chunk_sizes)
-                 SELECT $1, volume_id, parent, name, is_dir, size, mtime, etag, content_hash, chunks, chunk_sizes
+                "INSERT INTO trash_nodes (trash_id, node_id, volume_id, parent, name, is_dir, size, mtime, etag, content_hash, chunks, chunk_sizes)
+                 SELECT $1, id, volume_id, parent, name, is_dir, size, mtime, etag, content_hash, chunks, chunk_sizes
                  FROM nodes
                  WHERE volume_id = $2 AND ((parent = $3 AND name = $4) OR parent = $5 OR parent LIKE $6)",
             )
@@ -132,6 +138,15 @@ pub async fn trash(
             .bind(&like)
             .execute(&mut *tx)
             .await?;
+            sqlx::query(REMEMBER_SHARES)
+                .bind(id)
+                .bind(m.volume_id)
+                .bind(parent)
+                .bind(name)
+                .bind(rel)
+                .bind(&like)
+                .execute(&mut *tx)
+                .await?;
             sqlx::query(
                 "UPDATE trash SET size = (SELECT coalesce(sum(size), 0)::bigint FROM trash_nodes
                                           WHERE trash_id = $1 AND NOT is_dir)
@@ -172,9 +187,10 @@ pub async fn trash(
             };
             // Recorded (committed) before the rename: a crash after the
             // rename still finds the item through this row.
+            let node_id = vfs::node_id(st, m.volume_id, rel).await?;
             let id: i64 = sqlx::query_scalar(
-                "INSERT INTO trash (owner_id, volume_id, original_path, rel_path, name, is_dir, size, ready, purge_after)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, FALSE, now() + make_interval(days => $8))
+                "INSERT INTO trash (owner_id, volume_id, original_path, rel_path, name, is_dir, size, node_id, ready, purge_after)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $9, FALSE, now() + make_interval(days => $8))
                  RETURNING id",
             )
             .bind(user_id)
@@ -185,6 +201,7 @@ pub async fn trash(
             .bind(node.is_dir)
             .bind(size)
             .bind(st.cfg.trash_days as i32)
+            .bind(node_id)
             .fetch_one(&st.db)
             .await?;
             let src = root.join(paths::join(&m.base_path, rel));
@@ -214,6 +231,15 @@ pub async fn trash(
             }
             sqlx::query("UPDATE trash SET ready = TRUE WHERE id = $1")
                 .bind(id)
+                .execute(&st.db)
+                .await?;
+            sqlx::query(REMEMBER_SHARES)
+                .bind(id)
+                .bind(m.volume_id)
+                .bind(parent)
+                .bind(name)
+                .bind(rel)
+                .bind(&like)
                 .execute(&st.db)
                 .await?;
             vfs::delete_subtree_rows(st, m.volume_id, rel).await?;
@@ -287,17 +313,37 @@ async fn free_name(
     Err(conflict("too many items with that name"))
 }
 
-/// Move a file to `dst` only if nothing is there: a hard link fails if `dst`
-/// exists, so an entry created outside Strata meanwhile is never replaced.
-/// Folders (and filesystems without hard links) use rename, which never
-/// replaces a non-empty folder.
+/// Move `src` to `dst` only if nothing is there, so an entry created outside
+/// Strata meanwhile is never replaced:
+///
+/// * a file is hard-linked (which fails if `dst` exists), then unlinked from
+///   `src`; if that unlink fails the link is undone, leaving one copy;
+/// * a folder claims `dst` with mkdir (which fails if it exists), then is
+///   renamed over that empty folder of ours (rename never replaces a
+///   non-empty folder, so files put there meanwhile make it fail instead).
+///
+/// Filesystems without hard links fall back to a checked rename.
 async fn rename_no_replace(src: &Path, dst: &Path, is_dir: bool) -> std::io::Result<()> {
-    if !is_dir {
-        match tokio::fs::hard_link(src, dst).await {
-            Ok(()) => return tokio::fs::remove_file(src).await,
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(e),
-            Err(_) => {} // no hard links here: fall back to rename
+    if is_dir {
+        tokio::fs::create_dir(dst).await?;
+        if let Err(e) = tokio::fs::rename(src, dst).await {
+            let _ = tokio::fs::remove_dir(dst).await;
+            return Err(e);
         }
+        return Ok(());
+    }
+    match tokio::fs::hard_link(src, dst).await {
+        Ok(()) => {
+            if let Err(e) = tokio::fs::remove_file(src).await {
+                if let Err(undo) = tokio::fs::remove_file(dst).await {
+                    tracing::warn!("restore: undoing a link failed: {undo}");
+                }
+                return Err(e);
+            }
+            return Ok(());
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(e),
+        Err(_) => {} // no hard links here: fall back to rename
     }
     if tokio::fs::symlink_metadata(dst).await.is_ok() {
         return Err(std::io::ErrorKind::AlreadyExists.into());
@@ -350,8 +396,8 @@ pub async fn restore(st: &AppState, user_id: i64, id: i64) -> ApiResult<String> 
         None => {
             let mut tx = st.db.begin().await?;
             sqlx::query(
-                "INSERT INTO nodes (volume_id, parent, name, is_dir, size, mtime, etag, content_hash, chunks, chunk_sizes)
-                 SELECT volume_id,
+                "INSERT INTO nodes (id, volume_id, parent, name, is_dir, size, mtime, etag, content_hash, chunks, chunk_sizes)
+                 SELECT node_id, volume_id,
                         CASE WHEN parent = $2 AND name = $3 THEN parent ELSE $4 || substr(parent, length($5) + 1) END,
                         CASE WHEN parent = $2 AND name = $3 THEN $6 ELSE name END,
                         is_dir, size, mtime, etag, content_hash, chunks, chunk_sizes
@@ -365,6 +411,16 @@ pub async fn restore(st: &AppState, user_id: i64, id: i64) -> ApiResult<String> 
             .bind(&name)
             .execute(&mut *tx)
             .await?;
+            if name == row.name {
+                // Same ids at the same paths: the share links work again.
+                sqlx::query(
+                    "UPDATE shares s SET node_id = t.node_id FROM trash_shares t
+                     WHERE t.trash_id = $1 AND s.id = t.share_id AND s.node_id IS NULL",
+                )
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+            }
             sqlx::query("DELETE FROM trash WHERE id = $1")
                 .bind(id)
                 .execute(&mut *tx)
@@ -374,14 +430,27 @@ pub async fn restore(st: &AppState, user_id: i64, id: i64) -> ApiResult<String> 
         Some(root) => {
             let dir = item_dir(root, id);
             let item = dir.join(&row.name);
-            if tokio::fs::symlink_metadata(&item).await.is_err() {
-                // Gone from disk (removed outside Strata): nothing to restore.
-                sqlx::query("DELETE FROM trash WHERE id = $1")
-                    .bind(id)
-                    .execute(&st.db)
-                    .await?;
-                lock.release().await?;
-                return Err(ApiError::NotFound);
+            match tokio::fs::symlink_metadata(&item).await {
+                Ok(_) => {}
+                // Gone from disk (removed outside Strata): nothing to
+                // restore. Only believed while the trash folder is there.
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::NotFound
+                        && trash_reachable(st, m.connection_id, root).await =>
+                {
+                    sqlx::query("DELETE FROM trash WHERE id = $1")
+                        .bind(id)
+                        .execute(&st.db)
+                        .await?;
+                    lock.release().await?;
+                    return Err(ApiError::NotFound);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(ApiError::Unavailable(
+                        "this storage is not available right now; try again later".into(),
+                    ));
+                }
+                Err(e) => return Err(io_error(e)),
             }
             let dst = root.join(paths::join(&m.base_path, &new_rel));
             rename_no_replace(&item, &dst, row.is_dir)
@@ -392,13 +461,29 @@ pub async fn restore(st: &AppState, user_id: i64, id: i64) -> ApiResult<String> 
                     }
                     _ => io_error(e),
                 })?;
+            let n = vfs::stat(st, &m, &new_rel).await?;
+            vfs::cache_node(st, &m, &new_rel, &n).await?;
+            if name == row.name {
+                // Links to the item itself follow it back (its cache row is
+                // new); links to entries inside a folder stay broken.
+                sqlx::query(
+                    "UPDATE shares s SET node_id = (SELECT n.id FROM nodes n
+                                                   WHERE n.volume_id = $2 AND n.parent = $3 AND n.name = $4)
+                     FROM trash_shares t JOIN trash tr ON tr.id = t.trash_id
+                     WHERE t.trash_id = $1 AND s.id = t.share_id AND s.node_id IS NULL AND t.node_id = tr.node_id",
+                )
+                .bind(id)
+                .bind(m.volume_id)
+                .bind(parent)
+                .bind(&name)
+                .execute(&st.db)
+                .await?;
+            }
             sqlx::query("DELETE FROM trash WHERE id = $1")
                 .bind(id)
                 .execute(&st.db)
                 .await?;
             let _ = tokio::fs::remove_dir(&dir).await;
-            let n = vfs::stat(st, &m, &new_rel).await?;
-            vfs::cache_node(st, &m, &new_rel, &n).await?;
             sqlx::query("DELETE FROM raw_scans WHERE volume_id = $1 AND (dir = $2 OR dir = $3)")
                 .bind(m.volume_id)
                 .bind(parent)
@@ -413,22 +498,29 @@ pub async fn restore(st: &AppState, user_id: i64, id: i64) -> ApiResult<String> 
 }
 
 /// Remove a trashed item for good. Hashed blobs are reclaimed later by GC.
-async fn purge(st: &AppState, id: i64) -> ApiResult<()> {
-    let Some((volume_id, connection_id, mode)): Option<(i64, i64, String)> = sqlx::query_as(
+/// NotFound if it is gone by the time the volume lock is held (restored or
+/// purged meanwhile).
+pub async fn purge(st: &AppState, id: i64) -> ApiResult<()> {
+    let (volume_id, connection_id, mode): (i64, i64, String) = sqlx::query_as(
         "SELECT v.id, v.connection_id, v.mode FROM trash t JOIN volumes v ON v.id = t.volume_id WHERE t.id = $1",
     )
     .bind(id)
     .fetch_optional(&st.db)
     .await?
-    else {
-        return Ok(());
-    };
+    .ok_or(ApiError::NotFound)?;
     let root = if mode == "hashed" {
         None
     } else {
         Some(local_root(st, connection_id).await?)
     };
     let lock = vfs::lock_volume(st, volume_id).await?;
+    let still: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM trash WHERE id = $1)")
+        .bind(id)
+        .fetch_one(&st.db)
+        .await?;
+    if !still {
+        return Err(ApiError::NotFound);
+    }
     if let Some(root) = root {
         // Files first, then the row: a crash in between leaves a row whose
         // item is gone, which reconcile drops.
@@ -454,13 +546,15 @@ async fn purge(st: &AppState, id: i64) -> ApiResult<()> {
 }
 
 /// Can we trust what we see in a local connection's trash folder? Not while
-/// the connection is offline or the folder is missing (a disk not mounted
-/// right now shows an empty mount point).
+/// the connection is offline, nor when both the trash folder and the
+/// connection's root marker are missing (a disk not mounted right now shows
+/// an empty mount point). With the marker there, a missing trash folder was
+/// really removed.
 async fn trash_reachable(st: &AppState, connection_id: i64, root: &Path) -> bool {
+    let is_dir = |p: PathBuf| async move { tokio::fs::metadata(p).await.is_ok_and(|m| m.is_dir()) };
+    let marker = crate::state::LocalRoot::marker_path(root, connection_id);
     !st.is_offline(connection_id)
-        && tokio::fs::metadata(root.join(TRASH_DIR))
-            .await
-            .is_ok_and(|m| m.is_dir())
+        && (is_dir(root.join(TRASH_DIR)).await || tokio::fs::metadata(marker).await.is_ok())
 }
 
 /// Settle raw trash rows after a crash, each under its volume lock (an
@@ -524,18 +618,6 @@ pub async fn reconcile(st: &AppState) -> ApiResult<usize> {
     Ok(fixed)
 }
 
-/// A user's raw trash items, to remove from disk once the user is deleted
-/// (their rows go with the account).
-pub async fn raw_items_of_user(st: &AppState, user_id: i64) -> ApiResult<Vec<(i64, i64)>> {
-    Ok(sqlx::query_as(
-        "SELECT t.id, v.connection_id FROM trash t JOIN volumes v ON v.id = t.volume_id
-         WHERE t.owner_id = $1 AND v.mode = 'raw'",
-    )
-    .bind(user_id)
-    .fetch_all(&st.db)
-    .await?)
-}
-
 /// Remove raw trash items (id, connection) whose rows are already gone.
 /// Best effort: a failure is logged and leaves only hidden files behind.
 pub async fn remove_raw_items(st: &AppState, items: &[(i64, i64)]) {
@@ -561,6 +643,7 @@ pub async fn purge_expired(st: &AppState) -> ApiResult<usize> {
     for id in ids {
         match purge(st, id).await {
             Ok(()) => n += 1,
+            Err(ApiError::NotFound) => {} // restored or purged meanwhile
             // One broken storage must not stop the rest.
             Err(e) => tracing::warn!("purging trash item {id} failed: {e}"),
         }
@@ -638,6 +721,7 @@ pub async fn empty(
     for id in ids {
         match purge(&st, id).await {
             Ok(()) => purged += 1,
+            Err(ApiError::NotFound) => {}
             Err(e) => {
                 tracing::warn!("emptying trash: item {id} failed: {e}");
                 failed += 1;

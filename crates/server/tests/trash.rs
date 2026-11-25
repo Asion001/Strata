@@ -491,20 +491,37 @@ async fn unreachable_trash_folder_is_never_read_as_empty() {
     .await;
     delete(&t, &["Disk/a.txt"]).await;
     let id = id_of(&items(&t).await, "Disk/a.txt");
-    // The disk is "unmounted": its trash folder is not there right now.
+    // The disk is "unmounted": its trash folder and the connection's root
+    // marker are not there right now (an empty mount point).
     let tdir = disk.join(".strata-trash");
+    let probe = disk.join(".strata-probe");
+    assert!(probe.exists(), "the first probe writes the root marker");
     let away = t.dir.path().join("away");
+    let away_probe = t.dir.path().join("away-probe");
     std::fs::rename(&tdir, &away).unwrap();
+    std::fs::rename(&probe, &away_probe).unwrap();
     assert_eq!(strata_server::trash::reconcile(&t.st).await.unwrap(), 0);
     let (s, _) = t
         .json("DELETE", &format!("/api/trash/{id}"), json!({}))
         .await;
     assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(items(&t).await.len(), 1, "the row survives");
+    let (s, _) = t
+        .json("POST", &format!("/api/trash/{id}/restore"), json!({}))
+        .await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
     // Back again: everything is where it was.
     std::fs::rename(&away, &tdir).unwrap();
+    std::fs::rename(&away_probe, &probe).unwrap();
     assert_eq!(restore(&t, id).await, "Disk/a.txt");
     assert_eq!(std::fs::read(disk.join("a.txt")).unwrap(), b"a");
+
+    // With the disk there (marker present), a trash folder removed by hand
+    // really is gone: its rows are dropped instead of blocking forever.
+    delete(&t, &["Disk/a.txt"]).await;
+    std::fs::remove_dir_all(&tdir).unwrap();
+    assert_eq!(strata_server::trash::reconcile(&t.st).await.unwrap(), 1);
+    assert!(items(&t).await.is_empty());
 }
 
 #[tokio::test]
@@ -527,9 +544,14 @@ async fn connection_with_trashed_items_cannot_be_deleted() {
         .json("DELETE", &format!("/api/connections/{cid}"), json!({}))
         .await;
     assert_eq!(s, StatusCode::CONFLICT, "{v}");
-    t.ok("POST", "/api/trash/empty", json!({})).await;
-    t.ok("DELETE", &format!("/api/connections/{cid}"), json!({}))
-        .await;
+    assert_eq!(items(&t).await.len(), 1, "a refused delete keeps the trash");
+    t.ok(
+        "DELETE",
+        &format!("/api/connections/{cid}?purge_trash=true"),
+        json!({}),
+    )
+    .await;
+    assert!(items(&t).await.is_empty());
 }
 
 #[tokio::test]
@@ -618,4 +640,96 @@ async fn item_on_another_disk_is_refused_not_lost() {
     assert_eq!(s, StatusCode::CONFLICT, "{v}");
     assert_eq!(std::fs::read(other.path().join("far.txt")).unwrap(), b"far");
     assert!(items(&t).await.is_empty());
+}
+
+#[tokio::test]
+async fn share_links_follow_a_restored_item() {
+    let Some(t) = app().await else { return };
+    let anon = TestApp {
+        router: t.router.clone(),
+        st: t.st.clone(),
+        cookie: None,
+        dir: tempfile::tempdir().unwrap(),
+    };
+    // Hashed: a link to a file inside a trashed folder, and one to the folder.
+    t.upload("Pub/doc.txt", b"doc").await;
+    let f = t
+        .ok("POST", "/api/shares", json!({"path": "Pub/doc.txt"}))
+        .await;
+    let d = t.ok("POST", "/api/shares", json!({"path": "Pub"})).await;
+    let link = |v: &Value| format!("/api/public/{}", v["token"].as_str().unwrap());
+    assert_eq!(anon.get(&link(&f)).await.0, StatusCode::OK);
+    delete(&t, &["Pub"]).await;
+    assert_eq!(anon.get(&link(&f)).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(anon.get(&link(&d)).await.0, StatusCode::NOT_FOUND);
+    restore(&t, id_of(&items(&t).await, "Pub")).await;
+    assert_eq!(anon.get(&link(&f)).await.0, StatusCode::OK);
+    assert_eq!(anon.get(&link(&d)).await.0, StatusCode::OK);
+
+    // Restored under another name: the links stay dead.
+    delete(&t, &["Pub/doc.txt"]).await;
+    t.upload("Pub/doc.txt", b"someone else's").await;
+    restore(&t, id_of(&items(&t).await, "Pub/doc.txt")).await;
+    assert_eq!(anon.get(&link(&f)).await.0, StatusCode::NOT_FOUND);
+
+    // Raw: a link to the trashed item itself comes back.
+    let cid = local_conn(&t, "Disk", "disk").await;
+    let disk = t.dir.path().join("local/disk");
+    std::fs::create_dir_all(&disk).unwrap();
+    std::fs::write(disk.join("r.txt"), b"raw").unwrap();
+    t.ok(
+        "POST",
+        "/api/mounts",
+        json!({"path": "Disk", "connection_id": cid, "mode": "raw"}),
+    )
+    .await;
+    let r = t
+        .ok("POST", "/api/shares", json!({"path": "Disk/r.txt"}))
+        .await;
+    assert_eq!(anon.get(&link(&r)).await.0, StatusCode::OK);
+    delete(&t, &["Disk/r.txt"]).await;
+    assert_eq!(anon.get(&link(&r)).await.0, StatusCode::NOT_FOUND);
+    restore(&t, id_of(&items(&t).await, "Disk/r.txt")).await;
+    assert_eq!(anon.get(&link(&r)).await.0, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn racing_purge_after_restore_says_not_found() {
+    let Some(t) = app().await else { return };
+    t.upload("a.txt", b"a").await;
+    delete(&t, &["a.txt"]).await;
+    let id = id_of(&items(&t).await, "a.txt");
+    restore(&t, id).await;
+    assert!(matches!(
+        strata_server::trash::purge(&t.st, id).await,
+        Err(strata_server::error::ApiError::NotFound)
+    ));
+    assert_eq!(t.download("a.txt").await, b"a");
+}
+
+#[tokio::test]
+async fn restored_folder_never_replaces_one_made_meanwhile() {
+    let Some(t) = app().await else { return };
+    let cid = local_conn(&t, "Disk", "disk").await;
+    let disk = t.dir.path().join("local/disk");
+    std::fs::create_dir_all(disk.join("f")).unwrap();
+    std::fs::write(disk.join("f/in.txt"), b"in").unwrap();
+    t.ok(
+        "POST",
+        "/api/mounts",
+        json!({"path": "Disk", "connection_id": cid, "mode": "raw"}),
+    )
+    .await;
+    delete(&t, &["Disk/f"]).await;
+    // An empty folder of the same name appears outside Strata.
+    std::fs::create_dir(disk.join("f")).unwrap();
+    assert_eq!(
+        restore(&t, id_of(&items(&t).await, "Disk/f")).await,
+        "Disk/f (restored)"
+    );
+    assert!(disk.join("f").is_dir());
+    assert_eq!(
+        std::fs::read(disk.join("f (restored)/in.txt")).unwrap(),
+        b"in"
+    );
 }

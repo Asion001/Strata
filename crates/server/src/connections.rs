@@ -1,7 +1,7 @@
 //! Connections CRUD and health probes.
 
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -376,10 +376,18 @@ pub async fn update(
     get_view(&st, &u, id).await.map(Json)
 }
 
+#[derive(Deserialize, Default)]
+pub struct DeleteQuery {
+    /// Also purge every trashed item that came from this connection.
+    #[serde(default)]
+    pub purge_trash: bool,
+}
+
 pub async fn delete(
     State(st): State<AppState>,
     AuthUser(u): AuthUser,
     Path(id): Path<i64>,
+    Query(q): Query<DeleteQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
     check_access(&st, &u, id).await?;
     let in_use: bool = sqlx::query_scalar(
@@ -416,10 +424,25 @@ pub async fn delete(
     .bind(id)
     .fetch_one(&st.db)
     .await?;
-    if trashed > 0 {
+    if trashed > 0 && !q.purge_trash {
         return Err(conflict(format!(
-            "{trashed} deleted item(s) from this connection are still in a trash; restore or purge them first"
+            "{trashed} deleted item(s) from this connection are still in the trash; \
+             restore them, or delete the connection with purge_trash to remove them for good"
         )));
+    }
+    if trashed > 0 {
+        let ids: Vec<i64> = sqlx::query_scalar(
+            "SELECT t.id FROM trash t JOIN volumes v ON v.id = t.volume_id WHERE v.connection_id = $1",
+        )
+        .bind(id)
+        .fetch_all(&st.db)
+        .await?;
+        for t in ids {
+            match crate::trash::purge(&st, t).await {
+                Ok(()) | Err(ApiError::NotFound) => {}
+                Err(e) => return Err(e),
+            }
+        }
     }
     // A local connection's marker goes with it (best effort, below).
     // (Its operator, rooted at the folder, built before the row goes.)
