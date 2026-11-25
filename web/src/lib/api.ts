@@ -40,21 +40,33 @@ import { isSvg } from './format';
 
 export const enc = encodeURIComponent;
 
-export interface Entry {
-  name: string;
-  is_dir: boolean;
-  size: number;
-  mtime: string;
-  etag: string | null;
-  mount_id: number | null;
-  /** A mount point whose storage is offline. */
-  offline?: boolean;
-}
+// The API's types come from its OpenAPI document (api/openapi.json, made
+// from the server's code): `npm run api:types` writes ./openapi.d.ts.
+import type { components, paths } from './openapi';
+export type Schemas = components['schemas'];
+export type Entry = Schemas['Entry'];
+export type User = Schemas['User'];
 
-export interface User {
-  id: number;
-  username: string;
-  is_admin: boolean;
+type JsonOf<R> = R extends { content: { 'application/json': infer T } } ? T : never;
+/** The JSON answer of an operation (`ApiOk<'/api/auth/me', 'get'>`). */
+export type ApiOk<P extends keyof paths, M extends keyof paths[P]> = paths[P][M] extends { responses: { 200: infer R } }
+  ? JsonOf<R>
+  : never;
+/** The JSON body an operation takes. */
+export type ApiBody<P extends keyof paths, M extends keyof paths[P]> = paths[P][M] extends {
+  requestBody?: { content: { 'application/json': infer B } };
+}
+  ? B
+  : never;
+
+/** `api()`, typed by the OpenAPI document: path, method, body and answer. */
+export function call<P extends keyof paths, M extends keyof paths[P] & string>(
+  method: M,
+  path: P,
+  body?: ApiBody<P, M>,
+  query = ''
+): Promise<ApiOk<P, M>> {
+  return api(method.toUpperCase(), `${String(path)}${query}`, body);
 }
 
 export function contentUrl(path: string, download = false) {

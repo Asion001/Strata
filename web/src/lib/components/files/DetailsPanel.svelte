@@ -1,7 +1,7 @@
 <script lang="ts">
   // The right-hand details panel for one file or folder: what it is, where it
   // lives, and its share links. Loaded on first use.
-  import { api, thumbUrl, type Entry } from '$lib/api';
+  import { api, thumbUrl, type Entry, type Schemas } from '$lib/api';
   import { bytes, isImage, kindOf, when } from '$lib/format';
   import { cn } from '$lib/utils';
   import { alertDialog, confirmDialog } from '$lib/dialogs.svelte';
@@ -14,7 +14,7 @@
   import CopyIcon from '@lucide/svelte/icons/copy';
   import TrashIcon from '@lucide/svelte/icons/trash';
 
-  type Share = { id: number; token: string; path: string; is_dir: boolean; has_password: boolean; expires_at: string | null; created_at: string };
+  type Share = Schemas['Share'];
 
   let {
     entry,

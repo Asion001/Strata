@@ -1,7 +1,7 @@
 <script lang="ts">
   import { confirmDialog } from '$lib/dialogs.svelte';
   import { toast, toastError } from '$lib/toast.svelte';
-  import { api } from '$lib/api';
+  import { api, type Schemas } from '$lib/api';
   import { reloadMounts } from '$lib/mounts.svelte';
   import { cn } from '$lib/utils';
   import Button from '$lib/components/ui/button/button.svelte';
@@ -9,7 +9,7 @@
   import { folderHref, kindIcon } from '$lib/components/shell/nav';
   import { badgeClass, cardClass, h1Class, h2Class, labelClass, listClass, mutedClass, pageClass, rowClass, selectClass } from '$lib/components/ui/styles';
 
-  type Mount = { id: number; path: string; mode: string; connection_id: number; connection_name: string; connection_kind: string; base_path: string };
+  type Mount = Schemas['Mount'];
   let mounts = $state<Mount[]>([]);
   let conns = $state<{ id: number; name: string; kind: string; capabilities?: { read_only?: boolean } }[]>([]);
   let form = $state({ path: '', connection_id: 0, base_path: '', mode: 'raw' });

@@ -24,7 +24,7 @@ use crate::state::AppState;
 
 pub type ByteStream = Pin<Box<dyn Stream<Item = io::Result<Bytes>> + Send>>;
 
-#[derive(Clone, Debug, Serialize, sqlx::FromRow)]
+#[derive(Clone, Debug, Serialize, sqlx::FromRow, utoipa::ToSchema)]
 pub struct Entry {
     pub name: String,
     pub is_dir: bool,
@@ -1807,7 +1807,7 @@ pub async fn copy_path(st: &AppState, user_id: i64, from: &str, to: &str) -> Api
 
 // ---------------------------------------------------------------- search
 
-#[derive(Serialize, sqlx::FromRow)]
+#[derive(Serialize, sqlx::FromRow, utoipa::ToSchema)]
 pub struct SearchHit {
     pub path: String,
     pub name: String,

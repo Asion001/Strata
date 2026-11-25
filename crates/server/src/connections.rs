@@ -11,7 +11,7 @@ use crate::auth::{AuthUser, User};
 use crate::error::{ApiError, ApiResult, bad, conflict};
 use crate::state::AppState;
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct ConnectionView {
     pub id: i64,
     pub owner_id: i64,
@@ -183,7 +183,8 @@ pub async fn list(
     ))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
+#[schema(as = ConnectionInput)]
 pub struct UpsertReq {
     pub name: String,
     pub config: ConnectionConfig,
@@ -441,7 +442,8 @@ pub async fn probe(
     get_view(&st, &u, id).await.map(Json)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
+#[schema(as = ConnectionTest)]
 pub struct TestReq {
     pub config: ConnectionConfig,
     /// When editing, blank secrets are taken from this connection.
