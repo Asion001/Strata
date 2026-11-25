@@ -334,11 +334,25 @@ describe('queue', () => {
   });
 
   it('runs under a lock where the browser has Web Locks', async () => {
-    const request = vi.fn(async (_n: string, fn: () => Promise<unknown>) => fn());
+    const request = vi.fn(async (_n: string, opts: { signal?: AbortSignal }, fn: () => Promise<unknown>) => {
+      if (opts.signal?.aborted) throw new DOMException('aborted', 'AbortError');
+      return fn();
+    });
     vi.stubGlobal('navigator', { locks: { request } });
     await add(job({ id: 'a' }));
     expect(await q.drain(1, deps())).toBe('done');
-    expect(request).toHaveBeenCalledWith('strata-uploads', expect.any(Function));
+    expect(request).toHaveBeenCalledWith('strata-uploads', {}, expect.any(Function));
+    // A stop ends the wait for the lock too.
+    await add(job({ id: 'b' }));
+    const stop = new AbortController();
+    stop.abort();
+    expect(await q.drain(1, deps(), stop.signal)).toBe('done');
+    expect(await q.exists('b')).toBe(true);
+    // Any other lock failure is reported.
+    request.mockImplementationOnce(async () => {
+      throw new Error('lock broke');
+    });
+    await expect(q.drain(1, deps())).rejects.toThrow('lock broke');
   });
 
   it('cancel stops a running job, drops it and its server session', async () => {
@@ -741,6 +755,30 @@ describe('network and file errors', () => {
     }) as unknown as typeof fetch;
     expect(await q.drain(1, deps({ fetch: f }), stop.signal)).toBe('done');
     expect(srv.log.filter((l) => l === 'POST /api/uploads')).toHaveLength(1); // (b never started)
+  });
+
+  it('runs a user’s jobs only while the server says it is them', async () => {
+    await add(job({ id: 'a' }));
+    expect(await q.drain(1, deps({ whoami: async () => 2 }))).toBe('offline');
+    expect(srv.log).toEqual([]);
+    expect(await q.drain(1, deps({ whoami: async () => 1 }))).toBe('done');
+    expect(srv.committed).toHaveLength(1);
+  });
+
+  it('a stop while a job loads still aborts it', async () => {
+    await add(job({ id: 'a' }));
+    const stop = new AbortController();
+    const out = q.drain(1, deps({ whoami: async () => (stop.abort(), 1) }), stop.signal);
+    expect(await out).toBe('done');
+    expect(srv.log.filter((l) => l.startsWith('PUT'))).toEqual([]);
+  });
+
+  it('a commit restart whose bytes are gone is reported failed', async () => {
+    const j = await fresh({ state: 'committing', chunks, session: 'old', sent: ['aa', 'bb', 'cc'], created: Date.now() - q.PENDING_GRACE - 1 });
+    await tx('blobs', 'readwrite', (s) => void s.delete(j.id));
+    const out = await q.run((await q.load(j.id))!, deps());
+    expect(out.state).toBe('failed');
+    expect(changes.at(-1)!.state).toBe('failed');
   });
 });
 

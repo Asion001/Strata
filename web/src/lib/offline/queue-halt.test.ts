@@ -1,7 +1,7 @@
 // Sign-out halts the queue for the rest of the page's life (it reloads to
 // the sign-in page next): its own module instance here.
 import 'fake-indexeddb/auto';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import * as q from './queue';
 
 describe('halt', () => {
@@ -33,5 +33,43 @@ describe('halt', () => {
     expect(calls).toHaveLength(1);
     // Nothing more is stored after a sign-out.
     await expect(q.keepBytes('late', new Blob(['x']))).rejects.toMatchObject({ name: 'AbortError' });
+  });
+});
+
+describe('halt while bytes are being stored', () => {
+  it('what was being written as the sign-out began goes again', async () => {
+    vi.resetModules(); // (a queue that wasn't halted yet)
+    const fresh = await import('./queue');
+    const { tx } = await import('./idb');
+    const realPut = IDBObjectStore.prototype.put;
+    let once = true;
+    // Halt right as the put happens (the sign-out in the middle of it).
+    const spy = vi.spyOn(IDBObjectStore.prototype, 'put').mockImplementation(function (this: IDBObjectStore, v: unknown, k?: IDBValidKey) {
+      if (once && k === 'mid') {
+        once = false;
+        fresh.halt();
+      }
+      return realPut.call(this, v, k);
+    });
+    await expect(fresh.keepBytes('mid', new Blob(['x']))).rejects.toMatchObject({ name: 'AbortError' });
+    expect(await tx('blobs', 'readonly', (s) => s.count('mid'))).toBe(0);
+    spy.mockRestore();
+  });
+});
+
+describe('halt while bytes are being stored as buffers', () => {
+  it('those go again too', async () => {
+    vi.resetModules();
+    const fresh = await import('./queue');
+    const { tx } = await import('./idb');
+    const realPut = IDBObjectStore.prototype.put;
+    const spy = vi.spyOn(IDBObjectStore.prototype, 'put').mockImplementation(function (this: IDBObjectStore, v: unknown, k?: IDBValidKey) {
+      if (v instanceof Blob) throw new DOMException('no blobs here', 'UnknownError');
+      if (k === 'buf') fresh.halt();
+      return realPut.call(this, v, k);
+    });
+    await expect(fresh.keepBytes('buf', new Blob(['x']))).rejects.toMatchObject({ name: 'AbortError' });
+    expect(await tx('blobs', 'readonly', (s) => s.count('buf'))).toBe(0);
+    spy.mockRestore();
   });
 });

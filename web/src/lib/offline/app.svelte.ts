@@ -130,12 +130,15 @@ if (typeof window !== 'undefined') {
 export const uploads = $state<{ jobs: Job[] }>({ jobs: [] });
 
 function changed(j: Job) {
+  // (Another user's job, e.g. still being queued as they left: not listed.)
+  if (queueUser !== null && j.user !== queueUser) return;
   const i = uploads.jobs.findIndex((x) => x.id === j.id);
   if (i >= 0) uploads.jobs[i] = j;
   else uploads.jobs.push(j);
 }
 
 let queueUser: number | null = null;
+let drainStop: AbortController | null = null;
 let storing: Promise<unknown> = Promise.resolve();
 let draining: Promise<unknown> | null = null;
 let again = false;
@@ -146,6 +149,14 @@ const deps = (): Deps => ({
   chunk: async (b, signal) => (await import('./chunks')).chunkFile(b, signal),
   sleep: (a) => new Promise((r) => setTimeout(r, 1000 * 2 ** a)),
   online: () => navigator.onLine,
+  whoami: async () => {
+    try {
+      const r = await fetch('/api/auth/me', { headers: { 'x-strata': '1' } });
+      return r.ok ? ((await r.json()) as { id: number }).id : null;
+    } catch {
+      return null;
+    }
+  },
   changed: (j) => {
     changed(j);
     // (Failed and cancelled ones end too: the folder shows what is there.)
@@ -188,12 +199,13 @@ let retryDelay = 15_000;
 
 /** Start the queue for a user: what was left (app open), and again
  *  whenever the network comes back. `done`: a job finished. */
-let drainStop: AbortController | null = null;
-
 export async function startQueue(user: number, done: (j: Job) => void) {
   // Someone else signed in in this tab: the previous user's queue stops
   // here, and their uploads leave the list (they stay theirs, stored).
   if (queueUser !== null && queueUser !== user) {
+    // (The new user first, so nothing that ends meanwhile pumps the old.)
+    queueUser = user;
+    again = false;
     drainStop?.abort();
     clearTimeout(retryTimer);
     await draining;

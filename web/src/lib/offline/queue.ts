@@ -121,28 +121,38 @@ async function memory(): Promise<Map<string, Job> | null> {
 
 /** Keep a job's bytes. Resolves how: 'blob', 'buffers' or 'memory'. */
 export async function keepBytes(id: string, blob: Blob): Promise<'blob' | 'buffers' | 'memory'> {
-  // (Signed out: nothing more is written here.)
-  if (halted) throw new DOMException('signed out', 'AbortError');
+  // Signed out: nothing more is written here, and what was being written
+  // as the sign-out began goes again.
+  const signedOut = () => new DOMException('signed out', 'AbortError');
+  const put = async (v: Stored) => {
+    await tx('blobs', 'readwrite', (s) => void s.put(v, id));
+    if (halted) {
+      await tx('blobs', 'readwrite', (s) => void s.delete(id));
+      throw signedOut();
+    }
+  };
+  if (halted) throw signedOut();
   if (await memory()) {
     holdBytes(id, blob);
     return 'memory';
   }
   try {
-    await tx('blobs', 'readwrite', (s) => void s.put(blob, id));
+    await put(blob);
     return 'blob';
-  } catch {
+  } catch (e) {
+    if (halted) throw e;
     if (blob.size <= BUFFER_MAX) {
       try {
         const parts: ArrayBuffer[] = [];
         for (let o = 0; o < blob.size; o += PART) parts.push(await blob.slice(o, o + PART).arrayBuffer());
-        await tx('blobs', 'readwrite', (s) => void s.put({ parts, type: blob.type }, id));
+        await put({ parts, type: blob.type });
         return 'buffers';
-      } catch {
-        // (fall through)
+      } catch (e2) {
+        if (halted) throw e2;
       }
     }
     holdBytes(id, blob);
-    await tx('blobs', 'readwrite', (s) => void s.put({ memory: true }, id)).catch(() => {});
+    await put({ memory: true }).catch(() => {});
     return 'memory';
   }
 }
@@ -316,6 +326,10 @@ export interface Deps {
   changed?: (j: Job) => void;
   /** Whether the device is online (a failed request is then retried). */
   online?: () => boolean;
+  /** Who the server says is signed in (null: can't tell). The queue only
+   *  runs a user's jobs while it is them: the cookie may belong to someone
+   *  else by now (signed in in another tab). */
+  whoami?: () => Promise<number | null>;
 }
 
 /** The network went away: stop, keep the job as it is, resume later. */
@@ -379,7 +393,7 @@ const json = (body: unknown): RequestInit => ({
  *  (the job stays resumable); any other failure marks it failed. */
 export async function run(job: Job, d: Deps, signal?: AbortSignal, restarts = 0): Promise<Job> {
   // (No bytes here to send: never run, it would send empty chunks.)
-  if (waiting(job) && job.state !== 'committing') return job;
+  if (waiting(job)) return job;
   let j = job;
   const live = () => {
     if (signal?.aborted) throw new DOMException('cancelled', 'AbortError');
@@ -505,7 +519,10 @@ export async function run(job: Job, d: Deps, signal?: AbortSignal, restarts = 0)
         // A new session needs the chunks again: with the bytes, read anew
         // (a job resumed at its commit was loaded without them).
         // (It exists: `go` just saved it, or would have stopped the run.)
-        return run((await load(j.id))!, d, signal, restarts + 1);
+        const again = (await load(j.id)) as Job;
+        // (Its bytes gone meanwhile: it is failed now; say so.)
+        if (again.state === 'failed') d.changed?.(again);
+        return run(again, d, signal, restarts + 1);
       }
     }
     return j;
@@ -530,12 +547,14 @@ export async function drain(user: number, d: Deps, stop?: AbortSignal): Promise<
     for (const j of await jobs(user)) {
       if (halted || stop?.aborted) break;
       if (!isActive(j)) continue;
+      if (d.whoami && (await d.whoami()) !== user) return 'offline'; // (not theirs now: wait)
       const cur = await load(j.id); // (cancelled meanwhile?)
       if (cur && cur.state === 'failed' && isActive(j)) d.changed?.(cur); // (its bytes are gone)
       if (!cur || !isActive(cur) || waiting(cur)) continue;
       const ctl = new AbortController();
       const abort = () => ctl.abort();
       stop?.addEventListener('abort', abort);
+      if (stop?.aborted) ctl.abort(); // (stopped while this job was loading)
       running.set(j.id, ctl);
       try {
         const out = await run(cur, d, ctl.signal);
@@ -551,7 +570,12 @@ export async function drain(user: number, d: Deps, stop?: AbortSignal): Promise<
     return 'done';
   };
   const locks = (globalThis.navigator as Navigator | undefined)?.locks;
-  return locks ? locks.request('strata-uploads', work) : work();
+  if (!locks) return work();
+  // (A stop also ends the wait for the lock.)
+  return locks.request('strata-uploads', stop ? { signal: stop } : {}, work).catch((e) => {
+    if ((e as Error)?.name === 'AbortError') return 'done' as const;
+    throw e;
+  });
 }
 
 const running = new Map<string, AbortController>();
