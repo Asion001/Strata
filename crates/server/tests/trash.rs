@@ -839,13 +839,17 @@ async fn orphan_trash_folders_are_set_aside_and_doomed_ones_removed() {
     let orphan = trash.join("987654");
     std::fs::create_dir_all(&orphan).unwrap();
     std::fs::write(orphan.join("left.txt"), b"left").unwrap();
-    let doomed = trash.join("purging-5");
+    let doomed = trash.join("purging-5-123");
     std::fs::create_dir_all(&doomed).unwrap();
     std::fs::write(doomed.join("x"), b"x").unwrap();
     let other = trash.join("notes");
     std::fs::create_dir_all(&other).unwrap();
-    assert_eq!(strata_server::trash::reconcile(&t.st).await.unwrap(), 2);
-    assert!(!orphan.exists() && !doomed.exists());
+    // Doomed folders go at once; an unknown one only when a second sweep
+    // still finds no row for it (a user delete removes rows, then folders).
+    assert_eq!(strata_server::trash::reconcile(&t.st).await.unwrap(), 1);
+    assert!(!doomed.exists() && orphan.exists());
+    assert_eq!(strata_server::trash::reconcile(&t.st).await.unwrap(), 1);
+    assert!(!orphan.exists());
     assert!(other.exists(), "only Strata's names are touched");
     // The orphan's files are kept, never deleted.
     let aside: Vec<_> = std::fs::read_dir(&trash)
@@ -897,7 +901,12 @@ async fn a_left_over_trash_folder_is_never_mixed_with_a_new_item() {
     // A purge leaves nothing behind.
     t.ok("DELETE", &format!("/api/trash/{id}"), json!({})).await;
     assert!(!stale.exists());
-    assert!(!disk.join(format!(".strata-trash/purging-{id}")).exists());
+    let left: Vec<_> = std::fs::read_dir(disk.join(".strata-trash"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .filter(|n| n.starts_with("purging-"))
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
 }
 
 #[tokio::test]

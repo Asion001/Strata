@@ -15,6 +15,7 @@
 //! Every step that changes an item runs under the volume lock, so trashing,
 //! restoring, purging and reconciling one volume never interleave.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use axum::Json;
@@ -77,7 +78,8 @@ fn item_dir(root: &Path, id: i64) -> PathBuf {
 /// Where a purge moves an item before removing it outside the volume lock.
 /// Whatever is found under this name is doomed (the sweep finishes it).
 fn doomed_dir(root: &Path, id: i64) -> PathBuf {
-    root.join(TRASH_DIR).join(format!("purging-{id}"))
+    let nanos = Utc::now().timestamp_nanos_opt().unwrap_or_default();
+    root.join(TRASH_DIR).join(format!("purging-{id}-{nanos}"))
 }
 
 /// Move a `.strata-trash/<id>` folder no row knows out of the way, keeping
@@ -367,8 +369,12 @@ async fn free_name(
     let all = mounts::user_mounts(st, user_id).await?;
     let user_parent = paths::join(&m.path, parent);
     let covers = |p: &str| {
-        all.iter()
-            .any(|x| x.path.len() > m.path.len() && paths::strip_prefix(p, &x.path).is_some())
+        all.iter().any(|x| {
+            // Another mount of the same volume shows the same place.
+            x.volume_id != m.volume_id
+                && x.path.len() > m.path.len()
+                && paths::strip_prefix(p, &x.path).is_some()
+        })
     };
     if covers(&user_parent) {
         return Err(conflict(
@@ -569,6 +575,13 @@ pub async fn restore(st: &AppState, user_id: i64, id: i64) -> ApiResult<String> 
                     .bind(id)
                     .execute(&st.db)
                     .await;
+                // At least make the next listing of the parent look again.
+                let _ = sqlx::query("DELETE FROM raw_scans WHERE volume_id = $1 AND dir = $2")
+                    .bind(m.volume_id)
+                    .bind(parent)
+                    .execute(&st.db)
+                    .await;
+                let _ = tokio::fs::remove_dir(&dir).await;
             }
         }
     }
@@ -655,7 +668,6 @@ pub async fn purge(st: &AppState, id: i64) -> ApiResult<()> {
         // crash in between leaves a row whose item is gone, which reconcile
         // drops, or a doomed folder, which the sweep removes.
         let to = doomed_dir(root, id);
-        let _ = tokio::fs::remove_dir_all(&to).await; // a stale one
         match tokio::fs::rename(item_dir(root, id), &to).await {
             Ok(()) => doomed = Some(to),
             // Gone, but only believe it while the trash folder is there: a
@@ -790,8 +802,10 @@ async fn reconcile_one(
 /// doomed, and set aside `.strata-trash/<id>` folders that no row knows
 /// (their owner was deleted while the item was moving, or the database was
 /// restored from a backup). A row is always written before its folder is
-/// made and removed only after it, so a folder without a row is never one in
-/// use. Set-aside folders keep their files (`orphan-<id>-<time>`) for an
+/// made, so a folder without a row is never one being filled. A folder is
+/// set aside only when the previous sweep (an hour earlier) saw it without a
+/// row too: a user or connection delete removes the rows a moment before the
+/// folders. Set-aside folders keep their files (`orphan-<id>-<time>`) for an
 /// admin to look at. Best effort; returns how many folders were handled.
 async fn sweep_orphans(st: &AppState) -> usize {
     let Ok(conns) = sqlx::query_scalar::<_, i64>("SELECT id FROM connections WHERE kind = 'local'")
@@ -800,21 +814,32 @@ async fn sweep_orphans(st: &AppState) -> usize {
     else {
         return 0;
     };
+    static SEEN: std::sync::Mutex<BTreeSet<PathBuf>> = std::sync::Mutex::new(BTreeSet::new());
+    let seen = || SEEN.lock().unwrap_or_else(|e| e.into_inner());
     let mut handled = 0;
     for cid in conns {
         let Ok(root) = local_root(st, cid).await else {
             continue;
         };
-        let Ok(mut rd) = tokio::fs::read_dir(root.join(TRASH_DIR)).await else {
+        let trash = root.join(TRASH_DIR);
+        // What the last sweep of this folder found unknown (kept per folder).
+        let before: BTreeSet<PathBuf> = {
+            let mut all = seen();
+            let mine: Vec<PathBuf> = all
+                .iter()
+                .filter(|p| p.starts_with(&trash))
+                .cloned()
+                .collect();
+            mine.into_iter().filter(|p| all.remove(p)).collect()
+        };
+        let mut now = Vec::new();
+        let Ok(mut rd) = tokio::fs::read_dir(&trash).await else {
             continue;
         };
         while let Ok(Some(e)) = rd.next_entry().await {
             let name = e.file_name();
             let Some(name) = name.to_str() else { continue };
-            if name
-                .strip_prefix("purging-")
-                .is_some_and(|n| n.parse::<i64>().is_ok())
-            {
+            if name.starts_with("purging-") {
                 if tokio::fs::remove_dir_all(e.path()).await.is_ok() {
                     handled += 1;
                 }
@@ -835,6 +860,10 @@ async fn sweep_orphans(st: &AppState) -> usize {
             if known {
                 continue;
             }
+            if !before.contains(&e.path()) {
+                now.push(e.path());
+                continue;
+            }
             match set_aside(&root, id).await {
                 Ok(()) => {
                     tracing::warn!(
@@ -845,6 +874,7 @@ async fn sweep_orphans(st: &AppState) -> usize {
                 Err(e) => tracing::warn!("setting aside trash folder {id} failed: {e}"),
             }
         }
+        seen().extend(now);
     }
     handled
 }
