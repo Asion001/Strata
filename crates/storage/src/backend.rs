@@ -25,9 +25,16 @@ pub fn has_probe_component(path: &str) -> bool {
     path.split(['/', '\\']).any(|c| c == PROBE_DIR)
 }
 
-/// Does a `/`-separated path contain the reserved atomic-write folder?
+/// Folder at a local connection's root that holds deleted items until they
+/// are restored or purged (`<root>/.strata-trash/<trash id>/<name>`). Hidden
+/// from listings like the atomic-write folder.
+pub const TRASH_DIR: &str = ".strata-trash";
+
+/// Does a `/`-separated path contain a reserved folder of local connections
+/// (atomic-write staging or the trash)?
 pub fn has_reserved_component(path: &str) -> bool {
-    path.split('/').any(|c| c == ATOMIC_TMP_DIR)
+    path.split('/')
+        .any(|c| c == ATOMIC_TMP_DIR || c == TRASH_DIR)
 }
 
 /// Errors that mean "this folder exists but we may not write to it".
@@ -186,7 +193,7 @@ impl ConnectionConfig {
         }
         let slashed = path.replace('\\', "/");
         if has_reserved_component(&slashed) {
-            bail!("{ATOMIC_TMP_DIR} is reserved");
+            bail!("{ATOMIC_TMP_DIR} and {TRASH_DIR} are reserved");
         }
         if has_probe_component(&slashed) {
             bail!("{PROBE_DIR} is reserved");

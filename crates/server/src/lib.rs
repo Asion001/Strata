@@ -16,6 +16,7 @@ pub mod safe;
 pub mod shares;
 pub mod state;
 pub mod thumbs;
+pub mod trash;
 pub mod uploads;
 pub mod vfs;
 

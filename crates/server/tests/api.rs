@@ -430,9 +430,14 @@ async fn shares_journal_and_gc() {
         StatusCode::NOT_FOUND
     );
 
-    // GC: delete the file; with grace 0 its blob goes away
-    t.ok("POST", "/api/files/delete", json!({"paths": ["pub"]}))
-        .await;
+    // GC: delete the file for good (the trash would keep it); with grace 0
+    // its blob goes away
+    t.ok(
+        "POST",
+        "/api/files/delete",
+        json!({"paths": ["pub"], "permanent": true}),
+    )
+    .await;
     let n = strata_server::background::gc(&t.st, 0).await.unwrap();
     assert_eq!(n, 1);
     let blobs: i64 = sqlx::query_scalar("SELECT count(*) FROM blobs")
@@ -862,8 +867,12 @@ async fn gc_keeps_blobs_of_pending_uploads_and_survives_broken_backends() {
 async fn store_blob_rewrites_a_blob_gc_removed_meanwhile() {
     let Some(t) = app().await else { return };
     t.upload("a.txt", b"again").await;
-    t.ok("POST", "/api/files/delete", json!({"paths": ["a.txt"]}))
-        .await;
+    t.ok(
+        "POST",
+        "/api/files/delete",
+        json!({"paths": ["a.txt"], "permanent": true}),
+    )
+    .await;
     sqlx::query("UPDATE blobs SET created_at = now() - interval '3 days'")
         .execute(&t.st.db)
         .await
@@ -1149,6 +1158,7 @@ fn state_dir_inside_storage_base_is_refused() {
         gc_grace_hours: 1,
         raw_ttl_secs: 1,
         probe_secs: 60,
+        trash_days: 30,
     };
     assert!(cfg.clone().checked().is_err());
     cfg.data_dir = "/var/lib/strata".into();

@@ -9,7 +9,7 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::state::AppState;
-use crate::{auth, connections, files, journal, mounts, shares, thumbs, uploads};
+use crate::{auth, connections, files, journal, mounts, shares, thumbs, trash, uploads};
 
 /// Marks a response that must not be compressed on the fly: file contents,
 /// which are read in byte ranges (compressing would drop the Content-Length
@@ -97,6 +97,10 @@ pub fn router(st: AppState) -> Router {
         .route("/ws", get(journal::ws))
         .route("/shares", get(shares::list).post(shares::create))
         .route("/shares/{id}", axum::routing::delete(shares::delete))
+        .route("/trash", get(trash::list))
+        .route("/trash/empty", post(trash::empty))
+        .route("/trash/{id}", axum::routing::delete(trash::delete_one))
+        .route("/trash/{id}/restore", post(trash::restore_one))
         .route("/public/{token}", get(shares::info))
         .route("/public/{token}/unlock", post(shares::unlock))
         .route("/public/{token}/content", get(shares::content))
