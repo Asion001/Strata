@@ -847,3 +847,52 @@ async fn orphan_trash_folders_are_swept() {
         "only folders named like trash ids are swept"
     );
 }
+
+#[tokio::test]
+async fn reconcile_leaves_an_item_made_again_after_a_crash() {
+    let Some(t) = app().await else { return };
+    let cid = local_conn(&t, "Disk", "disk").await;
+    let disk = t.dir.path().join("local/disk");
+    std::fs::create_dir_all(&disk).unwrap();
+    t.ok(
+        "POST",
+        "/api/mounts",
+        json!({"path": "Disk", "connection_id": cid, "mode": "raw"}),
+    )
+    .await;
+    let uid: i64 = count(&t, "SELECT id FROM users WHERE username = 'admin'").await;
+    let vid: i64 = count(&t, "SELECT volume_id FROM mounts WHERE path = 'Disk'").await;
+    // Crash after the rename, before the row was marked ready...
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO trash (owner_id, volume_id, original_path, rel_path, name, is_dir, ready, purge_after)
+         VALUES ($1, $2, 'Disk/a.txt', 'a.txt', 'a.txt', FALSE, FALSE, now() + interval '30 days') RETURNING id",
+    )
+    .bind(uid)
+    .bind(vid)
+    .fetch_one(&t.st.db)
+    .await
+    .unwrap();
+    let dir = disk.join(format!(".strata-trash/{id}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("a.txt"), b"old").unwrap();
+    // ...then a new a.txt was uploaded before reconcile ran.
+    t.upload("Disk/a.txt", b"new").await;
+    let seq: i64 = count(&t, "SELECT COALESCE(MAX(id), 0) FROM journal").await;
+    assert_eq!(strata_server::trash::reconcile(&t.st).await.unwrap(), 1);
+    assert_eq!(
+        count(
+            &t,
+            &format!("SELECT COUNT(*) FROM journal WHERE id > {seq}")
+        )
+        .await,
+        0,
+        "no delete is journaled for the new file"
+    );
+    assert!(t.names("Disk").await.contains(&"a.txt".to_string()));
+    assert_eq!(t.download("Disk/a.txt").await, b"new");
+    let all = items(&t).await;
+    assert_eq!(
+        restore(&t, id_of(&all, "Disk/a.txt")).await,
+        "Disk/a (restored).txt"
+    );
+}

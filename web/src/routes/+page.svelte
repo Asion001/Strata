@@ -334,30 +334,38 @@
 
   /** Runs `fn` for each item in turn; one failure doesn't stop the rest.
    *  Says what failed, then refreshes. */
+  const SKIPPED = Symbol('skipped');
   async function each(items: Entry[], verb: string, fn: (e: Entry) => Promise<unknown>, fromSelection = true) {
     const dir = listedPath;
     const failed: string[] = [];
+    const done: Entry[] = [];
+    const skipped: string[] = [];
     let lastError = '';
     busy = true;
     try {
       for (const e of items) {
-        try { await fn(e); } catch (err) { failed.push(e.name); lastError = err instanceof Error ? err.message : String(err); }
+        try {
+          // SKIPPED: the user chose to keep it (no error, no success).
+          if ((await fn(e)) === SKIPPED) skipped.push(e.name);
+          else done.push(e);
+        } catch (err) { failed.push(e.name); lastError = err instanceof Error ? err.message : String(err); }
       }
     } finally {
       busy = false;
     }
     if (failed.length === 1) toast(`Couldn't ${verb} “${failed[0]}”: ${lastError}`, 'error');
     else if (failed.length) toast(`Couldn't ${verb} ${failed.length} items (${failed.slice(0, 3).join(', ')}${failed.length > 3 ? ', …' : ''}). ${lastError}`, 'error');
-    else toast(`${names(items)} ${verb === 'delete' ? 'deleted' : verb === 'move' ? 'moved' : 'copied'}.`, 'success');
+    else if (done.length) toast(`${names(done)} ${verb === 'delete' ? 'deleted' : verb === 'move' ? 'moved' : 'copied'}.`, 'success');
     await load();
     reloadMounts();
     // What failed stays selected for a retry, if the user is still here.
     // (A row-menu action leaves the selection alone.)
     if (fromSelection && listedPath === dir) {
       selection.clear();
-      for (const n of failed) if (byName.has(n)) selection.toggle(n);
+      for (const n of [...failed, ...skipped]) if (byName.has(n)) selection.toggle(n);
     }
-    return failed;
+    // What wasn't done, failed or kept.
+    return [...failed, ...skipped];
   }
 
   /** Mounts are moved and removed on the Mounts page, never as files. */
@@ -432,7 +440,7 @@
         confirm: 'Delete permanently',
         danger: true
       });
-      if (!ok) throw new Error('kept');
+      if (!ok) return SKIPPED;
       await api('POST', '/api/files/delete', { paths: [path], permanent: true });
     }
   }

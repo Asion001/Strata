@@ -236,16 +236,21 @@ pub async fn trash(
                     .bind(id)
                     .execute(&st.db)
                     .await;
-                return Err(if e.kind() == std::io::ErrorKind::CrossesDevices {
-                    // A disk mounted inside the connection: no rename to the
-                    // trash folder is possible. Say so; the client may then
-                    // delete permanently.
-                    conflict(
-                        "this folder is on another disk than its connection, so it can't go to the trash; delete it permanently instead",
-                    )
-                } else {
-                    io_error(e)
-                });
+                return Err(
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::CrossesDevices | std::io::ErrorKind::ResourceBusy
+                    ) {
+                        // A disk mounted inside the connection (or on the item
+                        // itself): no rename to the trash folder is possible. Say
+                        // so; the client may then delete permanently.
+                        conflict(
+                            "this item is on another disk than its connection, so it can't go to the trash; delete it permanently instead",
+                        )
+                    } else {
+                        io_error(e)
+                    },
+                );
             }
             // The item is in the trash now: report success even if the
             // bookkeeping below fails (reconcile completes it).
@@ -512,6 +517,11 @@ pub async fn restore(st: &AppState, user_id: i64, id: i64) -> ApiResult<String> 
                     std::io::ErrorKind::AlreadyExists => {
                         conflict("something with that name appeared; try again")
                     }
+                    std::io::ErrorKind::CrossesDevices | std::io::ErrorKind::ResourceBusy => {
+                        conflict(
+                            "another disk is mounted where this was, so it can't be moved back",
+                        )
+                    }
                     _ => io_error(e),
                 })?;
             // The item is back: from here on, a failure must not leave it
@@ -697,8 +707,19 @@ async fn reconcile_one(
         let mut fixed = false;
         let drop_row = if in_trash {
             if !ready {
-                let is_dir = tokio::fs::metadata(&item).await.is_ok_and(|m| m.is_dir());
-                finish_raw_trash(st, id, volume_id, rel, is_dir).await?;
+                if exists(root.join(paths::join(base, rel))).await {
+                    // Something new was made at the old place since the
+                    // crash: leave its listing and the clients alone.
+                    sqlx::query("UPDATE trash SET ready = TRUE WHERE id = $1")
+                        .bind(id)
+                        .execute(&st.db)
+                        .await?;
+                } else {
+                    let is_dir = tokio::fs::symlink_metadata(&item)
+                        .await
+                        .is_ok_and(|m| m.is_dir());
+                    finish_raw_trash(st, id, volume_id, rel, is_dir).await?;
+                }
                 fixed = true;
             }
             false
