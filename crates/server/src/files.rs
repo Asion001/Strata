@@ -36,6 +36,8 @@ pub async fn list(
     let (m, entries) = vfs::list(&st, u.id, &path).await?;
     Ok(Json(json!({
         "path": path,
+        // Whose listing this is (the app's offline cache keys by it).
+        "user": u.id,
         "mount": { "id": m.id, "path": m.path, "mode": m.mode, "connection_name": m.connection_name,
                    "connection_kind": m.connection_kind, "offline": st.is_offline(m.connection_id),
                    "trash": crate::trash::enabled(&st) && crate::trash::supports_trash(&m) },
