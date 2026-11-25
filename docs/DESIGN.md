@@ -100,7 +100,10 @@ Modes, freely nestable inside each other:
 * **RAW**: backend folders match the tree. Listings are cached in `nodes`;
   a folder is re-listed from the backend when its cache is older than
   `STRATA_RAW_TTL_SECS` (default 30 s) or on a full rescan, which picks up
-  changes made outside Strata.
+  changes made outside Strata. A stale folder that was listed before is
+  answered from the cache at once and re-listed in the background; the
+  journal then tells clients what changed. A rescan writes only the rows
+  that differ from the cache.
 * **HASHED**: content-addressed blobs named by their BLAKE3 hash, sharded as
   `blobs/ab/cd/<hash>` under the volume folder. Files up to 4 MiB are one
   blob; larger files are split with FastCDC (min 512 KiB, avg 2 MiB, max

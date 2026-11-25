@@ -64,6 +64,9 @@ pub struct Inner {
     pub layout_lock: Arc<tokio::sync::Mutex<()>>,
     /// Max concurrent volume-lock holders (each pins one pool connection).
     pub lock_permits: Arc<tokio::sync::Semaphore>,
+    /// Raw folders (volume id, dir) with a background rescan running, so
+    /// repeated opens of a stale folder start only one.
+    pub rescans: DashMap<(i64, String), ()>,
     /// Server-local folder for chunks of uploads into raw volumes
     /// (`<staging>/<upload id>/<chunk hash>`).
     pub staging: std::path::PathBuf,
@@ -118,6 +121,7 @@ impl AppState {
             volume_locks: DashMap::new(),
             layout_lock: Arc::new(tokio::sync::Mutex::new(())),
             lock_permits: Arc::new(tokio::sync::Semaphore::new(8)),
+            rescans: DashMap::new(),
             staging,
         }));
         crate::health::load(&st).await?;
