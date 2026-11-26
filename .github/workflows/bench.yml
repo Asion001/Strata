@@ -56,6 +56,9 @@ jobs:
             echo "$(nproc) cores: $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2-)"
             echo
           } >> "$GITHUB_STEP_SUMMARY"
+      # (The cache may bring results of an earlier run along.)
+      - name: Clear earlier results
+        run: rm -rf target/criterion
       - name: Bench the base
         if: github.event_name == 'pull_request'
         env:
@@ -72,6 +75,12 @@ jobs:
       - name: Bench this change
         run: cargo bench --workspace --bench '*' -- --save-baseline head
       # (`shell: bash` sets pipefail: tee must not hide a failure.)
+      # TEMPORARY (stability check): the same code again, compared.
+      - name: Bench this change again
+        run: cargo bench --workspace --bench '*' -- --save-baseline again
+      - name: A/A
+        shell: bash
+        run: python3 scripts/bench-check.py compare head again | tee -a "$GITHUB_STEP_SUMMARY" || true
       - name: Targets
         shell: bash
         run: python3 scripts/bench-check.py targets head | tee -a "$GITHUB_STEP_SUMMARY"
