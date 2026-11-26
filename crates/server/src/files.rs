@@ -443,6 +443,16 @@ pub async fn delete(
     let mut results = Vec::new();
     for raw in &b.paths {
         let done = match paths::normalize(raw) {
+            // (The root and mount points get vfs::delete's own answer.)
+            Ok(p)
+                if p.is_empty()
+                    || mounts::user_mounts(&st, u.id)
+                        .await?
+                        .iter()
+                        .any(|m| m.path == p) =>
+            {
+                vfs::delete(&st, u.id, &p, !b.permanent).await
+            }
             Ok(p) => match conflicts::check_not_busy_inside(&st, u.id, &p).await {
                 Ok(()) => vfs::delete(&st, u.id, &p, !b.permanent).await,
                 Err(e) => Err(e),

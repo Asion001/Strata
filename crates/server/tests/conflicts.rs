@@ -787,6 +787,16 @@ async fn a_folder_with_a_write_inside_stays_put_until_it_ends() {
         .json("POST", "/api/files/delete", json!({"paths": ["busy"]}))
         .await;
     assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{v}");
+    // Nor can it be replaced.
+    t.upload("other/sub/z.txt", b"z").await;
+    let (s, v) = op(&t, "copy", "other/sub", "busy/sub", "replace").await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{v}");
+    assert_eq!(t.names("busy/sub").await, vec!["a.txt"]);
+    // A mount point still gets its own answer.
+    let (s, _) = t
+        .json("POST", "/api/files/delete", json!({"paths": [""]}))
+        .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
     // A file beside it, and the root's other folders, are free.
     let (s, v) = op(&t, "copy", "busy/sub/a.txt", "a-copy.txt", "fail").await;
     assert_eq!(s, StatusCode::OK, "{v}");

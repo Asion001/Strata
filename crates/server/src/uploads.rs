@@ -447,7 +447,11 @@ async fn commit_detached(
         .bind(sqlx::types::Json(&answer))
         .execute(&st.db)
     };
-    match record().await.or(record().await) {
+    let recorded = match record().await {
+        Ok(r) => Ok(r),
+        Err(_) => record().await,
+    };
+    match recorded {
         Ok(_) => {
             let _ = tokio::fs::remove_dir_all(staging_dir(&st, &id)).await;
         }

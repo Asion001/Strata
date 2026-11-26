@@ -336,6 +336,10 @@ where
             "something is mounted inside it; keep both, or unmount it first",
         ));
     }
+    // Nor anything being written inside it (it would go with the old one).
+    if is_dir {
+        check_not_busy_inside(st, user_id, &target.path).await?;
+    }
     // Beside the old one first, under a hidden name of its own, recorded so
     // a crash midway is settled later (`reconcile`).
     let (parent, _) = paths::split(&target.path).unwrap();
@@ -367,10 +371,14 @@ where
             every.tick().await;
             loop {
                 every.tick().await;
-                let _ = sqlx::query("UPDATE staged_items SET alive_at = now() WHERE id = $1")
-                    .bind(row)
-                    .execute(&db)
-                    .await;
+                if let Err(e) =
+                    sqlx::query("UPDATE staged_items SET alive_at = now() WHERE id = $1")
+                        .bind(row)
+                        .execute(&db)
+                        .await
+                {
+                    tracing::warn!("replace {row} couldn't say it is alive: {e}");
+                }
             }
         }
     }));
@@ -437,6 +445,10 @@ where
             let _ = vfs::delete(st, user_id, staged, false).await;
         }
         return Err(e);
+    }
+    // (Once more, just before: a write inside may have started meanwhile.)
+    if is_dir {
+        check_not_busy_inside(st, user_id, to).await?;
     }
     // Whole now (recorded first: after a crash past this point, a copy may
     // be all there is). Only now does the old one go (to the trash where
