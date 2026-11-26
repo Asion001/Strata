@@ -1,7 +1,7 @@
 <script lang="ts">
   import { confirmDialog } from '$lib/dialogs.svelte';
   import { toastError } from '$lib/toast.svelte';
-  import { api, ApiError } from '$lib/api';
+  import { api, ApiError, type Schemas } from '$lib/api';
   import { session } from '$lib/session.svelte';
   import { cn } from '$lib/utils';
   import Button from '$lib/components/ui/button/button.svelte';
@@ -10,11 +10,8 @@
   import { badgeClass, cardClass, h1Class, labelClass, mutedClass, pageClass, selectClass } from '$lib/components/ui/styles';
   import PlusIcon from '@lucide/svelte/icons/plus';
 
-  type Conn = {
-    id: number; name: string; kind: string; config: Record<string, any>; capabilities: Record<string, any>;
-    is_default: boolean; health: string; health_reason: string | null; health_error: string | null;
-    health_latency_ms: number | null; health_checked_at: string | null;
-  };
+  // (The form edits the config loosely, field by field.)
+  type Conn = Omit<Schemas['ConnectionView'], 'config' | 'capabilities'> & { config: Record<string, any>; capabilities: Record<string, any> };
   let conns = $state<Conn[]>([]);
   let error = $state('');
   let editing = $state<{ id?: number; name: string; config: Record<string, any> } | null>(null);

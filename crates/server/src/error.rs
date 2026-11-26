@@ -50,6 +50,10 @@ impl From<sqlx::Error> for ApiError {
             sqlx::Error::Database(d) if d.code().as_deref() == Some("23505") => {
                 ApiError::Conflict("already exists".into())
             }
+            // Text Postgres can't hold (a NUL character): the input is bad.
+            sqlx::Error::Database(d) if d.code().as_deref() == Some("22021") => {
+                ApiError::BadRequest("text with a character that can't be stored (NUL)".into())
+            }
             e => ApiError::Internal(e.into()),
         }
     }

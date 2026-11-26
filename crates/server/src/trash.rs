@@ -43,7 +43,7 @@ pub fn enabled(st: &AppState) -> bool {
     st.cfg.trash_days > 0
 }
 
-#[derive(Clone, Debug, Serialize, sqlx::FromRow)]
+#[derive(Clone, Debug, Serialize, sqlx::FromRow, utoipa::ToSchema)]
 pub struct Item {
     pub id: i64,
     pub name: String,

@@ -294,7 +294,7 @@ pub struct ChangesQuery {
     pub limit: Option<i64>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct FeedEntry {
     pub op: String,
     pub path: String,

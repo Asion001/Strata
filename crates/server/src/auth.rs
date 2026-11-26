@@ -18,7 +18,7 @@ use crate::state::AppState;
 
 pub const SESSION_COOKIE: &str = "strata_session";
 
-#[derive(Clone, Debug, Serialize, sqlx::FromRow)]
+#[derive(Clone, Debug, Serialize, sqlx::FromRow, utoipa::ToSchema)]
 pub struct User {
     pub id: i64,
     pub username: String,
@@ -118,7 +118,7 @@ impl FromRequestParts<AppState> for AdminUser {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct LoginReq {
     pub username: String,
     pub password: String,
@@ -189,7 +189,7 @@ pub async fn me(AuthUser(u): AuthUser) -> Json<User> {
     Json(u)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct ChangePasswordReq {
     pub old_password: String,
     pub new_password: String,
@@ -413,7 +413,7 @@ pub async fn list_users(State(st): State<AppState>, _a: AdminUser) -> ApiResult<
     ))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct CreateUserReq {
     pub username: String,
     pub password: String,
@@ -489,7 +489,7 @@ pub async fn admin_delete_user(
     Ok(Json(json!({})))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct SetPasswordReq {
     pub password: String,
 }

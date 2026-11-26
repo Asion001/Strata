@@ -11,7 +11,7 @@ use crate::auth::{AuthUser, User};
 use crate::error::{ApiError, ApiResult, bad, conflict};
 use crate::state::AppState;
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct ConnectionView {
     pub id: i64,
     pub owner_id: i64,
@@ -154,6 +154,22 @@ pub async fn check_access(st: &AppState, user: &User, connection_id: i64) -> Api
     }
 }
 
+/// Only a connection's own keys are ever used (never the server's), so an
+/// S3 connection needs them (checked once blank secrets are filled in from
+/// the stored connection, when editing).
+fn own_keys(cfg: &ConnectionConfig) -> ApiResult<()> {
+    if let ConnectionConfig::S3 {
+        access_key_id,
+        secret_access_key,
+        ..
+    } = cfg
+        && (access_key_id.trim().is_empty() || secret_access_key.is_empty())
+    {
+        return Err(bad("an S3 connection needs an access key and its secret"));
+    }
+    Ok(())
+}
+
 fn validate(user: &User, name: &str, cfg: &ConnectionConfig) -> ApiResult<()> {
     if name.trim().is_empty() || name.len() > 100 {
         return Err(bad("name is required"));
@@ -183,7 +199,8 @@ pub async fn list(
     ))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
+#[schema(as = ConnectionInput)]
 pub struct UpsertReq {
     pub name: String,
     pub config: ConnectionConfig,
@@ -195,6 +212,7 @@ pub async fn create(
     Json(req): Json<UpsertReq>,
 ) -> ApiResult<Json<ConnectionView>> {
     validate(&u, &req.name, &req.config)?;
+    own_keys(&req.config)?;
     req.config
         .create_local_root(&st.cfg.local_base)
         .map_err(|e| bad(format!("invalid config: {e}")))?;
@@ -272,6 +290,7 @@ pub async fn update(
         bad("the stored settings of this connection can't be read (wrong server key, or an unknown format)")
     })?;
     req.config.merge_secrets(&old);
+    own_keys(&req.config)?;
     // Only a re-pointed connection gets its folder made, a fresh failure
     // count and capabilities to detect: a rename never touches the storage
     // (an unmounted disk's folder must not be created again).
@@ -497,7 +516,8 @@ pub async fn probe(
     get_view(&st, &u, id).await.map(Json)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
+#[schema(as = ConnectionTest)]
 pub struct TestReq {
     pub config: ConnectionConfig,
     /// When editing, blank secrets are taken from this connection.
@@ -514,6 +534,7 @@ pub async fn test(
         check_access(&st, &u, id).await?;
         req.config.merge_secrets(&st.connection_config(id).await?);
     }
+    own_keys(&req.config)?;
     // A new local folder is made when the connection is saved; testing
     // must not make it (or fail because it isn't there yet). An existing
     // connection's unchanged folder isn't made by saving, so it is tested.

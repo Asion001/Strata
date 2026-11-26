@@ -33,13 +33,14 @@ use crate::mounts;
 use crate::state::AppState;
 use crate::vfs::{self, ByteStream};
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct ChunkSpec {
     pub hash: String,
     pub size: i64,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
+#[schema(as = UploadInput)]
 pub struct CreateReq {
     pub path: String,
     pub size: i64,

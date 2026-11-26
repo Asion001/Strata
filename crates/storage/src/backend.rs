@@ -69,7 +69,7 @@ fn mounted_read_only(_: &Path) -> bool {
 }
 
 /// Backend configuration. Serialised to JSON and encrypted at rest.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum ConnectionConfig {
     /// A folder on the server. `path` is relative to the server's
@@ -266,7 +266,11 @@ impl ConnectionConfig {
                 secret_access_key,
                 root,
             } => {
+                // Only the connection's own credentials: never the server's
+                // environment, config files or instance role.
                 let mut b = services::S3::default()
+                    .disable_config_load()
+                    .disable_ec2_metadata()
                     .bucket(bucket)
                     .access_key_id(access_key_id)
                     .secret_access_key(secret_access_key)
