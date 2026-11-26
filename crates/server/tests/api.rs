@@ -1480,3 +1480,40 @@ async fn paths_below_a_file_are_not_found() {
         assert_eq!(s, StatusCode::CONFLICT, "move to below {p}: {v}");
     }
 }
+
+/// A chunk the user already stored, declared with another size: the upload
+/// must not commit a file whose size its blobs don't add up to (found by
+/// the upload_protocol fuzz target).
+#[tokio::test]
+async fn a_known_chunk_with_a_wrong_size_is_not_committed() {
+    let Some(t) = app().await else { return };
+    t.upload("x.bin", b"x").await;
+    let h = blake3::hash(b"x").to_hex().to_string();
+    for (path, chunks, size) in [
+        ("a.bin", json!([{"hash": h, "size": 390}]), 390),
+        (
+            "b.bin",
+            json!([{"hash": h, "size": 1}, {"hash": h, "size": 2}]),
+            3,
+        ),
+    ] {
+        let (s, v) = t
+            .json(
+                "POST",
+                "/api/uploads",
+                json!({"path": path, "size": size, "chunks": chunks}),
+            )
+            .await;
+        if s.is_success() {
+            let id = v["id"].as_str().unwrap();
+            let (s, v) = t
+                .json("POST", &format!("/api/uploads/{id}/commit"), json!(null))
+                .await;
+            assert!(s.is_client_error(), "{path}: commit gave {s} {v}");
+        } else {
+            assert!(s.is_client_error(), "{path}: create gave {s} {v}");
+        }
+        let (s, _) = t.get(&format!("/api/files/stat?path={path}")).await;
+        assert_eq!(s, StatusCode::NOT_FOUND, "{path} exists");
+    }
+}
