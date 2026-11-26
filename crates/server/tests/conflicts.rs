@@ -614,22 +614,25 @@ async fn a_commit_waits_only_so_long_and_keeps_the_choice_from_create() {
 
 #[tokio::test]
 async fn replaces_a_crash_interrupted_are_settled() {
-    use strata_server::conflicts::{OnConflict, place, reconcile};
+    use strata_server::conflicts::{OnConflict, key_of, place, reconcile};
     let Some(t) = app().await else { return };
     let uid: i64 = sqlx::query_scalar("SELECT id FROM users WHERE username = 'admin'")
         .fetch_one(&t.st.db)
         .await
         .unwrap();
-    let staged = |path: &str, target: &str, is_move: bool| {
+    let staged = async |path: &str, target: &str, is_move: bool| {
+        let key = key_of(&t.st, uid, path).await.unwrap_or_default();
         sqlx::query(
-            "INSERT INTO staged_items (user_id, path, target, is_dir, is_move, alive_at)
-             VALUES ($1, $2, $3, FALSE, $4, now() - interval '1 hour')",
+            "INSERT INTO staged_items (user_id, path, key, target, is_dir, is_move, alive_at)
+             VALUES ($1, $2, $3, $4, FALSE, $5, now() - interval '1 hour')",
         )
         .bind(uid)
         .bind(path.to_string())
+        .bind(key)
         .bind(target.to_string())
         .bind(is_move)
         .execute(&t.st.db)
+        .await
     };
     // Part of a move: shown beside the item it was replacing, or in its
     // place if that one went already.
@@ -662,9 +665,10 @@ async fn replaces_a_crash_interrupted_are_settled() {
     // Still running elsewhere (another server): left alone.
     t.upload("d/.strata-elsewhere", b"elsewhere").await;
     sqlx::query(
-        "INSERT INTO staged_items (user_id, path, target, is_dir, is_move) VALUES ($1, 'd/.strata-elsewhere', 'd/f.txt', FALSE, FALSE)",
+        "INSERT INTO staged_items (user_id, path, key, target, is_dir, is_move) VALUES ($1, 'd/.strata-elsewhere', $2, 'd/f.txt', FALSE, FALSE)",
     )
     .bind(uid)
+    .bind(key_of(&t.st, uid, "d/.strata-elsewhere").await.unwrap())
     .execute(&t.st.db)
     .await
     .unwrap();
@@ -812,21 +816,29 @@ async fn a_folder_is_settled_before_it_moves() {
         .fetch_one(&t.st.db)
         .await
         .unwrap();
-    let staged = |path: &str, stale: bool| {
+    let staged = async |path: &str, target: &str, stale: bool| {
+        let key = strata_server::conflicts::key_of(&t.st, uid, path)
+            .await
+            .unwrap();
         sqlx::query(
-            "INSERT INTO staged_items (user_id, path, target, is_dir, is_move, alive_at)
-             VALUES ($1, $2, 'p/q/f.txt', FALSE, TRUE,
-                     CASE WHEN $3 THEN now() - interval '1 hour' ELSE now() END)",
+            "INSERT INTO staged_items (user_id, path, key, target, is_dir, is_move, alive_at)
+             VALUES ($1, $2, $3, $4, FALSE, TRUE,
+                     CASE WHEN $5 THEN now() - interval '1 hour' ELSE now() END)",
         )
         .bind(uid)
         .bind(path.to_string())
+        .bind(key)
+        .bind(target.to_string())
         .bind(stale)
         .execute(&t.st.db)
+        .await
     };
     t.upload("p/q/f.txt", b"old").await;
     t.upload("p/q/.strata-moved", b"moved").await;
     // One another server is still writing: the folder is busy.
-    staged("p/q/.strata-moved", false).await.unwrap();
+    staged("p/q/.strata-moved", "p/q/f.txt", false)
+        .await
+        .unwrap();
     let (s, v) = op(&t, "move", "p", "p2", "fail").await;
     assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{v}");
     // One a crash left: settled first (shown), then the folder moves.
@@ -845,7 +857,9 @@ async fn a_folder_is_settled_before_it_moves() {
     assert_eq!(n, 0);
     // The same before a delete.
     t.upload("p2/q/.strata-again", b"again").await;
-    staged("p2/q/.strata-again", true).await.unwrap();
+    staged("p2/q/.strata-again", "p2/q/f.txt", true)
+        .await
+        .unwrap();
     let (s, v) = t
         .json("POST", "/api/files/delete", json!({"paths": ["p2"]}))
         .await;
@@ -855,4 +869,27 @@ async fn a_folder_is_settled_before_it_moves() {
         .await
         .unwrap();
     assert_eq!(n, 0);
+    // Through another mount of the same storage, too.
+    let disk = local_mount(&t, "raw").await;
+    let conn: i64 = sqlx::query_scalar("SELECT id FROM connections WHERE name = 'Disk'")
+        .fetch_one(&t.st.db)
+        .await
+        .unwrap();
+    t.ok(
+        "POST",
+        "/api/mounts",
+        json!({"path": "Again", "connection_id": conn, "mode": "raw"}),
+    )
+    .await;
+    t.upload("Disk/r/s/f.txt", b"old").await;
+    t.upload("Disk/r/s/.strata-moved", b"moved").await;
+    staged("Disk/r/s/.strata-moved", "Disk/r/s/f.txt", true)
+        .await
+        .unwrap();
+    let (s, v) = op(&t, "move", "Again/r", "Again/r2", "fail").await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(
+        std::fs::read(disk.join("r2/s/f (2).txt")).unwrap(),
+        b"moved"
+    );
 }

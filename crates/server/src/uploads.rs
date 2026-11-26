@@ -378,11 +378,11 @@ async fn commit_detached(
                 staging_dir(&st, &id),
             );
             let (mtime, volume) = (up.mtime, up.volume_id);
-            // Saving over the file (its new content, atomically), as asked
-            // even if it appeared only now; otherwise only where nothing is
-            // (checked under the volume lock): a file written meanwhile
-            // outside these claims is never overwritten.
-            let expect = if in_place || mode == OnConflict::Replace {
+            // Saving over the file (its new content, atomically);
+            // otherwise only where nothing is (checked under the volume
+            // lock): a file written meanwhile outside these claims is never
+            // overwritten, even under "replace" (that would skip the trash).
+            let expect = if in_place {
                 vfs::Expect::Any
             } else {
                 vfs::Expect::Absent

@@ -16,6 +16,9 @@ CREATE TABLE staged_items (
     id         BIGSERIAL PRIMARY KEY,
     user_id    BIGINT NOT NULL REFERENCES users ON DELETE CASCADE,
     path       TEXT NOT NULL,
+    -- Where it is in storage (`conflicts::claim_key_of`): the same item
+    -- can show under several paths.
+    key        TEXT NOT NULL,
     target     TEXT NOT NULL,
     is_dir     BOOLEAN NOT NULL,
     is_move    BOOLEAN NOT NULL,
@@ -23,3 +26,5 @@ CREATE TABLE staged_items (
     written    BOOLEAN NOT NULL DEFAULT FALSE,
     alive_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE INDEX staged_items_key ON staged_items (key text_pattern_ops);

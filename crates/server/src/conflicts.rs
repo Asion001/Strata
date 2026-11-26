@@ -100,6 +100,12 @@ fn claim_key_of(m: &mounts::Mount, rel: &str) -> String {
     }
 }
 
+/// Where `path` is in storage, as claims and staged rows name it.
+pub async fn key_of(st: &AppState, user_id: i64, path: &str) -> ApiResult<String> {
+    let (m, rel) = mounts::resolve(st, user_id, path).await?;
+    Ok(claim_key_of(&m, &rel))
+}
+
 /// Claim `key` once the operation holding it is done (`None` if it takes
 /// longer than `busy_wait_ms`).
 pub async fn wait_claim(st: &AppState, key: String) -> Option<Claim> {
@@ -130,26 +136,22 @@ pub async fn check_not_busy_inside(st: &AppState, user_id: i64, path: &str) -> A
             "something inside is being written; try again".into(),
         ));
     }
-    settle_inside(st, user_id, path).await
+    settle_inside(st, &inside).await
 }
 
-/// Settle what crashed replaces left inside `path` now, before it moves or
-/// goes (a staged item carried off with it would lose its row and stay
-/// hidden). One another server is still writing makes it busy.
-async fn settle_inside(st: &AppState, user_id: i64, path: &str) -> ApiResult<()> {
-    let prefix = if path.is_empty() {
-        String::new()
-    } else {
-        format!("{path}/")
-    };
+/// Settle what crashed replaces left inside a folder (its claim key and a
+/// "/") now, before it moves or goes: a staged item carried off with it
+/// would lose its row and stay hidden. Compared in storage, whoever staged
+/// it and through whichever mount. One another server is still writing
+/// makes the folder busy.
+async fn settle_inside(st: &AppState, inside: &str) -> ApiResult<()> {
     let rows: Vec<Row> = sqlx::query_as(
         "SELECT id, user_id, path, target, is_dir, is_move, written,
-                alive_at < now() - make_interval(secs => $3) AS stale
+                alive_at < now() - make_interval(secs => $2) AS stale
          FROM staged_items
-         WHERE user_id = $1 AND left(path, length($2)) = $2 ORDER BY id",
+         WHERE left(key, length($1)) = $1 ORDER BY id",
     )
-    .bind(user_id)
-    .bind(&prefix)
+    .bind(inside)
     .bind(STALE_SECS as f64)
     .fetch_all(&st.db)
     .await?;
@@ -387,12 +389,14 @@ where
         OnConflict::Fail,
     )
     .await?;
+    let key = key_of(st, user_id, &staged.path).await?;
     let row: i64 = sqlx::query_scalar(
-        "INSERT INTO staged_items (user_id, path, target, is_dir, is_move)
-         VALUES ($1, $2, $3, $4, $5) RETURNING id",
+        "INSERT INTO staged_items (user_id, path, key, target, is_dir, is_move)
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
     )
     .bind(user_id)
     .bind(&staged.path)
+    .bind(key)
     .bind(&target.path)
     .bind(is_dir)
     .bind(matches!(source, Source::Move(_)))
