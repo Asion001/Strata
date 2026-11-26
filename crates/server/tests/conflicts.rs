@@ -766,3 +766,31 @@ async fn an_old_item_deleted_meanwhile_still_gets_replaced() {
     assert_eq!(t.download("v/a.txt").await, b"new");
     assert_eq!(t.names("v").await, vec!["a.txt", "src.txt"]);
 }
+
+#[tokio::test]
+async fn a_folder_with_a_write_inside_stays_put_until_it_ends() {
+    use strata_server::conflicts::{OnConflict, place};
+    let Some(t) = app().await else { return };
+    let uid: i64 = sqlx::query_scalar("SELECT id FROM users WHERE username = 'admin'")
+        .fetch_one(&t.st.db)
+        .await
+        .unwrap();
+    t.upload("busy/sub/a.txt", b"a").await;
+    let held = place(&t.st, uid, "busy/sub/new.txt", false, OnConflict::Fail)
+        .await
+        .unwrap();
+    for (what, from) in [("move", "busy"), ("copy", "busy/sub")] {
+        let (s, v) = op(&t, what, from, "elsewhere", "fail").await;
+        assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{what}: {v}");
+    }
+    let (s, v) = t
+        .json("POST", "/api/files/delete", json!({"paths": ["busy"]}))
+        .await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{v}");
+    // A file beside it, and the root's other folders, are free.
+    let (s, v) = op(&t, "copy", "busy/sub/a.txt", "a-copy.txt", "fail").await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    drop(held);
+    let (s, v) = op(&t, "move", "busy", "elsewhere", "fail").await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+}

@@ -118,6 +118,21 @@ pub async fn wait_claim(st: &AppState, key: String) -> Option<Claim> {
     }
 }
 
+/// Refuse (for now: 503) to move, copy or delete `path` while an operation
+/// of this server writes inside it: it would carry off, copy or remove an
+/// item mid-write.
+pub async fn check_not_busy_inside(st: &AppState, user_id: i64, path: &str) -> ApiResult<()> {
+    let (m, rel) = mounts::resolve(st, user_id, path).await?;
+    let key = claim_key_of(&m, &rel);
+    let inside = if key.ends_with(':') { key } else { key + "/" };
+    if st.claims.iter().any(|c| c.key().starts_with(&inside)) {
+        return Err(ApiError::Unavailable(
+            "something inside is being written; try again".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Claim anything named by `key` (an upload being committed, say).
 pub fn claim_key(st: &AppState, key: String) -> Option<Claim> {
     use dashmap::mapref::entry::Entry;
@@ -412,7 +427,7 @@ where
         if is_move {
             if is_there(st, user_id, staged).await {
                 e.log_internal();
-                let kept = keep_visible(st, user_id, staged, to, is_dir).await;
+                let kept = kept_where(st, user_id, staged, to, is_dir).await;
                 return Err(conflict(format!(
                     "{}; what was moved is in {kept}",
                     e.public_message()
@@ -448,7 +463,7 @@ where
                 return Err(conflict(format!(
                     "couldn't replace “{name}” ({}); the item is kept as {}",
                     e.public_message(),
-                    keep_visible(st, user_id, staged, to, is_dir).await
+                    kept_where(st, user_id, staged, to, is_dir).await
                 )));
             }
         } else {
@@ -468,7 +483,7 @@ where
         return Err(conflict(format!(
             "the old “{name}” was deleted, but the new one couldn't take its name ({}); it is kept as {}",
             e.public_message(),
-            keep_visible(st, user_id, staged, to, is_dir).await
+            kept_where(st, user_id, staged, to, is_dir).await
         )));
     }
     Ok(())
@@ -550,6 +565,20 @@ async fn maybe_there(st: &AppState, user_id: i64, path: &str) -> bool {
 /// last time `reconcile` takes it for interrupted.
 const HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(60);
 const STALE_SECS: i64 = 300;
+
+/// `keep_visible`, said for people: a hidden name is not somewhere they can
+/// go (the background job shows it later).
+async fn kept_where(st: &AppState, user_id: i64, staged: &str, to: &str, is_dir: bool) -> String {
+    let kept = keep_visible(st, user_id, staged, to, is_dir).await;
+    if kept == staged {
+        format!(
+            "a hidden place for now, and will appear beside “{}” within the hour",
+            paths::split(to).map_or(to, |(_, n)| n)
+        )
+    } else {
+        kept
+    }
+}
 
 /// Give a staged item that has to stay a visible "name (2)" beside `to`
 /// (best effort: its hidden name if that fails). Returns where it is.

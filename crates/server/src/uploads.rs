@@ -429,17 +429,22 @@ async fn commit_detached(
     // Kept (without its chunks) until the uploads expire, so a commit sent
     // again gets this answer instead of writing a second copy. (The file is
     // saved either way: a failure here doesn't make this one fail.)
-    if let Err(e) = sqlx::query(
-        "UPDATE uploads SET committed = $2, chunks = '{}', chunk_sizes = '{}' WHERE id = $1",
-    )
-    .bind(&id)
-    .bind(sqlx::types::Json(&answer))
-    .execute(&st.db)
-    .await
-    {
-        tracing::warn!("upload {id} saved at {path}, but not recorded: {e}");
+    // (Twice if need be; if it still fails, the chunks stay, so a commit
+    // sent again can still save it.)
+    let record = || {
+        sqlx::query(
+            "UPDATE uploads SET committed = $2, chunks = '{}', chunk_sizes = '{}' WHERE id = $1",
+        )
+        .bind(&id)
+        .bind(sqlx::types::Json(&answer))
+        .execute(&st.db)
+    };
+    match record().await.or(record().await) {
+        Ok(_) => {
+            let _ = tokio::fs::remove_dir_all(staging_dir(&st, &id)).await;
+        }
+        Err(e) => tracing::warn!("upload {id} saved at {path}, but not recorded: {e}"),
     }
-    let _ = tokio::fs::remove_dir_all(staging_dir(&st, &id)).await;
     Ok(Json(answer))
 }
 

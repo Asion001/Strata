@@ -352,6 +352,9 @@ async fn from_to(
         return Err(bad("source and destination are the same"));
     }
     let is_dir = is_folder(st, user_id, &from).await?;
+    if is_dir {
+        conflicts::check_not_busy_inside(st, user_id, &from).await?;
+    }
     Ok((from, to, is_dir))
 }
 
@@ -440,7 +443,10 @@ pub async fn delete(
     let mut results = Vec::new();
     for raw in &b.paths {
         let done = match paths::normalize(raw) {
-            Ok(p) => vfs::delete(&st, u.id, &p, !b.permanent).await,
+            Ok(p) => match conflicts::check_not_busy_inside(&st, u.id, &p).await {
+                Ok(()) => vfs::delete(&st, u.id, &p, !b.permanent).await,
+                Err(e) => Err(e),
+            },
             Err(e) => Err(e.into()),
         };
         let r = match done {
