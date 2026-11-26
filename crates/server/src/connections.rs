@@ -540,29 +540,41 @@ pub async fn delete(
             }
         }
     }
+    // Every volume locked: no trash or restore is half done on them while
+    // their rows go, and none starts.
+    let lock = lock_connection_volumes(&st, id, false).await?;
+    // (The config as read here: a re-point meanwhile is refused below.)
+    let seen_cfg: Option<Vec<u8>> =
+        sqlx::query_scalar("SELECT config_enc FROM connections WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&st.db)
+            .await?;
     // A local connection's marker goes with it (best effort, below).
     // (Its operator, rooted at the folder, built before the row goes.)
     let local_op = match st.connection_config(id).await {
         Ok(c) if c.kind() == "local" => st.operator_unchecked(id).await.ok(),
         _ => None,
     };
-    // (Built now, checked only if needed after the rows are gone.)
-    let root = match (
-        crate::trash::connection_root(&st, id).await,
-        st.connection_config(id).await,
-    ) {
-        (Ok(root), Ok(cfg)) => st
+    // (Built now from that config, checked only if needed after the rows
+    // are gone.)
+    let root = match seen_cfg.as_deref().map(|c| st.decrypt_config(c)) {
+        Some(Ok(cfg)) => st
             .local_root(id, &cfg)
             .await
             .ok()
             .flatten()
-            .map(|lr| (root, lr)),
+            .map(|lr| (lr.dir.clone(), lr)),
         _ => None,
     };
-    // Every volume locked: no trash or restore is half done on them while
-    // their rows go, and none starts.
-    let lock = lock_connection_volumes(&st, id, false).await?;
     let mut tx = st.db.begin().await?;
+    let now_cfg: Option<Vec<u8>> =
+        sqlx::query_scalar("SELECT config_enc FROM connections WHERE id = $1 FOR UPDATE")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    if now_cfg != seen_cfg {
+        return Err(conflict("the connection changed meanwhile; try again"));
+    }
     // Trashed items: without purge_trash they aren't removed unasked; with
     // it, any left by the purge above (or trashed since) go too.
     if !q.purge_trash {
@@ -597,8 +609,11 @@ pub async fn delete(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
-    if let Some((lock, _)) = lock {
-        lock.release().await?;
+    // (Deleted already: whatever happens to the lock, the cleanup runs.)
+    if let Some((lock, _)) = lock
+        && let Err(e) = lock.release().await
+    {
+        tracing::warn!("releasing the volume locks of deleted connection {id} failed: {e}");
     }
     if !raw_left.is_empty() {
         // (Only a folder that is there and the right one: an unmounted

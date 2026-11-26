@@ -941,12 +941,6 @@ pub async fn remove_raw_items(st: &AppState, items: &[(i64, i64)]) {
     }
 }
 
-/// The folder of a local connection (for removing its trash after the
-/// connection itself is gone).
-pub(crate) async fn connection_root(st: &AppState, connection_id: i64) -> ApiResult<PathBuf> {
-    local_root(st, connection_id).await
-}
-
 /// Remove raw trash items under a known connection folder. Best effort:
 /// returns how many couldn't be removed.
 pub(crate) async fn remove_items_at(root: &Path, ids: &[i64]) -> usize {
