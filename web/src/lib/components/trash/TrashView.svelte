@@ -22,9 +22,13 @@
   let busy = $state(false);
   const selected = new SvelteSet<number>();
 
+  let seq = 0;
   async function load() {
+    const n = ++seq;
     try {
       const r = await listTrash();
+      // (An older listing that answers late is dropped.)
+      if (n !== seq) return;
       items = r.items;
       days = r.days;
       error = '';
@@ -32,7 +36,7 @@
       const ids = new Set(r.items.map((i) => i.id));
       for (const id of [...selected]) if (!ids.has(id)) selected.delete(id);
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      if (n === seq) error = e instanceof Error ? e.message : String(e);
     }
   }
   $effect(() => {

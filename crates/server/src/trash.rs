@@ -118,14 +118,15 @@ const REMEMBER_SHARES: &str = "INSERT INTO trash_shares (trash_id, share_id, nod
 
 /// Move `rel` of mount `m` (shown to the user as `original_path`) to the
 /// owner's trash. The caller has checked that it is not a mount point and
-/// holds no mount points. Returns the trash id.
+/// holds no mount points. Returns the trash id, or `None` when the item is in
+/// the trash but its row isn't ready yet (reconcile finishes it).
 pub async fn trash(
     st: &AppState,
     user_id: i64,
     original_path: &str,
     m: &Mount,
     rel: &str,
-) -> ApiResult<i64> {
+) -> ApiResult<Option<i64>> {
     if !supports_trash(m) {
         return Err(bad("this storage has no trash"));
     }
@@ -291,11 +292,16 @@ pub async fn trash(
             }
             // The item is in the trash now: report success even if the
             // bookkeeping below fails (reconcile completes it).
-            if let Err(e) = finish_raw_trash(st, root, id, m.volume_id, rel, node.is_dir).await {
-                tracing::warn!("trash {id}: finishing the move failed, reconcile will: {e}");
-            }
+            // (Until then the row can't be restored: no id to undo with.)
+            let ready = match finish_raw_trash(st, root, id, m.volume_id, rel, node.is_dir).await {
+                Ok(()) => Some(id),
+                Err(e) => {
+                    tracing::warn!("trash {id}: finishing the move failed, reconcile will: {e}");
+                    None
+                }
+            };
             lock.release().await?;
-            return Ok(id);
+            return Ok(ready);
         }
     };
     // Done already: a failed feed entry is logged, not an error to retry.
@@ -305,7 +311,7 @@ pub async fn trash(
         tracing::warn!("trash {id}: journaling the delete failed: {e}");
     }
     lock.release().await?;
-    Ok(id)
+    Ok(Some(id))
 }
 
 /// After a raw item was renamed into the trash: mark the row ready, drop the

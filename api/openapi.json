@@ -391,7 +391,7 @@
             "type": "integer"
           },
           "trash_ids": {
-            "description": "The trash ids of the items that went to the trash (for an undo), in\nrequest order. Items deleted for good have none, so this can be\nshorter than `paths`.",
+            "description": "The trash ids of the items that went to the trash (for an undo), in\nrequest order. Items deleted for good have none (nor, rarely, one\nwhose move is still being completed), so this can be shorter than\n`paths`.",
             "items": {
               "format": "int64",
               "type": "integer"

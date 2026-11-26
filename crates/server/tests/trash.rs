@@ -1152,3 +1152,41 @@ async fn a_delete_answers_the_trash_ids_for_an_undo() {
         .await;
     assert_eq!(v["trash_ids"], json!([]), "{v}");
 }
+
+#[tokio::test]
+async fn a_raw_item_whose_move_is_unfinished_offers_no_undo_id() {
+    let Some(t) = app().await else { return };
+    let cid = local_conn(&t, "Disk", "disk").await;
+    std::fs::create_dir_all(t.dir.path().join("local/disk")).unwrap();
+    t.ok(
+        "POST",
+        "/api/mounts",
+        json!({"path": "Disk", "connection_id": cid, "mode": "raw"}),
+    )
+    .await;
+    t.upload("Disk/a.txt", b"a").await;
+    // The bookkeeping after the move fails (marking the row ready).
+    for sql in [
+        "CREATE FUNCTION no_ready() RETURNS trigger LANGUAGE plpgsql AS
+         $$ BEGIN RAISE EXCEPTION 'injected'; END $$",
+        "CREATE TRIGGER no_ready BEFORE UPDATE OF ready ON trash
+         FOR EACH ROW WHEN (NEW.ready) EXECUTE FUNCTION no_ready()",
+    ] {
+        sqlx::query(sql).execute(&t.st.db).await.unwrap();
+    }
+    let v = delete(&t, &["Disk/a.txt"]).await;
+    // In the trash, but not restorable yet: no id to undo with.
+    assert_eq!(v["trashed"], 1, "{v}");
+    assert_eq!(v["trash_ids"], json!([]), "{v}");
+    assert!(items(&t).await.is_empty());
+
+    // Reconcile finishes it; then it restores.
+    sqlx::query("DROP TRIGGER no_ready ON trash")
+        .execute(&t.st.db)
+        .await
+        .unwrap();
+    strata_server::trash::reconcile(&t.st).await.unwrap();
+    let all = items(&t).await;
+    assert_eq!(restore(&t, id_of(&all, "Disk/a.txt")).await, "Disk/a.txt");
+    assert_eq!(t.download("Disk/a.txt").await, b"a");
+}

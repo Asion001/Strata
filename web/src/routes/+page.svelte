@@ -469,13 +469,13 @@
   /** Undo for a delete: brings back exactly what it moved to the trash.
    *  (Its code loads when it is pressed.) */
   async function undo(items: { id: number; path: string }[]) {
-    const left = items.length === 1 ? 'It is still in Deleted files.' : 'They are still in Deleted files.';
-    if (busy) return void toast(`Couldn't undo while another action runs. ${left}`, 'info', 6000);
+    // (After whatever runs now: the toast is gone, the Undo mustn't be.)
+    while (busy) await new Promise((r) => setTimeout(r, 200));
     busy = true;
     try {
       await (await import('$lib/trash.svelte')).undo(items);
     } catch (e) {
-      toast(`Couldn't undo: ${e instanceof Error ? e.message : String(e)}. ${left}`, 'error');
+      toast(`Couldn't undo: ${e instanceof Error ? e.message : String(e)}. ${items.length === 1 ? 'It is' : 'They are'} still in Deleted files.`, 'error');
     } finally {
       busy = false;
     }

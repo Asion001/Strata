@@ -143,8 +143,9 @@ pub struct DeletedBody {
     /// How many of them went to the trash.
     pub trashed: i64,
     /// The trash ids of the items that went to the trash (for an undo), in
-    /// request order. Items deleted for good have none, so this can be
-    /// shorter than `paths`.
+    /// request order. Items deleted for good have none (nor, rarely, one
+    /// whose move is still being completed), so this can be shorter than
+    /// `paths`.
     pub trash_ids: Vec<i64>,
 }
 
