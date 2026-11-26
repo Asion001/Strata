@@ -356,6 +356,21 @@ pub fn restored_name(name: &str, is_dir: bool, n: u32) -> String {
 
 /// The original name if it is free in `parent`, else the first free
 /// "(restored)" variant. Caller holds the volume lock.
+/// Refuse a restore whose parent folder another mount now covers: the item
+/// would land out of sight (also another mount of the same volume, as the
+/// returned path would resolve through that one).
+fn refuse_covered(all: &[Mount], m: &Mount, parent: &str) -> ApiResult<()> {
+    let user_parent = paths::join(&m.path, parent);
+    if all.iter().any(|x| {
+        x.path.len() > m.path.len() && paths::strip_prefix(&user_parent, &x.path).is_some()
+    }) {
+        return Err(conflict(
+            "something is mounted where this was; remove that mount to restore it",
+        ));
+    }
+    Ok(())
+}
+
 async fn free_name(
     st: &AppState,
     user_id: i64,
@@ -368,19 +383,7 @@ async fn free_name(
     // (refuse, it would be hidden) or the name itself (taken).
     let all = mounts::user_mounts(st, user_id).await?;
     let user_parent = paths::join(&m.path, parent);
-    let covers = |p: &str| {
-        all.iter().any(|x| {
-            // Another mount of the same volume shows the same place.
-            x.volume_id != m.volume_id
-                && x.path.len() > m.path.len()
-                && paths::strip_prefix(p, &x.path).is_some()
-        })
-    };
-    if covers(&user_parent) {
-        return Err(conflict(
-            "something is mounted where this was; remove that mount to restore it",
-        ));
-    }
+    refuse_covered(&all, m, parent)?;
     for n in 0..1000 {
         let candidate = if n == 0 {
             name.to_string()
@@ -472,6 +475,8 @@ pub async fn restore(st: &AppState, user_id: i64, id: i64) -> ApiResult<String> 
     // then checked again under the lock: a delete may remove them in between.
     // (Still there? A racing purge or restore would leave the folders behind.)
     row_again(st, id).await?;
+    // Before making any folder (checked again under the lock below).
+    refuse_covered(&all, &m, parent)?;
     let mut tries = 0;
     let lock = loop {
         if !parent.is_empty() {
@@ -542,6 +547,7 @@ pub async fn restore(st: &AppState, user_id: i64, id: i64) -> ApiResult<String> 
                         .bind(id)
                         .execute(&st.db)
                         .await?;
+                    let _ = tokio::fs::remove_dir(&dir).await;
                     lock.release().await?;
                     return Err(ApiError::NotFound);
                 }

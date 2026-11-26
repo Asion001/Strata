@@ -828,6 +828,11 @@ async fn restore_never_lands_under_or_on_a_new_mount() {
         .await;
     assert_eq!(s, StatusCode::CONFLICT, "{v}");
     assert!(!t.dir.path().join("local/disk/x.txt").exists());
+    assert_eq!(
+        count(&t, "SELECT COUNT(*) FROM nodes WHERE name = 'Pics'").await,
+        0,
+        "no folder is made under the mount first"
+    );
     assert_eq!(items(&t).await.len(), 1, "the item stays in the trash");
 }
 
