@@ -78,7 +78,7 @@ async function store(user: number, path: string, etag: string, url: string, pinn
   // the bytes come with the current session, maybe someone else's).
   // (No one recorded: signed out here, maybe in another tab.)
   const here = await signedInHere();
-  if (here !== user) { console.log('DBG store: here', here, 'user', user, 'ls', localStorage.getItem('strata-last-user')); return 'unreadable'; }
+  if (here !== user) { console.log('DBG store: here', here, 'user', user, JSON.stringify(await navigator.storage?.estimate?.()), (await caches.keys()).join(',')); return 'unreadable'; }
   const r = await fetch(url, { credentials: 'same-origin', headers: { [NETWORK_ONLY]: '1' } });
   if (!r.ok) { console.log('DBG store: status', r.status); return 'unreadable'; }
   const declared = Number(r.headers.get('content-length') ?? NaN);

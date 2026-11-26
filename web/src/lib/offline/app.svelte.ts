@@ -37,8 +37,8 @@ export async function userRecorded(user: number): Promise<void> {
     const h = await (await Recent()).signedInHere();
     console.log('DBG userRecorded', user, 'here', h);
     if (h !== null) return;
-    await record(user);
-    console.log('DBG rewritten', await (await Recent()).signedInHere());
+    await record(user).catch((e) => console.log('DBG store: rewrite failed', String(e)));
+    console.log('DBG store: rewritten', await (await Recent()).signedInHere(), JSON.stringify(await navigator.storage?.estimate?.()), (await caches.keys()).join(','));
     // (Signed out meanwhile, after its delete: take it back.)
     if (lastUser()?.id !== user) await caches.delete(META);
   } catch {}
@@ -65,7 +65,7 @@ export async function signedIn(u: User) {
   const done = (async () => {
     try {
       if (typeof caches !== 'undefined') await record(u.id);
-    } catch {}
+    } catch (e) { console.log('DBG store: record failed', String(e)); }
   })();
   recorded = done;
   await done;
