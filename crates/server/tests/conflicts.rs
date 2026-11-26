@@ -161,7 +161,7 @@ async fn uploads_ask_at_create_and_again_at_commit() {
         .json(
             "POST",
             "/api/uploads",
-            json!({"path": "doc.txt", "size": 6, "chunks": spec(b"second")}),
+            json!({"path": "doc.txt", "size": 6, "chunks": spec(b"second"), "on_conflict": "fail"}),
         )
         .await;
     assert_eq!(s, StatusCode::CONFLICT, "{v}");
@@ -182,7 +182,7 @@ async fn uploads_ask_at_create_and_again_at_commit() {
         .ok(
             "POST",
             "/api/uploads",
-            json!({"path": "late.txt", "size": 4, "chunks": spec(b"mine")}),
+            json!({"path": "late.txt", "size": 4, "chunks": spec(b"mine"), "on_conflict": "fail"}),
         )
         .await;
     let id = v["id"].as_str().unwrap().to_string();
@@ -223,6 +223,27 @@ async fn uploads_ask_at_create_and_again_at_commit() {
         .await;
     assert_eq!(v["path"], "late (2).txt");
     assert_eq!(t.download("late (2).txt").await, b"mine");
+
+    // Asked nothing, an upload saves over the file (as uploads always did).
+    let v = t
+        .ok(
+            "POST",
+            "/api/uploads",
+            json!({"path": "doc.txt", "size": 4, "chunks": spec(b"four")}),
+        )
+        .await;
+    let id = v["id"].as_str().unwrap().to_string();
+    let h = blake3::hash(b"four").to_hex().to_string();
+    t.raw(
+        "PUT",
+        &format!("/api/uploads/{id}/chunks/{h}"),
+        axum::body::Body::from("four"),
+        &[],
+    )
+    .await;
+    t.ok("POST", &format!("/api/uploads/{id}/commit"), json!({}))
+        .await;
+    assert_eq!(t.download("doc.txt").await, b"four");
 
     // A file never replaces a folder.
     t.ok("POST", "/api/files/mkdir", json!({"path": "dir"}))
@@ -579,7 +600,8 @@ async fn replaces_a_crash_interrupted_are_settled() {
         .unwrap();
     let staged = |path: &str, target: &str, is_move: bool| {
         sqlx::query(
-            "INSERT INTO staged_items (user_id, path, target, is_dir, is_move) VALUES ($1, $2, $3, FALSE, $4)",
+            "INSERT INTO staged_items (user_id, path, target, is_dir, is_move, alive_at)
+             VALUES ($1, $2, $3, FALSE, $4, now() - interval '1 hour')",
         )
         .bind(uid)
         .bind(path.to_string())
@@ -604,6 +626,15 @@ async fn replaces_a_crash_interrupted_are_settled() {
         .await
         .unwrap();
     staged("d/.strata-busy", "d/f.txt", true).await.unwrap();
+    // Still running elsewhere (another server): left alone.
+    t.upload("d/.strata-elsewhere", b"elsewhere").await;
+    sqlx::query(
+        "INSERT INTO staged_items (user_id, path, target, is_dir, is_move) VALUES ($1, 'd/.strata-elsewhere', 'd/f.txt', FALSE, FALSE)",
+    )
+    .bind(uid)
+    .execute(&t.st.db)
+    .await
+    .unwrap();
     // Somewhere that doesn't resolve: next time.
     local_mount(&t, "raw").await;
     staged("Disk/.strata-trash/x", "Disk/x", true)
@@ -611,7 +642,10 @@ async fn replaces_a_crash_interrupted_are_settled() {
         .unwrap();
 
     assert_eq!(reconcile(&t.st).await.unwrap(), 4);
-    assert_eq!(t.names("d").await, vec!["f (2).txt", "f.txt", "g.txt"]);
+    assert_eq!(
+        t.names("d").await,
+        vec![".strata-elsewhere", "f (2).txt", "f.txt", "g.txt"]
+    );
     assert_eq!(t.download("d/f (2).txt").await, b"moved");
     assert_eq!(t.download("d/g.txt").await, b"alone");
     assert_eq!(t.download("d/f.txt").await, b"old");
@@ -620,7 +654,14 @@ async fn replaces_a_crash_interrupted_are_settled() {
         .fetch_all(&t.st.db)
         .await
         .unwrap();
-    assert_eq!(left, vec!["d/.strata-busy", "Disk/.strata-trash/x"]);
+    assert_eq!(
+        left,
+        vec![
+            "d/.strata-busy",
+            "d/.strata-elsewhere",
+            "Disk/.strata-trash/x"
+        ]
+    );
     // Nothing is left after a replace that ran to its end.
     t.upload("e/a.txt", b"1").await;
     t.upload("e/b.txt", b"2").await;

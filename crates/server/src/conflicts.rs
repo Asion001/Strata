@@ -328,6 +328,21 @@ where
     .bind(matches!(source, Source::Move(_)))
     .fetch_one(&st.db)
     .await?;
+    // (Alive while it runs: no server settles it meanwhile.)
+    let beat = tokio::spawn({
+        let db = st.db.clone();
+        async move {
+            let mut every = tokio::time::interval(HEARTBEAT);
+            every.tick().await;
+            loop {
+                every.tick().await;
+                let _ = sqlx::query("UPDATE staged_items SET alive_at = now() WHERE id = $1")
+                    .bind(row)
+                    .execute(&db)
+                    .await;
+            }
+        }
+    });
     let r = replace(
         st,
         user_id,
@@ -339,13 +354,17 @@ where
         write,
     )
     .await;
-    // Settled, unless the staged item is still there (a cleanup that
-    // failed): then `reconcile` tries again. (Its name is still claimed.)
-    if !exists(st, user_id, &staged.path).await {
-        sqlx::query("DELETE FROM staged_items WHERE id = $1")
+    beat.abort();
+    // Settled, unless the staged item may still be there (a cleanup that
+    // failed, storage that can't say): then `reconcile` tries again.
+    if !maybe_there(st, user_id, &staged.path).await
+        && let Err(e) = sqlx::query("DELETE FROM staged_items WHERE id = $1")
             .bind(row)
             .execute(&st.db)
-            .await?;
+            .await
+    {
+        // (Harmless: `reconcile` drops a record whose item is gone.)
+        tracing::warn!("staged item record {row} not removed: {e}");
     }
     r.map(|()| target.path.clone())
 }
@@ -373,7 +392,7 @@ where
         // The old item is untouched. A partial copy goes; part of a move is
         // the user's only copy of it: shown, beside the old one.
         if is_move {
-            if exists(st, user_id, staged).await {
+            if maybe_there(st, user_id, staged).await {
                 let kept = keep_visible(st, user_id, staged, to, is_dir).await;
                 return Err(conflict(format!(
                     "{}; what was moved is in {kept}",
@@ -425,12 +444,14 @@ where
 
 /// Settle what crashed replaces left (see `staged_items`): part of a move
 /// is shown beside the item it was replacing (or in its place, if that one
-/// went already); part of a copy goes. Items an operation of this server is
-/// still writing are left alone. Returns how many were settled.
+/// went already); part of a copy goes. Items an operation (of any server)
+/// is still writing are left alone. Returns how many were settled.
 pub async fn reconcile(st: &AppState) -> ApiResult<usize> {
     let rows: Vec<(i64, i64, String, String, bool, bool)> = sqlx::query_as(
-        "SELECT id, user_id, path, target, is_dir, is_move FROM staged_items ORDER BY id",
+        "SELECT id, user_id, path, target, is_dir, is_move FROM staged_items
+         WHERE alive_at < now() - make_interval(secs => $1) ORDER BY id",
     )
+    .bind(STALE_SECS as f64)
     .fetch_all(&st.db)
     .await?;
     let mut settled = 0;
@@ -460,12 +481,19 @@ pub async fn reconcile(st: &AppState) -> ApiResult<usize> {
     Ok(settled)
 }
 
-async fn exists(st: &AppState, user_id: i64, path: &str) -> bool {
-    match mounts::resolve(st, user_id, path).await {
-        Ok((m, rel)) => vfs::stat(st, &m, &rel).await.is_ok(),
-        Err(_) => false,
-    }
+/// Whether something may be at `path`: only a clear "not found" says no.
+async fn maybe_there(st: &AppState, user_id: i64, path: &str) -> bool {
+    let r = match mounts::resolve(st, user_id, path).await {
+        Ok((m, rel)) => vfs::stat(st, &m, &rel).await.map(|_| ()),
+        Err(e) => Err(e),
+    };
+    !matches!(r, Err(ApiError::NotFound))
 }
+
+/// How often a running replace says it is alive, and how long after the
+/// last time `reconcile` takes it for interrupted.
+const HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(60);
+const STALE_SECS: i64 = 300;
 
 /// Give a staged item that has to stay a visible "name (2)" beside `to`
 /// (best effort: its hidden name if that fails). Returns where it is.

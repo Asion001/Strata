@@ -47,11 +47,16 @@ pub struct CreateReq {
     pub size: i64,
     pub chunks: Vec<ChunkSpec>,
     pub mtime: Option<DateTime<Utc>>,
-    /// When the name is taken: fail (409 `exists`, the default), replace
-    /// it, or keep both. Checked here and again at commit (which takes its
-    /// own `on_conflict`: the answer to a question asked meanwhile).
-    #[serde(default)]
+    /// When the name is taken: replace it (the default: an upload saves over
+    /// a file of that name), fail (409 `exists`, so the client can ask), or
+    /// keep both. Checked here and again at commit (which can answer anew).
+    #[serde(default = "saves_over")]
+    #[schema(default = "replace")]
     pub on_conflict: OnConflict,
+}
+
+fn saves_over() -> OnConflict {
+    OnConflict::Replace
 }
 
 #[derive(Deserialize, Default, utoipa::ToSchema)]
@@ -398,14 +403,18 @@ async fn commit_detached(
     )
     .await?;
     // Kept (without its chunks) until the uploads expire, so a commit sent
-    // again learns where it landed instead of writing a second copy.
-    sqlx::query(
+    // again learns where it landed instead of writing a second copy. (The
+    // file is saved either way: a failure here doesn't make this one fail.)
+    if let Err(e) = sqlx::query(
         "UPDATE uploads SET committed_path = $2, chunks = '{}', chunk_sizes = '{}' WHERE id = $1",
     )
     .bind(&id)
     .bind(&path)
     .execute(&st.db)
-    .await?;
+    .await
+    {
+        tracing::warn!("upload {id} saved at {path}, but not recorded: {e}");
+    }
     let _ = tokio::fs::remove_dir_all(staging_dir(&st, &id)).await;
     committed(&st, uid, &path).await
 }

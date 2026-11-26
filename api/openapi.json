@@ -1310,8 +1310,13 @@
             ]
           },
           "on_conflict": {
-            "$ref": "#/components/schemas/OnConflict",
-            "description": "When the name is taken: fail (409 `exists`, the default), replace\nit, or keep both. Checked here and again at commit (which takes its\nown `on_conflict`: the answer to a question asked meanwhile)."
+            "default": "replace",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/OnConflict",
+                "description": "When the name is taken: replace it (the default: an upload saves over\na file of that name), fail (409 `exists`, so the client can ask), or\nkeep both. Checked here and again at commit (which can answer anew)."
+              }
+            ]
           },
           "path": {
             "type": "string"

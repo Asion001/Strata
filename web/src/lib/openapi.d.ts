@@ -1134,12 +1134,8 @@ export interface components {
             chunks: components["schemas"]["ChunkSpec"][];
             /** Format: date-time */
             mtime?: string | null;
-            /**
-             * @description When the name is taken: fail (409 `exists`, the default), replace
-             *     it, or keep both. Checked here and again at commit (which takes its
-             *     own `on_conflict`: the answer to a question asked meanwhile).
-             */
-            on_conflict?: components["schemas"]["OnConflict"];
+            /** @default replace */
+            on_conflict: components["schemas"]["OnConflict"];
             path: string;
             /** Format: int64 */
             size: number;
