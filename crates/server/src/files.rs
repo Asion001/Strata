@@ -375,7 +375,7 @@ pub async fn delete(
     AuthUser(u): AuthUser,
     Json(b): Json<DeleteBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let mut results = Vec::with_capacity(b.paths.len());
+    let mut results = Vec::new();
     for raw in &b.paths {
         let done = match paths::normalize(raw) {
             Ok(p) => vfs::delete(&st, u.id, &p, !b.permanent).await,
