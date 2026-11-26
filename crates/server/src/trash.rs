@@ -130,12 +130,13 @@ pub async fn trash(
     }
     let (parent, name) = paths::split(rel).ok_or_else(|| bad("cannot delete the root folder"))?;
     vfs::ensure_writable(st, m).await?;
+    let lock = vfs::lock_volume(st, m.volume_id).await?;
+    // Under the lock: a connection being pointed elsewhere holds it.
     let root = if m.is_hashed() {
         None
     } else {
         Some(local_root(st, m.connection_id).await?)
     };
-    let lock = vfs::lock_volume(st, m.volume_id).await?;
     let node = vfs::stat(st, m, rel).await?;
     let like = subtree_like(rel);
     let id = match &root {
@@ -354,8 +355,6 @@ pub fn restored_name(name: &str, is_dir: bool, n: u32) -> String {
     }
 }
 
-/// The original name if it is free in `parent`, else the first free
-/// "(restored)" variant. Caller holds the volume lock.
 /// Refuse a restore whose parent folder another mount now covers: the item
 /// would land out of sight (also another mount of the same volume, as the
 /// returned path would resolve through that one).
@@ -371,6 +370,8 @@ fn refuse_covered(all: &[Mount], m: &Mount, parent: &str) -> ApiResult<()> {
     Ok(())
 }
 
+/// The original name if it is free in `parent`, else the first free
+/// "(restored)" variant. Caller holds the volume lock.
 async fn free_name(
     st: &AppState,
     user_id: i64,
@@ -477,8 +478,19 @@ pub async fn restore(st: &AppState, user_id: i64, id: i64) -> ApiResult<String> 
     row_again(st, id).await?;
     // Before making any folder (checked again under the lock below).
     refuse_covered(&all, &m, parent)?;
+    // A raw item that isn't there (gone, or its disk not mounted) makes no
+    // folders: the check under the lock below says which it is.
+    let missing = match &root {
+        Some(r) => tokio::fs::symlink_metadata(item_dir(r, id).join(&row.name))
+            .await
+            .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound),
+        None => false,
+    };
     let mut tries = 0;
     let lock = loop {
+        if missing {
+            break vfs::lock_volume(st, m.volume_id).await?;
+        }
         if !parent.is_empty() {
             vfs::mkdir_in(st, &m, parent).await?;
         }
@@ -562,7 +574,7 @@ pub async fn restore(st: &AppState, user_id: i64, id: i64) -> ApiResult<String> 
             rename_no_replace(&item, &dst)
                 .await
                 .map_err(|e| match e.kind() {
-                    std::io::ErrorKind::AlreadyExists => {
+                    std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::DirectoryNotEmpty => {
                         conflict("something with that name appeared; try again")
                     }
                     std::io::ErrorKind::CrossesDevices | std::io::ErrorKind::ResourceBusy => {

@@ -415,7 +415,7 @@
       body: (items.length === 1
         ? (items[0].is_dir ? 'The folder and everything in it will be deleted.' : 'The file will be deleted.')
         : `${items.slice(0, 5).map((e) => e.name).join(', ')}${items.length > 5 ? `, and ${items.length - 5} more` : ''}. Folders are deleted with everything in them.`)
-        + (toTrash ? ' It stays in the trash for a while and can be restored.' : ''),
+        + (toTrash ? (items.length === 1 ? ' It stays in the trash for a while and can be restored.' : ' They stay in the trash for a while and can be restored.') : ''),
       confirm: 'Delete',
       danger: true
     });

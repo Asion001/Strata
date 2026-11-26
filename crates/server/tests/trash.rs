@@ -991,3 +991,35 @@ async fn reconcile_leaves_an_item_made_again_after_a_crash() {
         "Disk/a (restored).txt"
     );
 }
+
+#[tokio::test]
+async fn restoring_a_vanished_raw_item_makes_no_folders() {
+    let Some(t) = app().await else { return };
+    let cid = local_conn(&t, "Disk", "disk").await;
+    let disk = t.dir.path().join("local/disk");
+    std::fs::create_dir_all(disk.join("sub")).unwrap();
+    std::fs::write(disk.join("sub/a.txt"), b"a").unwrap();
+    t.ok(
+        "POST",
+        "/api/mounts",
+        json!({"path": "Disk", "connection_id": cid, "mode": "raw"}),
+    )
+    .await;
+    delete(&t, &["Disk/sub/a.txt"]).await;
+    t.ok(
+        "POST",
+        "/api/files/delete",
+        json!({"paths": ["Disk/sub"], "permanent": true}),
+    )
+    .await;
+    let id = id_of(&items(&t).await, "Disk/sub/a.txt");
+    // Removed by hand from the trash folder.
+    std::fs::remove_file(disk.join(format!(".strata-trash/{id}/a.txt"))).unwrap();
+    let (s, v) = t
+        .json("POST", &format!("/api/trash/{id}/restore"), json!({}))
+        .await;
+    assert_eq!(s, StatusCode::NOT_FOUND, "{v}");
+    assert!(!disk.join("sub").exists(), "no parent folder was made");
+    assert!(!disk.join(format!(".strata-trash/{id}")).exists());
+    assert!(items(&t).await.is_empty());
+}

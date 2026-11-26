@@ -295,9 +295,20 @@ pub async fn update(
     // count and capabilities to detect: a rename never touches the storage
     // (an unmounted disk's folder must not be created again).
     let repointed = req.config != old;
+    // Held until the new config is in place: a delete going to the trash
+    // meanwhile would land in the old folder.
+    let mut raw_lock = None;
     if repointed {
         // A raw trash lives in the connection's folder: re-pointed, its
         // items could no longer be found (and reconcile would drop them).
+        let raw: Vec<i64> =
+            sqlx::query_scalar("SELECT id FROM volumes WHERE connection_id = $1 AND mode = 'raw'")
+                .bind(id)
+                .fetch_all(&st.db)
+                .await?;
+        if !raw.is_empty() {
+            raw_lock = Some(crate::vfs::lock_volumes(&st, &raw).await?);
+        }
         let raw_trash: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM trash t JOIN volumes v ON v.id = t.volume_id
              WHERE v.connection_id = $1 AND v.mode = 'raw'",
@@ -390,6 +401,9 @@ pub async fn update(
     tx.commit().await?;
     drop(layout);
     st.forget_operator(id);
+    if let Some(l) = raw_lock {
+        l.release().await?;
+    }
     if repointed {
         // A new target starts over: not offline, a fresh failure count, and
         // (local) its own folder marker.
