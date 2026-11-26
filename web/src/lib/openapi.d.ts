@@ -732,6 +732,9 @@ export interface components {
             /** Format: int64 */
             size: number;
         };
+        CommitReq: {
+            on_conflict?: components["schemas"]["OnConflict"];
+        };
         CommittedBody: {
             etag: string | null;
             /** Format: date-time */
@@ -889,9 +892,23 @@ export interface components {
         };
         /** @description Every error: a message for people (never internal details). */
         ErrorBody: {
+            /** @description "exists" on a 409 when the destination name is taken. */
+            code: string | null;
+            details: null | components["schemas"]["Existing"];
             error: string;
             /** @description On 412: the file's current version, if it exists. */
             etag?: string | null;
+        };
+        /** @description What is in the way of a write, move or copy. */
+        Existing: {
+            is_dir: boolean;
+            /** Format: date-time */
+            mtime: string;
+            name: string;
+            /** @description Where it is, in the user's tree. */
+            path: string;
+            /** Format: int64 */
+            size: number;
         };
         FeedEntry: {
             /** Format: date-time */
@@ -903,6 +920,11 @@ export interface components {
         };
         FromTo: {
             from: string;
+            /**
+             * @description When `to` is taken: fail (409 `exists`, the default), replace it, or
+             *     keep both ("name (2)"; the answer says the path).
+             */
+            on_conflict?: components["schemas"]["OnConflict"];
             to: string;
         };
         HealthBody: {
@@ -978,6 +1000,8 @@ export interface components {
             mode: string;
             path: string;
         };
+        /** @enum {string} */
+        OnConflict: "fail" | "replace" | "rename";
         PathBody: {
             path: string;
         };
@@ -1110,6 +1134,12 @@ export interface components {
             chunks: components["schemas"]["ChunkSpec"][];
             /** Format: date-time */
             mtime?: string | null;
+            /**
+             * @description When the name is taken: fail (409 `exists`, the default), replace
+             *     it, or keep both. Checked here and again at commit (which takes its
+             *     own `on_conflict`: the answer to a question asked meanwhile).
+             */
+            on_conflict?: components["schemas"]["OnConflict"];
             path: string;
             /** Format: int64 */
             size: number;
@@ -5510,7 +5540,11 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CommitReq"];
+            };
+        };
         responses: {
             200: {
                 headers: {
@@ -5556,8 +5590,35 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Chunks missing, or the folder changed */
+            /** @description Chunks missing, the folder changed, or the name is taken (`code: "exists"`) */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The body is too large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The body has the wrong content type */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The body doesn't match the schema */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };

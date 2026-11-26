@@ -4,6 +4,7 @@
 pub mod auth;
 pub mod background;
 pub mod config;
+pub mod conflicts;
 pub mod connections;
 pub mod error;
 pub mod files;

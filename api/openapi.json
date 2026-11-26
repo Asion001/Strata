@@ -60,6 +60,14 @@
         ],
         "type": "object"
       },
+      "CommitReq": {
+        "properties": {
+          "on_conflict": {
+            "$ref": "#/components/schemas/OnConflict"
+          }
+        },
+        "type": "object"
+      },
       "CommittedBody": {
         "properties": {
           "etag": {
@@ -519,6 +527,24 @@
       "ErrorBody": {
         "description": "Every error: a message for people (never internal details).",
         "properties": {
+          "code": {
+            "description": "\"exists\" on a 409 when the destination name is taken.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "details": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Existing",
+                "description": "With `code: \"exists\"`: what is there."
+              }
+            ]
+          },
           "error": {
             "type": "string"
           },
@@ -531,7 +557,40 @@
           }
         },
         "required": [
-          "error"
+          "error",
+          "code",
+          "details"
+        ],
+        "type": "object"
+      },
+      "Existing": {
+        "description": "What is in the way of a write, move or copy.",
+        "properties": {
+          "is_dir": {
+            "type": "boolean"
+          },
+          "mtime": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "path": {
+            "description": "Where it is, in the user's tree.",
+            "type": "string"
+          },
+          "size": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path",
+          "name",
+          "is_dir",
+          "size",
+          "mtime"
         ],
         "type": "object"
       },
@@ -570,6 +629,10 @@
         "properties": {
           "from": {
             "type": "string"
+          },
+          "on_conflict": {
+            "$ref": "#/components/schemas/OnConflict",
+            "description": "When `to` is taken: fail (409 `exists`, the default), replace it, or\nkeep both (\"name (2)\"; the answer says the path)."
           },
           "to": {
             "type": "string"
@@ -799,6 +862,14 @@
           "mode"
         ],
         "type": "object"
+      },
+      "OnConflict": {
+        "enum": [
+          "fail",
+          "replace",
+          "rename"
+        ],
+        "type": "string"
       },
       "PathBody": {
         "properties": {
@@ -1231,6 +1302,10 @@
               "string",
               "null"
             ]
+          },
+          "on_conflict": {
+            "$ref": "#/components/schemas/OnConflict",
+            "description": "When the name is taken: fail (409 `exists`, the default), replace\nit, or keep both. Checked here and again at commit (which takes its\nown `on_conflict`: the answer to a question asked meanwhile)."
           },
           "path": {
             "type": "string"
@@ -7043,6 +7118,16 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CommitReq"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "content": {
@@ -7102,7 +7187,37 @@
                 }
               }
             },
-            "description": "Chunks missing, or the folder changed"
+            "description": "Chunks missing, the folder changed, or the name is taken (`code: \"exists\"`)"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The body is too large"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The body has the wrong content type"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The body doesn't match the schema"
           },
           "500": {
             "content": {

@@ -28,7 +28,8 @@ use strata_storage::chunker::MAX_SIZE;
 use strata_storage::{Hash, paths};
 
 use crate::auth::{AuthUser, random_token};
-use crate::error::{ApiError, ApiResult, bad, conflict};
+use crate::conflicts::{self, OnConflict, Source};
+use crate::error::{ApiError, ApiResult, Existing, bad, conflict};
 use crate::mounts;
 use crate::state::AppState;
 use crate::vfs::{self, ByteStream};
@@ -46,6 +47,17 @@ pub struct CreateReq {
     pub size: i64,
     pub chunks: Vec<ChunkSpec>,
     pub mtime: Option<DateTime<Utc>>,
+    /// When the name is taken: fail (409 `exists`, the default), replace
+    /// it, or keep both. Checked here and again at commit (which takes its
+    /// own `on_conflict`: the answer to a question asked meanwhile).
+    #[serde(default)]
+    pub on_conflict: OnConflict,
+}
+
+#[derive(Deserialize, Default, utoipa::ToSchema)]
+pub struct CommitReq {
+    #[serde(default)]
+    pub on_conflict: OnConflict,
 }
 
 #[derive(sqlx::FromRow)]
@@ -148,10 +160,22 @@ pub async fn create(
     if sizes.iter().sum::<i64>() != req.size {
         return Err(bad("chunk sizes do not add up to the file size"));
     }
-    if let Ok(n) = vfs::stat(&st, &m, &rel).await
-        && n.is_dir
-    {
-        return Err(conflict("a folder with that name already exists"));
+    match vfs::stat(&st, &m, &rel).await {
+        Ok(n) if n.is_dir && req.on_conflict == OnConflict::Replace => {
+            return Err(conflict(
+                "a folder has that name; keep both instead, or rename the folder",
+            ));
+        }
+        Ok(n) if req.on_conflict == OnConflict::Fail => {
+            return Err(ApiError::Exists(Box::new(Existing {
+                name: n.name,
+                path: path.clone(),
+                is_dir: n.is_dir,
+                size: n.size,
+                mtime: n.mtime,
+            })));
+        }
+        _ => {}
     }
     vfs::check_raw_place(&st, &m, &rel).await?;
     let id = random_token(16);
@@ -256,7 +280,14 @@ pub async fn commit(
     State(st): State<AppState>,
     AuthUser(u): AuthUser,
     Path(id): Path<String>,
+    body: Bytes,
 ) -> ApiResult<Json<serde_json::Value>> {
+    // (No body, or `{}`: fail when the name is taken.)
+    let req: CommitReq = if body.is_empty() {
+        CommitReq::default()
+    } else {
+        serde_json::from_slice(&body).map_err(|e| bad(format!("bad request body: {e}")))?
+    };
     let up = load(&st, u.id, &id).await?;
     let miss = missing(&st, u.id, &id, &up).await?;
     if !miss.is_empty() {
@@ -268,21 +299,73 @@ pub async fn commit(
             "the destination folder changed; restart the upload",
         ));
     }
+    if let Ok(n) = vfs::stat(&st, &m, &rel).await
+        && n.is_dir
+        && req.on_conflict == OnConflict::Replace
+    {
+        return Err(conflict(
+            "a folder has that name; keep both instead, or rename the folder",
+        ));
+    }
     let hashes: Vec<Hash> = up
         .chunks
         .iter()
         .filter_map(|c| Hash::from_slice(c))
         .collect();
-    if m.is_hashed() {
-        vfs::put_hashed_file(&st, &m, &rel, &hashes, &up.chunk_sizes, up.mtime).await?;
-    } else {
-        let dir = staging_dir(&st, &id);
-        let stream: ByteStream = Box::pin(futures::stream::iter(hashes.clone()).then(move |h| {
-            let f = dir.join(h.hex());
-            async move { tokio::fs::read(f).await.map(Bytes::from) }
-        }));
-        vfs::write_stream(&st, &m, &rel, stream).await?;
-    }
+    let path = conflicts::write_at(
+        &st,
+        u.id,
+        &up.path,
+        false,
+        req.on_conflict,
+        Source::Upload,
+        |at| {
+            let (st, hashes, sizes, dir) = (
+                st.clone(),
+                hashes.clone(),
+                up.chunk_sizes.clone(),
+                staging_dir(&st, &id),
+            );
+            let (mtime, volume) = (up.mtime, up.volume_id);
+            async move {
+                let (m, rel) = mounts::resolve(&st, u.id, &at).await?;
+                if m.volume_id != volume {
+                    return Err(conflict(
+                        "the destination folder changed; restart the upload",
+                    ));
+                }
+                if m.is_hashed() {
+                    // Only where nothing is (checked under the volume lock): a file
+                    // written meanwhile outside these claims is never overwritten.
+                    match vfs::put_hashed_file_if(
+                        &st,
+                        &m,
+                        &rel,
+                        &hashes,
+                        &sizes,
+                        mtime,
+                        &vfs::Expect::Absent,
+                    )
+                    .await
+                    {
+                        Err(ApiError::PreconditionFailed(_)) => {
+                            Err(conflict("something was saved there meanwhile; try again"))
+                        }
+                        r => r.map(|_| ()),
+                    }
+                } else {
+                    let stream: ByteStream =
+                        Box::pin(futures::stream::iter(hashes).then(move |h| {
+                            let f = dir.join(h.hex());
+                            async move { tokio::fs::read(f).await.map(Bytes::from) }
+                        }));
+                    vfs::write_stream(&st, &m, &rel, stream).await.map(|_| ())
+                }
+            }
+        },
+    )
+    .await?;
+    let (m, rel) = mounts::resolve(&st, u.id, &path).await?;
     sqlx::query("DELETE FROM uploads WHERE id = $1")
         .bind(&id)
         .execute(&st.db)
@@ -290,7 +373,7 @@ pub async fn commit(
     let _ = tokio::fs::remove_dir_all(staging_dir(&st, &id)).await;
     let node = vfs::stat(&st, &m, &rel).await?;
     Ok(Json(
-        json!({ "path": up.path, "name": node.name, "size": node.size, "mtime": node.mtime, "etag": node.etag }),
+        json!({ "path": path, "name": node.name, "size": node.size, "mtime": node.mtime, "etag": node.etag }),
     ))
 }
 

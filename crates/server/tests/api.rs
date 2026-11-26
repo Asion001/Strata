@@ -95,7 +95,7 @@ async fn hashed_root_file_lifecycle() {
     )
     .await;
     assert_eq!(t.download("Archive/Docs/Sub/hi.txt").await, b"hello world");
-    t.upload("Archive/Docs/Sub/hi.txt", b"v2").await;
+    t.upload_replacing("Archive/Docs/Sub/hi.txt", b"v2").await;
     assert_eq!(t.download("Archive/Docs/Sub/hi.txt").await, b"v2");
     let (s, _) = t
         .json(

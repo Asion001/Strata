@@ -1,9 +1,21 @@
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use serde::Serialize;
 use serde_json::json;
 
 pub type ApiResult<T> = Result<T, ApiError>;
+
+/// What is in the way of a write, move or copy.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct Existing {
+    /// Where it is, in the user's tree.
+    pub path: String,
+    pub name: String,
+    pub is_dir: bool,
+    pub size: i64,
+    pub mtime: chrono::DateTime<chrono::Utc>,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
@@ -19,6 +31,10 @@ pub enum ApiError {
     NotFound,
     #[error("{0}")]
     Conflict(String),
+    /// Something is already at the destination (409 with `code: "exists"`
+    /// and what is there, so a client can ask Replace / Keep both / Skip).
+    #[error("“{}” already exists", .0.name)]
+    Exists(Box<Existing>),
     #[error("range not satisfiable")]
     RangeNotSatisfiable,
     /// The file changed since the client read it (If-Match / If-None-Match).
@@ -134,7 +150,7 @@ impl ApiError {
             ApiError::Unauthorized => StatusCode::UNAUTHORIZED,
             ApiError::Forbidden | ApiError::ReadOnly => StatusCode::FORBIDDEN,
             ApiError::NotFound => StatusCode::NOT_FOUND,
-            ApiError::Conflict(_) => StatusCode::CONFLICT,
+            ApiError::Conflict(_) | ApiError::Exists(_) => StatusCode::CONFLICT,
             ApiError::RangeNotSatisfiable => StatusCode::RANGE_NOT_SATISFIABLE,
             ApiError::PreconditionFailed(_) => StatusCode::PRECONDITION_FAILED,
             ApiError::PreconditionRequired(_) => StatusCode::PRECONDITION_REQUIRED,
@@ -174,6 +190,13 @@ impl IntoResponse for ApiError {
                 resp.headers_mut().insert(axum::http::header::ETAG, et);
             }
             return resp;
+        }
+        if let ApiError::Exists(what) = &self {
+            return (
+                status,
+                Json(json!({ "error": msg, "code": "exists", "details": what })),
+            )
+                .into_response();
         }
         (status, Json(json!({ "error": msg }))).into_response()
     }

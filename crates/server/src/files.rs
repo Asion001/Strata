@@ -11,6 +11,7 @@ use serde_json::json;
 use strata_storage::paths;
 
 use crate::auth::AuthUser;
+use crate::conflicts::{self, OnConflict, Source};
 use crate::error::{ApiError, ApiResult, bad};
 use crate::mounts::{self, Mount};
 use crate::range;
@@ -319,6 +320,30 @@ pub async fn mkdir(
 pub struct FromTo {
     pub from: String,
     pub to: String,
+    /// When `to` is taken: fail (409 `exists`, the default), replace it, or
+    /// keep both ("name (2)"; the answer says the path).
+    #[serde(default)]
+    pub on_conflict: OnConflict,
+}
+
+/// Is the item at `path` a folder (a mount point is one)?
+async fn is_folder(st: &AppState, user_id: i64, path: &str) -> ApiResult<bool> {
+    let (m, rel) = mounts::resolve(st, user_id, path).await?;
+    if rel.is_empty() {
+        return Ok(true);
+    }
+    Ok(vfs::stat(st, &m, &rel).await?.is_dir)
+}
+
+/// The paths of a move or copy, checked before anything is placed.
+async fn from_to(st: &AppState, user_id: i64, b: &FromTo) -> ApiResult<(String, String, bool)> {
+    let from = paths::normalize(&b.from)?;
+    let to = paths::normalize(&b.to)?;
+    if from.is_empty() || to.is_empty() {
+        return Err(bad("cannot move or copy the root folder"));
+    }
+    let is_dir = is_folder(st, user_id, &from).await?;
+    Ok((from, to, is_dir))
 }
 
 pub async fn move_(
@@ -326,10 +351,24 @@ pub async fn move_(
     AuthUser(u): AuthUser,
     Json(b): Json<FromTo>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let from = paths::normalize(&b.from)?;
-    let to = paths::normalize(&b.to)?;
-    vfs::move_path(&st, u.id, &from, &to).await?;
-    Ok(Json(json!({ "path": to })))
+    let (from, to, is_dir) = from_to(&st, u.id, &b).await?;
+    if from == to {
+        return Err(bad("source and destination are the same"));
+    }
+    let path = conflicts::write_at(
+        &st,
+        u.id,
+        &to,
+        is_dir,
+        b.on_conflict,
+        Source::Move(&from),
+        |at| {
+            let (st, from) = (st.clone(), from.clone());
+            async move { vfs::move_path(&st, u.id, &from, &at).await }
+        },
+    )
+    .await?;
+    Ok(Json(json!({ "path": path })))
 }
 
 pub async fn copy(
@@ -337,10 +376,24 @@ pub async fn copy(
     AuthUser(u): AuthUser,
     Json(b): Json<FromTo>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let from = paths::normalize(&b.from)?;
-    let to = paths::normalize(&b.to)?;
-    vfs::copy_path(&st, u.id, &from, &to).await?;
-    Ok(Json(json!({ "path": to })))
+    let (from, to, is_dir) = from_to(&st, u.id, &b).await?;
+    if from == to && b.on_conflict == OnConflict::Replace {
+        return Err(bad("an item can't replace itself"));
+    }
+    let path = conflicts::write_at(
+        &st,
+        u.id,
+        &to,
+        is_dir,
+        b.on_conflict,
+        Source::Copy(&from),
+        |at| {
+            let (st, from) = (st.clone(), from.clone());
+            async move { vfs::copy_path(&st, u.id, &from, &at).await }
+        },
+    )
+    .await?;
+    Ok(Json(json!({ "path": path })))
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]

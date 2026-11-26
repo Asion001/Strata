@@ -194,6 +194,16 @@ impl TestApp {
     /// Upload using the real chunked protocol. Returns the "missing" list of
     /// the first call (to test dedupe).
     pub async fn upload(&self, path: &str, data: &[u8]) -> Vec<usize> {
+        self.upload_as(path, data, "fail").await
+    }
+
+    /// Upload over whatever is at `path` (it goes to the trash where there is one).
+    pub async fn upload_replacing(&self, path: &str, data: &[u8]) -> Vec<usize> {
+        self.upload_as(path, data, "replace").await
+    }
+
+    /// Upload with an `on_conflict` mode; returns the chunks that were sent.
+    pub async fn upload_as(&self, path: &str, data: &[u8], mode: &str) -> Vec<usize> {
         let lens = strata_storage::chunker::chunk_lengths(data);
         let mut chunks = Vec::new();
         let mut off = 0;
@@ -210,7 +220,7 @@ impl TestApp {
             .ok(
                 "POST",
                 "/api/uploads",
-                serde_json::json!({ "path": path, "size": data.len(), "chunks": spec }),
+                serde_json::json!({ "path": path, "size": data.len(), "chunks": spec, "on_conflict": mode }),
             )
             .await;
         let id = v["id"].as_str().unwrap().to_string();
@@ -239,7 +249,7 @@ impl TestApp {
         self.ok(
             "POST",
             &format!("/api/uploads/{id}/commit"),
-            serde_json::json!({}),
+            serde_json::json!({ "on_conflict": mode }),
         )
         .await;
         missing
