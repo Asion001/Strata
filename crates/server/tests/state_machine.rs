@@ -817,7 +817,7 @@ async fn journal_checks(s: &Server, m: &Model) {
         .fetch_all(db)
         .await
         .unwrap();
-    for (uid, last) in &users {
+    for (n, (uid, last)) in users.iter().enumerate() {
         let seqs: Vec<i64> =
             sqlx::query_scalar("SELECT seq FROM journal WHERE user_id = $1 ORDER BY seq")
                 .bind(uid)
@@ -827,7 +827,7 @@ async fn journal_checks(s: &Server, m: &Model) {
         assert_eq!(
             seqs,
             (1..=*last).collect::<Vec<_>>(),
-            "journal seqs of user {uid}"
+            "journal seqs of user #{n}"
         );
     }
     // Replay each mounted volume's journal from empty: its paths are the
