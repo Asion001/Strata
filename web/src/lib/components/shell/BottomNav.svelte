@@ -15,7 +15,7 @@
     { href: '/', label: 'Files', icon: FolderIcon, match: ['/'] },
     { href: '/shares', label: 'Shared', icon: LinkIcon, match: ['/shares'] },
     { href: '/mounts', label: 'Mounts', icon: FolderTreeIcon, match: ['/mounts'] },
-    { href: '/settings', label: 'Settings', icon: SettingsIcon, match: ['/settings', '/connections', '/admin'] }
+    { href: '/settings', label: 'Settings', icon: SettingsIcon, match: ['/settings', '/connections', '/admin', '/trash'] }
   ];
 </script>
 

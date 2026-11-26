@@ -6,7 +6,7 @@ use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::http::header::{self, HeaderMap, HeaderValue};
 use axum::response::{IntoResponse, Response};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use strata_storage::paths;
 
@@ -349,6 +349,25 @@ pub struct DeleteBody {
     /// Skip the trash and delete for good.
     #[serde(default)]
     pub permanent: bool,
+    /// Go on past a path that fails, and report it in `results` (otherwise
+    /// the first failure is the answer, and later paths aren't tried).
+    #[serde(default)]
+    pub keep_going: bool,
+}
+
+/// What happened to one path of a delete.
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct DeleteResult {
+    pub path: String,
+    /// It went to the trash (rather than being deleted for good).
+    pub trashed: bool,
+    /// Its trash id, for an undo. None when deleted for good, failed, or (rarely)
+    /// while its move into the trash is still being completed.
+    pub trash_id: Option<i64>,
+    /// Why it failed (only with `keep_going`), and the HTTP status that error
+    /// would have had.
+    pub error: Option<String>,
+    pub status: Option<u16>,
 }
 
 pub async fn delete(
@@ -356,16 +375,46 @@ pub async fn delete(
     AuthUser(u): AuthUser,
     Json(b): Json<DeleteBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let mut trashed = 0;
-    for p in &b.paths {
-        let p = paths::normalize(p)?;
-        if vfs::delete(&st, u.id, &p, !b.permanent).await? {
-            trashed += 1;
-        }
+    let mut results = Vec::new();
+    for raw in &b.paths {
+        let done = match paths::normalize(raw) {
+            Ok(p) => vfs::delete(&st, u.id, &p, !b.permanent).await,
+            Err(e) => Err(e.into()),
+        };
+        let r = match done {
+            Ok(d) => DeleteResult {
+                path: raw.clone(),
+                trashed: matches!(d, vfs::Deleted::Trashed(_)),
+                trash_id: match d {
+                    vfs::Deleted::Trashed(id) => id,
+                    vfs::Deleted::Permanently => None,
+                },
+                error: None,
+                status: None,
+            },
+            Err(e) if b.keep_going => {
+                e.log_internal();
+                DeleteResult {
+                    path: raw.clone(),
+                    trashed: false,
+                    trash_id: None,
+                    status: Some(e.status().as_u16()),
+                    error: Some(e.public_message()),
+                }
+            }
+            Err(e) => return Err(e),
+        };
+        results.push(r);
     }
-    Ok(Json(
-        json!({ "deleted": b.paths.len(), "trashed": trashed }),
-    ))
+    let ok = results.iter().filter(|r| r.error.is_none()).count();
+    let trashed = results.iter().filter(|r| r.trashed).count();
+    let trash_ids: Vec<i64> = results.iter().filter_map(|r| r.trash_id).collect();
+    Ok(Json(json!({
+        "deleted": ok,
+        "trashed": trashed,
+        "trash_ids": trash_ids,
+        "results": results,
+    })))
 }
 
 #[derive(Deserialize)]

@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it } from 'vitest';
+import { RECENT_KEY } from '$lib/components/files/folder-picker';
 import { DRAFT_TTL_MS, touchTabDraft, hasTabDraft, clearTabDraft, clearAfterSave, clearAllDrafts, clearDraft, listDrafts, markOfferSeen, offerSeen, saveTabDraft, draftKey, expireDrafts, getDraft, isSignedIn, keepOnlyUser, markSignedIn, markSignedOut, saveDraft } from './drafts';
 
 describe('drafts', () => {
@@ -33,9 +34,22 @@ describe('drafts', () => {
     expect(offerSeen(d)).toBe(false); // mark pruned with its draft
   });
 
+  it('forgets recent Move/Copy folders when another account signs in', () => {
+    markSignedIn(1);
+    localStorage.setItem(RECENT_KEY, '["a"]');
+    markSignedIn(1);
+    expect(localStorage.getItem(RECENT_KEY)).toBe('["a"]');
+    markSignedIn(2);
+    expect(localStorage.getItem(RECENT_KEY)).toBeNull();
+    markSignedOut();
+  });
+
   it('a signed-out browser never recreates the wiped database', async () => {
     await saveDraft({ key: 'k', baseEtag: null, text: 'x', savedAt: 1 });
+    localStorage.setItem(RECENT_KEY, '["Medical/2026"]');
     markSignedOut();
+    // Recent Move/Copy folders are private paths too.
+    expect(localStorage.getItem(RECENT_KEY)).toBeNull();
     await clearAllDrafts();
     // a late writer from another tab
     await expect(saveDraft({ key: 'k', baseEtag: null, text: 'late', savedAt: 2 })).rejects.toBeTruthy();

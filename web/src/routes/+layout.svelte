@@ -6,6 +6,7 @@
   import { session } from '$lib/session.svelte';
   import { markSignedIn } from '$lib/editor/drafts';
   import { reloadMounts } from '$lib/mounts.svelte';
+  import { loadTrashInfo } from '$lib/trash-info.svelte';
   import AppSidebar from '$lib/components/shell/AppSidebar.svelte';
   import BottomNav from '$lib/components/shell/BottomNav.svelte';
   import { cancelAllDialogs, dialogHost } from '$lib/dialogs.svelte';
@@ -42,6 +43,7 @@
         session.user = u;
         markSignedIn(u.id); // lets the editor's autosave run in every tab
         reloadMounts();
+        void loadTrashInfo();
       })
       .catch((e) => {
         // Offline (no answer at all): carry on as whoever was signed in

@@ -126,9 +126,10 @@ impl From<strata_storage::paths::PathError> for ApiError {
     }
 }
 
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        let status = match &self {
+impl ApiError {
+    /// The HTTP status this error answers with.
+    pub fn status(&self) -> StatusCode {
+        match self {
             ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
             ApiError::Unauthorized => StatusCode::UNAUTHORIZED,
             ApiError::Forbidden | ApiError::ReadOnly => StatusCode::FORBIDDEN,
@@ -138,16 +139,32 @@ impl IntoResponse for ApiError {
             ApiError::PreconditionFailed(_) => StatusCode::PRECONDITION_FAILED,
             ApiError::PreconditionRequired(_) => StatusCode::PRECONDITION_REQUIRED,
             ApiError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
-            ApiError::Internal(e) => {
-                tracing::error!("internal error: {e:#}");
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
-        };
-        // Never leak internal details (paths, SQL) to clients: they are logged.
-        let msg = match &self {
+            ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+
+    /// The message a client sees. Never internal details (paths, SQL):
+    /// those go to the log (see `log_internal`).
+    pub fn public_message(&self) -> String {
+        match self {
             ApiError::Internal(_) => "internal error".to_string(),
             other => other.to_string(),
-        };
+        }
+    }
+
+    /// Log an internal error's details (a client gets none of them).
+    pub fn log_internal(&self) {
+        if let ApiError::Internal(e) = self {
+            tracing::error!("internal error: {e:#}");
+        }
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        self.log_internal();
+        let status = self.status();
+        let msg = self.public_message();
         if let ApiError::PreconditionFailed(current) = &self {
             let mut resp = (status, Json(json!({ "error": msg, "etag": current }))).into_response();
             if let Some(et) = current
