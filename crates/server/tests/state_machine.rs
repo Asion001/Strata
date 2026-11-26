@@ -12,7 +12,8 @@
 //!
 //! * the listing of the whole tree equals the model;
 //! * every file's bytes hash-match the model;
-//! * no unreferenced blob is older than the GC grace period, and after a GC
+//! * no unreferenced blob (not used by a file, an upload or the trash) is
+//!   older than the GC grace period, and after a GC
 //!   (grace 0) none is left, in the database or on its backend;
 //! * every chunk a file references exists on its backend;
 //! * replaying each volume's journal from empty rebuilds its tree;
@@ -613,7 +614,8 @@ impl Server {
                 // database and from its backend.
                 let unreferenced = "SELECT b.volume_id, b.hash FROM blobs b WHERE
                       NOT EXISTS (SELECT 1 FROM nodes n WHERE n.volume_id = b.volume_id AND n.chunks @> ARRAY[b.hash])
-                  AND NOT EXISTS (SELECT 1 FROM uploads u WHERE u.volume_id = b.volume_id AND u.chunks @> ARRAY[b.hash])";
+                  AND NOT EXISTS (SELECT 1 FROM uploads u WHERE u.volume_id = b.volume_id AND u.chunks @> ARRAY[b.hash])
+                  AND NOT EXISTS (SELECT 1 FROM trash_nodes x WHERE x.volume_id = b.volume_id AND x.chunks @> ARRAY[b.hash])";
                 let before: Vec<(i64, Vec<u8>)> = sqlx::query_as(unreferenced)
                     .fetch_all(&self.t.st.db)
                     .await
@@ -748,7 +750,8 @@ async fn check(s: &Server, m: &Model) {
     let old: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM blobs b WHERE b.created_at < now() - interval '24 hours'
            AND NOT EXISTS (SELECT 1 FROM nodes n WHERE n.volume_id = b.volume_id AND n.chunks @> ARRAY[b.hash])
-           AND NOT EXISTS (SELECT 1 FROM uploads u WHERE u.volume_id = b.volume_id AND u.chunks @> ARRAY[b.hash])",
+           AND NOT EXISTS (SELECT 1 FROM uploads u WHERE u.volume_id = b.volume_id AND u.chunks @> ARRAY[b.hash])
+                  AND NOT EXISTS (SELECT 1 FROM trash_nodes x WHERE x.volume_id = b.volume_id AND x.chunks @> ARRAY[b.hash])",
     )
     .fetch_one(&st.db)
     .await
@@ -756,7 +759,8 @@ async fn check(s: &Server, m: &Model) {
     assert_eq!(old, 0, "unreferenced blobs past the grace period");
     // 4. Every referenced chunk is on its backend (each hashed volume).
     let refs: Vec<(i64, Vec<u8>)> = sqlx::query_as(
-        "SELECT DISTINCT n.volume_id, c FROM nodes n, unnest(n.chunks) c WHERE n.chunks IS NOT NULL",
+        "SELECT DISTINCT n.volume_id, c FROM nodes n, unnest(n.chunks) c WHERE n.chunks IS NOT NULL
+         UNION SELECT DISTINCT x.volume_id, c FROM trash_nodes x, unnest(x.chunks) c WHERE x.chunks IS NOT NULL",
     )
     .fetch_all(&st.db)
     .await
@@ -918,7 +922,8 @@ fn gc_leaves_no_unreferenced_blobs() {
             .fetch_all(&t.st.db)
             .await
             .unwrap();
-        t.ok("POST", "/api/files/delete", json!({"paths": ["a.bin"]})).await;
+        // Permanently: a trashed file keeps its blobs until it is purged.
+        t.ok("POST", "/api/files/delete", json!({"paths": ["a.bin"], "permanent": true})).await;
         background::gc(&t.st, 0).await.unwrap();
         let left: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM blobs b WHERE NOT EXISTS

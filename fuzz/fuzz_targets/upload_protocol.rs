@@ -105,6 +105,7 @@ fn app() -> &'static App {
                 gc_grace_hours: 24,
                 raw_ttl_secs: 0,
                 probe_secs: 3600,
+                trash_days: 30,
             };
             let pool = sqlx::PgPool::connect(&url).await.unwrap();
             let st = AppState::with_pool(cfg, pool).await.unwrap();

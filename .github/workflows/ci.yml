@@ -105,15 +105,17 @@ jobs:
         with:
           workspaces: fuzz
           key: ${{ matrix.target }}
+      # (Its prebuilt binary is a musl build and would default to that
+      # target, which can't take the sanitizer: the target is given below.)
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-fuzz
       - name: Build
         working-directory: fuzz
-        run: cargo +nightly fuzz build -O ${{ matrix.target }}
+        run: cargo +nightly fuzz build -O --target x86_64-unknown-linux-gnu ${{ matrix.target }}
       - name: Fuzz for 2 minutes
         working-directory: fuzz
-        run: cargo +nightly fuzz run -O ${{ matrix.target }} corpus/${{ matrix.target }} -- -max_total_time=120 -print_final_stats=1
+        run: cargo +nightly fuzz run -O --target x86_64-unknown-linux-gnu ${{ matrix.target }} corpus/${{ matrix.target }} -- -max_total_time=120 -print_final_stats=1
       # A crash is saved in fuzz/artifacts/: reproduce it with
       # `cargo +nightly fuzz run -O <target> <file>`.
       - uses: actions/upload-artifact@v4
