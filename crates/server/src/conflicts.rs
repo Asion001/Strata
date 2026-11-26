@@ -29,8 +29,9 @@ pub enum OnConflict {
     /// Answer 409 with `code: "exists"` and what is there.
     #[default]
     Fail,
-    /// Put the new item in place of the old one (which goes to the trash
-    /// where there is one).
+    /// Put the new item in place of the old one. An upload over a file
+    /// saves into that file (its share links stay); anything else sends the
+    /// old item to the trash where there is one.
     Replace,
     /// Keep both: the new item gets a free "name (2).ext".
     Rename,
@@ -39,7 +40,7 @@ pub enum OnConflict {
 /// A name claimed for an operation in flight (released when dropped).
 pub struct Claim {
     st: AppState,
-    key: (i64, String),
+    key: String,
 }
 
 impl Drop for Claim {
@@ -48,9 +49,20 @@ impl Drop for Claim {
     }
 }
 
-fn claim(st: &AppState, volume_id: i64, rel: &str) -> Option<Claim> {
+/// Claim `rel` of `m`, keyed by where it is in storage (two raw mounts can
+/// show the same folder of one connection).
+fn claim(st: &AppState, m: &mounts::Mount, rel: &str) -> Option<Claim> {
+    let key = if m.is_hashed() {
+        format!("v{}:{rel}", m.volume_id)
+    } else {
+        format!("c{}:{}", m.connection_id, paths::join(&m.base_path, rel))
+    };
+    claim_key(st, key)
+}
+
+/// Claim anything named by `key` (an upload being committed, say).
+pub fn claim_key(st: &AppState, key: String) -> Option<Claim> {
     use dashmap::mapref::entry::Entry;
-    let key = (volume_id, rel.to_string());
     match st.claims.entry(key.clone()) {
         Entry::Occupied(_) => None,
         Entry::Vacant(v) => {
@@ -120,7 +132,7 @@ pub async fn place(
             return Err(conflict("something is mounted there"));
         }
         let (m, rel) = mounts::resolve(st, user_id, &candidate).await?;
-        let Some(c) = claim(st, m.volume_id, &rel) else {
+        let Some(c) = claim(st, &m, &rel) else {
             // Another operation is writing this name right now.
             if mode == OnConflict::Rename {
                 continue;
@@ -220,6 +232,18 @@ where
     if vfs::contains(&tm, &trel, &fm, &frel) {
         return Err(conflict(
             "it can't replace the folder it is in; pick another folder or keep both",
+        ));
+    }
+    // Nothing mounted inside what goes: checked now, not after the whole
+    // item was written beside it.
+    if is_dir
+        && mounts::user_mounts(st, user_id)
+            .await?
+            .iter()
+            .any(|m| paths::strip_prefix(&m.path, &target.path).is_some())
+    {
+        return Err(conflict(
+            "something is mounted inside it; keep both, or unmount it first",
         ));
     }
     // Beside the old one first, under a hidden name of its own.

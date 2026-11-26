@@ -262,9 +262,10 @@ async fn replace_without_a_trash_deletes_the_old_one_only_after() {
 async fn a_failed_replace_keeps_the_old_item_and_the_source() {
     let Some(t) = app().await else { return };
     let disk = local_mount(&t, "raw").await;
-    t.upload("Disk/src/f.txt", b"new").await;
+    t.upload("Disk/src/f/new.txt", b"new").await;
     t.upload("Disk/dst/f/inner.txt", b"old").await;
-    // A mount inside the folder being replaced: it can't be deleted.
+    // A mount inside the folder being replaced: refused before anything is
+    // written.
     let v = t
         .ok(
             "POST",
@@ -273,23 +274,39 @@ async fn a_failed_replace_keeps_the_old_item_and_the_source() {
         )
         .await;
     std::fs::create_dir_all(t.dir.path().join("local/other")).unwrap();
-    t.ok(
-        "POST",
-        "/api/mounts",
-        json!({"path": "Disk/dst/f/m", "connection_id": v["id"], "mode": "raw"}),
-    )
-    .await;
-    let (s, v) = op(&t, "move", "Disk/src/f.txt", "Disk/dst/f", "replace").await;
+    let m = t
+        .ok(
+            "POST",
+            "/api/mounts",
+            json!({"path": "Disk/dst/f/m", "connection_id": v["id"], "mode": "raw"}),
+        )
+        .await;
+    let (s, v) = op(&t, "move", "Disk/src/f", "Disk/dst/f", "replace").await;
     assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    assert!(
+        v["error"].as_str().unwrap().contains("mounted inside"),
+        "{v}"
+    );
+    assert_eq!(t.names("Disk/dst").await, vec!["f"]);
+    t.ok("DELETE", &format!("/api/mounts/{}", m["id"]), json!({}))
+        .await;
+
+    // The old one can't go to the trash (where the trash would be is a file).
+    let trash = disk.join(strata_storage::backend::TRASH_DIR);
+    let _ = std::fs::remove_dir_all(&trash);
+    std::fs::write(&trash, b"in the way").unwrap();
+    let (s, v) = op(&t, "move", "Disk/src/f", "Disk/dst/f", "replace").await;
+    assert!(!s.is_success(), "{v}");
     // The source is back where it was, the old folder untouched, nothing staged.
-    assert_eq!(std::fs::read(disk.join("src/f.txt")).unwrap(), b"new");
+    assert_eq!(std::fs::read(disk.join("src/f/new.txt")).unwrap(), b"new");
     assert_eq!(std::fs::read(disk.join("dst/f/inner.txt")).unwrap(), b"old");
     assert_eq!(t.names("Disk/dst").await, vec!["f"]);
     // A copy cleans up its staged copy.
-    let (s, _) = op(&t, "copy", "Disk/src/f.txt", "Disk/dst/f", "replace").await;
-    assert_eq!(s, StatusCode::CONFLICT);
+    let (s, v) = op(&t, "copy", "Disk/src/f", "Disk/dst/f", "replace").await;
+    assert!(!s.is_success(), "{v}");
     assert_eq!(t.names("Disk/dst").await, vec!["f"]);
-    assert_eq!(t.names("Disk/src").await, vec!["f.txt"]);
+    assert_eq!(t.names("Disk/src").await, vec!["f"]);
+    assert_eq!(std::fs::read(disk.join("dst/f/inner.txt")).unwrap(), b"old");
 }
 
 #[tokio::test]
@@ -357,19 +374,25 @@ async fn names_in_flight_are_never_reused() {
     drop(next);
 
     // Every number taken: refused, not looped forever.
-    let (m, _) = strata_server::mounts::resolve(&t.st, uid, "g.txt")
-        .await
-        .unwrap();
-    let vid = m.volume_id;
-    t.st.claims.insert((vid, "g.txt".into()), ());
-    for n in 2..1000 {
-        t.st.claims.insert((vid, format!("g ({n}).txt")), ());
+    let mut all = Vec::new();
+    for n in 1..1000 {
+        let name = if n == 1 {
+            "g.txt".to_string()
+        } else {
+            format!("g ({n}).txt")
+        };
+        all.push(
+            place(&t.st, uid, &name, false, OnConflict::Fail)
+                .await
+                .unwrap(),
+        );
     }
     let full = place(&t.st, uid, "g.txt", false, OnConflict::Rename).await;
     assert!(matches!(
         full,
         Err(strata_server::error::ApiError::Conflict(_))
     ));
+    drop(all);
 
     // A name with no room for a number.
     let long = format!("{}.txt", "n".repeat(250));
@@ -463,4 +486,39 @@ async fn never_replaces_the_folder_a_copy_comes_from_through_another_mount() {
     assert_eq!(s, StatusCode::CONFLICT, "{v}");
     assert_eq!(std::fs::read(disk.join("x/y.txt")).unwrap(), b"y");
     assert!(trash_names(&t).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_commit_sent_again_waits_for_the_first() {
+    let Some(t) = app().await else { return };
+    let h = blake3::hash(b"mine").to_hex().to_string();
+    let v = t
+        .ok(
+            "POST",
+            "/api/uploads",
+            json!({"path": "w.txt", "size": 4, "chunks": [{"hash": h, "size": 4}]}),
+        )
+        .await;
+    let id = v["id"].as_str().unwrap().to_string();
+    let (s, _, _) = t
+        .raw(
+            "PUT",
+            &format!("/api/uploads/{id}/chunks/{h}"),
+            axum::body::Body::from("mine"),
+            &[],
+        )
+        .await;
+    assert!(s.is_success());
+    // (As if the first commit were still writing.)
+    let first = strata_server::conflicts::claim_key(&t.st, format!("upload:{id}")).unwrap();
+    let commit = format!("/api/uploads/{id}/commit");
+    let ((s, v), ()) = tokio::join!(t.json("POST", &commit, json!({})), async {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        drop(first);
+    });
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(t.download("w.txt").await, b"mine");
+    // Once done, a commit sent again finds nothing to commit.
+    let (s, _) = t.json("POST", &commit, json!({})).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
 }

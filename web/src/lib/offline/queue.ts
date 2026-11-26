@@ -452,9 +452,8 @@ export async function run(job: Job, d: Deps, signal?: AbortSignal, restarts = 0)
             size: j.size,
             mtime: new Date(j.lastModified).toISOString(),
             chunks: j.chunks!.map((c) => ({ hash: c.hash, size: c.size })),
-            // An upload replaces a file of that name (it goes to the trash
-            // where there is one). (Asking first comes with the conflict
-            // dialog.)
+            // An upload saves over a file of that name. (Asking first comes
+            // with the conflict dialog.)
             on_conflict: 'replace'
           }),
           signal

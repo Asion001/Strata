@@ -526,7 +526,7 @@ impl Server {
             .status(
                 "POST",
                 "/api/uploads",
-                json!({"path": path, "size": data.len(), "chunks": spec}),
+                json!({"path": path, "size": data.len(), "chunks": spec, "on_conflict": "replace"}),
             )
             .await;
         if !ok {
@@ -551,9 +551,13 @@ impl Server {
                 .await;
             assert!(s.is_success(), "chunk {s}: {}", String::from_utf8_lossy(&b));
         }
-        self.status("POST", &format!("/api/uploads/{id}/commit"), json!({}))
-            .await
-            .0
+        self.status(
+            "POST",
+            &format!("/api/uploads/{id}/commit"),
+            json!({"on_conflict": "replace"}),
+        )
+        .await
+        .0
     }
 
     async fn apply(&mut self, op: &Op) -> bool {

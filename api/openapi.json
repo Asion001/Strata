@@ -557,9 +557,7 @@
           }
         },
         "required": [
-          "error",
-          "code",
-          "details"
+          "error"
         ],
         "type": "object"
       },
@@ -7122,11 +7120,17 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/CommitReq"
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/CommitReq"
+                  }
+                ]
               }
             }
-          },
-          "required": true
+          }
         },
         "responses": {
           "200": {

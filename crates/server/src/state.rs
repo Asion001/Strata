@@ -42,7 +42,7 @@ pub struct Inner {
     pub op_gens: DashMap<i64, u64>,
     /// (volume, path) names a move, copy or upload is writing right now
     /// (see `conflicts`), so two of them never pick the same one.
-    pub claims: DashMap<(i64, String), ()>,
+    pub claims: DashMap<String, ()>,
     /// Connections the health probes found offline: their storage isn't
     /// touched (reads and writes get 503) until a probe succeeds again.
     pub offline: DashMap<i64, ()>,

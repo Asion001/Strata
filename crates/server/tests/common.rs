@@ -197,7 +197,7 @@ impl TestApp {
         self.upload_as(path, data, "fail").await
     }
 
-    /// Upload over whatever is at `path` (it goes to the trash where there is one).
+    /// Upload over the file at `path` (saved into that same file).
     pub async fn upload_replacing(&self, path: &str, data: &[u8]) -> Vec<usize> {
         self.upload_as(path, data, "replace").await
     }

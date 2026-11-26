@@ -893,8 +893,8 @@ export interface components {
         /** @description Every error: a message for people (never internal details). */
         ErrorBody: {
             /** @description "exists" on a 409 when the destination name is taken. */
-            code: string | null;
-            details: null | components["schemas"]["Existing"];
+            code?: string | null;
+            details?: null | components["schemas"]["Existing"];
             error: string;
             /** @description On 412: the file's current version, if it exists. */
             etag?: string | null;
@@ -5540,9 +5540,9 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: {
+        requestBody?: {
             content: {
-                "application/json": components["schemas"]["CommitReq"];
+                "application/json": null | components["schemas"]["CommitReq"];
             };
         };
         responses: {

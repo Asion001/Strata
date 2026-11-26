@@ -290,6 +290,14 @@ pub async fn commit(
             .map_err(|e| bad(format!("bad request body: {e}")))?
             .unwrap_or_default()
     };
+    // One commit of an upload at a time: a retry sent while the first is
+    // still writing waits for it (and then finds the upload done: 404).
+    let _one = loop {
+        if let Some(c) = conflicts::claim_key(&st, format!("upload:{id}")) {
+            break c;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
     let up = load(&st, u.id, &id).await?;
     let miss = missing(&st, u.id, &id, &up).await?;
     if !miss.is_empty() {
