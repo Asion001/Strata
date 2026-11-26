@@ -956,6 +956,12 @@ export interface components {
             path: string;
         };
         PurgedBody: {
+            /**
+             * Format: int64
+             * @description Items that could not be removed now (their storage is offline);
+             *     they stay in the trash.
+             */
+            failed: number;
             /** Format: int64 */
             purged: number;
         };
@@ -4884,7 +4890,6 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Some items could not be purged */
             409: {
                 headers: {
                     [name: string]: unknown;

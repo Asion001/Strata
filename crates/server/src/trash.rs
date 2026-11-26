@@ -286,7 +286,7 @@ pub async fn trash(
             }
             // The item is in the trash now: report success even if the
             // bookkeeping below fails (reconcile completes it).
-            if let Err(e) = finish_raw_trash(st, id, m.volume_id, rel, node.is_dir).await {
+            if let Err(e) = finish_raw_trash(st, root, id, m.volume_id, rel, node.is_dir).await {
                 tracing::warn!("trash {id}: finishing the move failed, reconcile will: {e}");
             }
             lock.release().await?;
@@ -302,6 +302,7 @@ pub async fn trash(
 /// item's listing cache and journal the delete. Caller holds the volume lock.
 async fn finish_raw_trash(
     st: &AppState,
+    root: &Path,
     id: i64,
     volume_id: i64,
     rel: &str,
@@ -310,10 +311,17 @@ async fn finish_raw_trash(
     // Ready last: if a step fails, reconcile repeats them all.
     vfs::delete_subtree_rows(st, volume_id, rel).await?;
     journal::record_volume(st, volume_id, vec![Change::delete(rel, is_dir)]).await?;
-    sqlx::query("UPDATE trash SET ready = TRUE WHERE id = $1")
+    let marked = sqlx::query("UPDATE trash SET ready = TRUE WHERE id = $1")
         .bind(id)
         .execute(&st.db)
         .await?;
+    if marked.rows_affected() == 0 {
+        // The row went meanwhile (its owner or connection was deleted, which
+        // removes their trash): the moved item goes too, by the sweep.
+        if let Err(e) = tokio::fs::rename(item_dir(root, id), doomed_dir(root, id)).await {
+            tracing::warn!("trash {id}: its record is gone, and dooming the files failed: {e}");
+        }
+    }
     Ok(())
 }
 
@@ -530,6 +538,7 @@ pub async fn restore(st: &AppState, user_id: i64, id: i64) -> ApiResult<String> 
             .await?;
             if name == row.name {
                 // Same ids at the same paths: the share links work again.
+                // (A link names a path too: under another name it stays dead.)
                 sqlx::query(
                     "UPDATE shares s SET node_id = t.node_id FROM trash_shares t
                      WHERE t.trash_id = $1 AND s.id = t.share_id AND s.node_id IS NULL",
@@ -795,7 +804,7 @@ async fn reconcile_one(
                     let is_dir = tokio::fs::symlink_metadata(&item)
                         .await
                         .is_ok_and(|m| m.is_dir());
-                    finish_raw_trash(st, id, volume_id, rel, is_dir).await?;
+                    finish_raw_trash(st, &root, id, volume_id, rel, is_dir).await?;
                 }
                 fixed = true;
             }
@@ -859,7 +868,11 @@ async fn sweep_orphans(st: &AppState) -> usize {
         while let Ok(Some(e)) = rd.next_entry().await {
             let name = e.file_name();
             let Some(name) = name.to_str() else { continue };
-            if name.starts_with("purging-") {
+            let doomed = name.strip_prefix("purging-").is_some_and(|rest| {
+                rest.split_once('-')
+                    .is_some_and(|(a, b)| a.parse::<i64>().is_ok() && b.parse::<i64>().is_ok())
+            });
+            if doomed {
                 if tokio::fs::remove_dir_all(e.path()).await.is_ok() {
                     handled += 1;
                 }
@@ -973,10 +986,12 @@ pub async fn list(
     )
     .bind(u.id)
     .bind(q.before)
-    .bind(limit)
+    .bind(limit + 1)
     .fetch_all(&st.db)
     .await?;
-    let more = items.len() as i64 == limit;
+    let mut items = items;
+    let more = items.len() as i64 > limit;
+    items.truncate(limit as usize);
     Ok(Json(json!({
         "retention_days": st.cfg.trash_days,
         "items": items,
@@ -1027,12 +1042,8 @@ pub async fn empty(
             }
         }
     }
-    if failed > 0 {
-        return Err(conflict(format!(
-            "{failed} item(s) could not be removed and are still in the trash"
-        )));
-    }
-    Ok(Json(json!({ "purged": purged })))
+    // Some may fail (storage offline): they stay, and the answer says so.
+    Ok(Json(json!({ "purged": purged, "failed": failed })))
 }
 
 #[cfg(test)]

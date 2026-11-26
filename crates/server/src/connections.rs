@@ -298,16 +298,38 @@ pub async fn update(
     // Held until the new config is in place: a delete going to the trash
     // meanwhile would land in the old folder.
     let mut raw_lock = None;
+    let mut locked_raw: Vec<i64> = Vec::new();
     if repointed {
         // A raw trash lives in the connection's folder: re-pointed, its
         // items could no longer be found (and reconcile would drop them).
-        let raw: Vec<i64> =
-            sqlx::query_scalar("SELECT id FROM volumes WHERE connection_id = $1 AND mode = 'raw'")
-                .bind(id)
-                .fetch_all(&st.db)
-                .await?;
-        if !raw.is_empty() {
-            raw_lock = Some(crate::vfs::lock_volumes(&st, &raw).await?);
+        let raw_ids = || async {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT id FROM volumes WHERE connection_id = $1 AND mode = 'raw' ORDER BY id",
+            )
+            .bind(id)
+            .fetch_all(&st.db)
+            .await
+        };
+        // Locked, then read again: a raw volume made meanwhile is retried.
+        let mut tries = 0;
+        loop {
+            let raw = raw_ids().await?;
+            locked_raw = raw.clone();
+            if raw.is_empty() {
+                break;
+            }
+            let lock = crate::vfs::lock_volumes(&st, &raw).await?;
+            if raw_ids().await? == raw {
+                raw_lock = Some(lock);
+                break;
+            }
+            lock.release().await?;
+            tries += 1;
+            if tries == 3 {
+                return Err(conflict(
+                    "the connection's storage keeps changing; try again",
+                ));
+            }
         }
         let raw_trash: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM trash t JOIN volumes v ON v.id = t.volume_id
@@ -363,6 +385,20 @@ pub async fn update(
         return Err(conflict(
             "the connection was changed meanwhile; reload it and try again",
         ));
+    }
+    if repointed {
+        // New volumes need the layout lock, held now: the locked set is final.
+        let raw: Vec<i64> = sqlx::query_scalar(
+            "SELECT id FROM volumes WHERE connection_id = $1 AND mode = 'raw' ORDER BY id",
+        )
+        .bind(id)
+        .fetch_all(&mut *tx)
+        .await?;
+        if raw != locked_raw {
+            return Err(conflict(
+                "the connection's storage keeps changing; try again",
+            ));
+        }
     }
     let volumes: Vec<(String, String)> =
         sqlx::query_as("SELECT base_path, mode FROM volumes WHERE connection_id = $1")

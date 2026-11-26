@@ -148,6 +148,9 @@ pub struct TrashListBody {
 #[derive(Serialize, ToSchema)]
 pub struct PurgedBody {
     pub purged: i64,
+    /// Items that could not be removed now (their storage is offline);
+    /// they stay in the trash.
+    pub failed: i64,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -366,7 +369,7 @@ fn restore_trash_item() {}
     (status = 200, body = EmptyBody), (status = 404, body = ErrorBody), (status = 503, body = ErrorBody)))]
 fn purge_trash_item() {}
 #[utoipa::path(post, path = "/api/trash/empty", tag = "trash", responses(
-    (status = 200, body = PurgedBody), (status = 409, description = "Some items could not be purged", body = ErrorBody)))]
+    (status = 200, body = PurgedBody), (status = 409, body = ErrorBody)))]
 fn empty_trash() {}
 #[utoipa::path(get, path = "/api/search", tag = "files",
     params(("q" = String, Query), ("limit" = Option<i64>, Query)), responses((status = 200, body = SearchBody)))]

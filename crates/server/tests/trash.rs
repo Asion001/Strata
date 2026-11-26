@@ -666,10 +666,14 @@ async fn share_links_follow_a_restored_item() {
     assert_eq!(anon.get(&link(&f)).await.0, StatusCode::OK);
     assert_eq!(anon.get(&link(&d)).await.0, StatusCode::OK);
 
-    // Restored under another name: the links stay dead.
+    // Restored under another name: a link names a path, so it stays dead
+    // (never pointing at the new file that took the name).
     delete(&t, &["Pub/doc.txt"]).await;
     t.upload("Pub/doc.txt", b"someone else's").await;
-    restore(&t, id_of(&items(&t).await, "Pub/doc.txt")).await;
+    assert_eq!(
+        restore(&t, id_of(&items(&t).await, "Pub/doc.txt")).await,
+        "Pub/doc (restored).txt"
+    );
     assert_eq!(anon.get(&link(&f)).await.0, StatusCode::NOT_FOUND);
 
     // Raw: a link to the trashed item itself comes back.
@@ -1022,4 +1026,24 @@ async fn restoring_a_vanished_raw_item_makes_no_folders() {
     assert!(!disk.join("sub").exists(), "no parent folder was made");
     assert!(!disk.join(format!(".strata-trash/{id}")).exists());
     assert!(items(&t).await.is_empty());
+}
+
+#[tokio::test]
+async fn trash_pages_say_when_there_is_more() {
+    let Some(t) = app().await else { return };
+    for n in ["a.txt", "b.txt", "c.txt"] {
+        t.upload(n, b"x").await;
+    }
+    delete(&t, &["a.txt", "b.txt", "c.txt"]).await;
+    let (_, v) = t.get("/api/trash?limit=3").await;
+    assert_eq!(v["items"].as_array().unwrap().len(), 3);
+    assert_eq!(v["more"], false, "a full last page has nothing after it");
+    let (_, v) = t.get("/api/trash?limit=2").await;
+    assert_eq!(v["more"], true);
+    let last = v["items"][1]["id"].as_i64().unwrap();
+    let (_, v) = t.get(&format!("/api/trash?limit=2&before={last}")).await;
+    assert_eq!(v["items"].as_array().unwrap().len(), 1);
+    assert_eq!(v["more"], false);
+    let v = t.ok("POST", "/api/trash/empty", json!({})).await;
+    assert_eq!(v, json!({"purged": 3, "failed": 0}));
 }

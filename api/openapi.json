@@ -785,13 +785,19 @@
       },
       "PurgedBody": {
         "properties": {
+          "failed": {
+            "description": "Items that could not be removed now (their storage is offline);\nthey stay in the trash.",
+            "format": "int64",
+            "type": "integer"
+          },
           "purged": {
             "format": "int64",
             "type": "integer"
           }
         },
         "required": [
-          "purged"
+          "purged",
+          "failed"
         ],
         "type": "object"
       },
@@ -6183,7 +6189,7 @@
                 }
               }
             },
-            "description": "Some items could not be purged"
+            "description": ""
           },
           "500": {
             "content": {
