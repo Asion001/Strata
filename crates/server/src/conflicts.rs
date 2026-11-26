@@ -65,6 +65,15 @@ pub const STAGED_NAME: &str = r"^\.strata-[0-9a-f]{18}$";
 /// The same, as any part of a path (what is inside one too).
 pub const STAGED_PART: &str = r"(^|/)\.strata-[0-9a-f]{18}(/|$)";
 
+/// Whether any part of `path` is a staged item's name (see `STAGED_NAME`).
+pub fn is_staged(path: &str) -> bool {
+    path.split('/').any(|c| {
+        c.strip_prefix(".strata-").is_some_and(|t| {
+            t.len() == 18 && t.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        })
+    })
+}
+
 /// A name claimed for an operation in flight (released when dropped).
 pub struct Claim {
     st: AppState,
@@ -423,7 +432,11 @@ where
         .execute(&st.db)
         .await;
     let gone = match marked {
-        Ok(_) => vfs::delete(st, user_id, to, true).await,
+        // (Gone already, deleted meanwhile: the name is free all the same.)
+        Ok(_) => match vfs::delete(st, user_id, to, true).await {
+            Err(ApiError::NotFound) => Ok(()),
+            r => r.map(|_| ()),
+        },
         Err(e) => Err(e.into()),
     };
     if let Err(e) = gone {

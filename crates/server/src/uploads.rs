@@ -51,7 +51,7 @@ pub struct CreateReq {
     /// a file of that name), fail (409 `exists`, so the client can ask), or
     /// keep both. Checked here and again at commit (which can answer anew).
     #[serde(default = "saves_over")]
-    #[schema(default = "replace")]
+    #[schema(default = "replace", required = false)]
     pub on_conflict: OnConflict,
 }
 
@@ -296,10 +296,17 @@ pub async fn commit(
     State(st): State<AppState>,
     AuthUser(u): AuthUser,
     Path(id): Path<String>,
-    body: Option<Json<CommitReq>>,
+    body: Bytes,
 ) -> ApiResult<Json<serde_json::Value>> {
-    // (No JSON body, or `{}`: as asked at create.)
-    let req = body.map(|Json(r)| r).unwrap_or_default();
+    // (No body, or `{}`: as asked at create. A body is JSON, checked as the
+    // `Json` extractor checks any other.)
+    let req = if body.iter().all(u8::is_ascii_whitespace) {
+        CommitReq::default()
+    } else {
+        Json::<CommitReq>::from_bytes(&body)
+            .map_err(|e| ApiError::BadRequest(e.body_text()))?
+            .0
+    };
     load(&st, u.id, &id).await?;
     // One commit of an upload at a time: a retry sent while the first is
     // still writing waits for it (and then gets the same answer).

@@ -206,11 +206,12 @@ async fn uploads_ask_at_create_and_again_at_commit() {
     for (body, json, want) in [
         (&b""[..], false, StatusCode::CONFLICT),
         (&b"\n"[..], false, StatusCode::CONFLICT),
+        (&b""[..], true, StatusCode::CONFLICT),
         (&b"\xff\xfe"[..], true, StatusCode::BAD_REQUEST),
         (
             &b"{\"on_conflict\": \"sideways\"}"[..],
             true,
-            StatusCode::UNPROCESSABLE_ENTITY,
+            StatusCode::BAD_REQUEST,
         ),
     ] {
         let headers: &[(&str, &str)] = if json { &json_type } else { &[] };
@@ -729,4 +730,39 @@ async fn what_a_replace_writes_beside_is_not_listed() {
     // A folder holding only that is still a folder (empty).
     t.upload("q/.strata-0123456789abcdef01", b"staged").await;
     assert!(t.names("q").await.is_empty());
+}
+
+#[tokio::test]
+async fn an_old_item_deleted_meanwhile_still_gets_replaced() {
+    use strata_server::conflicts::{OnConflict, Source, write_at};
+    let Some(t) = app().await else { return };
+    let uid: i64 = sqlx::query_scalar("SELECT id FROM users WHERE username = 'admin'")
+        .fetch_one(&t.st.db)
+        .await
+        .unwrap();
+    t.upload("v/src.txt", b"new").await;
+    t.upload("v/a.txt", b"old").await;
+    let st = t.st.clone();
+    let path = write_at(
+        &t.st,
+        uid,
+        "v/a.txt",
+        false,
+        OnConflict::Replace,
+        Source::Copy("v/src.txt"),
+        |at, _| {
+            let st = st.clone();
+            async move {
+                strata_server::vfs::copy_path(&st, uid, "v/src.txt", &at).await?;
+                // (Someone deletes the old one while this one is written.)
+                strata_server::vfs::delete(&st, uid, "v/a.txt", false).await?;
+                Ok(())
+            }
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(path, "v/a.txt");
+    assert_eq!(t.download("v/a.txt").await, b"new");
+    assert_eq!(t.names("v").await, vec!["a.txt", "src.txt"]);
 }
