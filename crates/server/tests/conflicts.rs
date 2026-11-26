@@ -465,11 +465,11 @@ async fn replace_keeps_share_links_and_kinds() {
     assert_eq!(share_node().await.unwrap(), None);
     assert_eq!(trash_names(&t).await, vec!["b/f.txt"]);
 
-    // Keep both counts on from a number already there.
+    // Keep both leaves a number already there alone (it may be the user's).
     t.upload("n/a (2).txt", b"2").await;
     let (s, v) = op(&t, "copy", "n/a (2).txt", "n/a (2).txt", "rename").await;
     assert_eq!(s, StatusCode::OK, "{v}");
-    assert_eq!(v["path"], "n/a (3).txt");
+    assert_eq!(v["path"], "n/a (2) (2).txt");
 
     // A file never replaces a folder, nor a folder a file.
     t.upload("c/x/inner.txt", b"i").await;
@@ -595,6 +595,9 @@ async fn a_commit_waits_only_so_long_and_keeps_the_choice_from_create() {
     drop(first);
     // No answer at commit: keep both, as asked at create.
     let v = t.ok("POST", &commit, json!({})).await;
+    assert_eq!(v["path"], "k (2).txt");
+    // Its status says where it landed.
+    let (_, v) = t.get(&format!("/api/uploads/{id}")).await;
     assert_eq!(v["path"], "k (2).txt");
     assert_eq!(t.download("k.txt").await, b"there");
 }

@@ -125,20 +125,13 @@ pub fn claim_key(st: &AppState, key: String) -> Option<Claim> {
 }
 
 /// "a.txt" → "a (2).txt"; a folder or a leading-dot name keeps its whole
-/// name before the number ("v1.2 (2)", ".env (2)"). A number already there
-/// is replaced, not added to ("a (2).txt" → "a (3).txt").
+/// name before the number ("v1.2 (2)", ".env (2)"). A number already in the
+/// name stays: it may be the user's own ("Report (2019) (2).pdf").
 pub fn numbered(name: &str, is_dir: bool, n: u32) -> String {
     let (stem, ext) = match name.rfind('.') {
         Some(i) if i > 0 && !is_dir => name.split_at(i),
         _ => (name, ""),
     };
-    let stem = stem
-        .strip_suffix(')')
-        .and_then(|s| s.rsplit_once(" ("))
-        .filter(|(base, num)| {
-            !base.is_empty() && !num.is_empty() && num.bytes().all(|b| b.is_ascii_digit())
-        })
-        .map_or(stem, |(base, _)| base);
     format!("{stem} ({n}){ext}")
 }
 
@@ -414,12 +407,17 @@ where
         }
         return Err(e);
     }
-    // (Whole now: if a crash comes next, a copy can still take the name.)
-    sqlx::query("UPDATE staged_items SET written = TRUE WHERE path = $2 AND user_id = $1")
-        .bind(user_id)
-        .bind(staged)
-        .execute(&st.db)
-        .await?;
+    // (Whole now: if a crash comes next, a copy can still take the name.
+    // Only a copy needs to know; nothing stops here for it.)
+    if let Err(e) =
+        sqlx::query("UPDATE staged_items SET written = TRUE WHERE path = $2 AND user_id = $1")
+            .bind(user_id)
+            .bind(staged)
+            .execute(&st.db)
+            .await
+    {
+        tracing::warn!("staged item {staged} not marked whole: {e}");
+    }
     // Only now does the old one go (to the trash where there is one). Its
     // share links stay with it: a different item at the same path never
     // inherits them.
@@ -560,10 +558,10 @@ mod tests {
         assert_eq!(numbered("v1.2", true, 2), "v1.2 (2)");
         assert_eq!(numbered(".env", false, 2), ".env (2)");
         assert_eq!(numbered("noext", false, 4), "noext (4)");
-        assert_eq!(numbered("a (2).txt", false, 3), "a (3).txt");
-        assert_eq!(numbered("photos (12)", true, 2), "photos (2)");
-        assert_eq!(numbered("(2)", true, 3), "(2) (3)");
-        assert_eq!(numbered("a (x).txt", false, 2), "a (x) (2).txt");
-        assert_eq!(numbered("a ().txt", false, 2), "a () (2).txt");
+        assert_eq!(
+            numbered("Report (2019).pdf", false, 2),
+            "Report (2019) (2).pdf"
+        );
+        assert_eq!(numbered("photos (12)", true, 2), "photos (12) (2)");
     }
 }

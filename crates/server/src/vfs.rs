@@ -275,7 +275,7 @@ pub async fn list(st: &AppState, user_id: i64, path: &str) -> ApiResult<(Mount, 
          UNION ALL
          SELECT x.name, TRUE, 0, x.created_at, NULL, x.id, c.health = 'offline'
          FROM mounts x JOIN volumes v ON v.id = x.volume_id JOIN connections c ON c.id = v.connection_id
-         WHERE x.owner_id = $3 AND x.parent_path = $4
+         WHERE x.owner_id = $3 AND x.parent_path = $4 AND x.name !~ $5
          ORDER BY 2 DESC, 1",
     )
     .bind(m.volume_id)

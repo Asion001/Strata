@@ -1,11 +1,11 @@
 -- Name conflicts (move, copy and uploads onto a taken name).
 
 -- What to do when the name is taken, as asked at create (a commit can
--- answer anew), and where a committed upload landed (a commit sent again
--- gets the same answer, never a second copy).
+-- answer anew), and the answer a commit gave (a commit sent again gets the
+-- same answer, never a second copy).
 ALTER TABLE uploads
-    ADD COLUMN on_conflict    TEXT NOT NULL DEFAULT 'replace',
-    ADD COLUMN committed_path TEXT;
+    ADD COLUMN on_conflict TEXT NOT NULL DEFAULT 'replace',
+    ADD COLUMN committed   JSONB;
 
 -- An item a replace is writing beside the old one, under a hidden name,
 -- until it takes the old one's name. A row left by a crash is settled by

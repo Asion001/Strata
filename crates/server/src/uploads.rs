@@ -71,8 +71,7 @@ pub struct CommitReq {
 struct Upload {
     path: String,
     on_conflict: String,
-    committed_path: Option<String>,
-    created_at: DateTime<Utc>,
+    committed: Option<sqlx::types::Json<serde_json::Value>>,
     volume_id: i64,
     size: i64,
     chunks: Vec<Vec<u8>>,
@@ -81,7 +80,7 @@ struct Upload {
 }
 
 async fn load(st: &AppState, user_id: i64, id: &str) -> ApiResult<Upload> {
-    sqlx::query_as("SELECT path, on_conflict, committed_path, created_at, volume_id, size, chunks, chunk_sizes, mtime FROM uploads WHERE id = $1 AND user_id = $2")
+    sqlx::query_as("SELECT path, on_conflict, committed, volume_id, size, chunks, chunk_sizes, mtime FROM uploads WHERE id = $1 AND user_id = $2")
         .bind(id)
         .bind(user_id)
         .fetch_optional(&st.db)
@@ -215,8 +214,14 @@ pub async fn status(
     Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let up = load(&st, u.id, &id).await?;
+    // (Committed: where it landed.)
+    let path = up
+        .committed
+        .as_ref()
+        .and_then(|c| c["path"].as_str())
+        .unwrap_or(&up.path);
     Ok(Json(
-        json!({ "id": id, "path": up.path, "size": up.size, "missing": missing(&st, u.id, &id, &up).await? }),
+        json!({ "id": id, "path": path, "size": up.size, "missing": missing(&st, u.id, &id, &up).await? }),
     ))
 }
 
@@ -325,18 +330,11 @@ async fn commit_detached(
     req: CommitReq,
 ) -> ApiResult<Json<serde_json::Value>> {
     let up = load(&st, uid, &id).await?;
-    if let Some(path) = up.committed_path {
-        // Committed already (its answer was lost): the same answer, from
-        // what was uploaded if the file has moved on since. (Never "not
-        // found", which would have the client upload it again.)
-        if let Ok(answer) = committed(&st, uid, &path).await {
-            return Ok(answer);
-        }
-        let name = paths::split(&path).map_or("", |(_, n)| n).to_string();
-        return Ok(Json(json!({
-            "path": path, "name": name, "size": up.size,
-            "mtime": up.mtime.unwrap_or(up.created_at), "etag": null
-        })));
+    if let Some(answer) = up.committed {
+        // Committed already (its answer was lost): the same answer, about
+        // what was uploaded, whatever happened to the file since. (Never
+        // "not found", which would have the client upload it again.)
+        return Ok(Json(answer.0));
     }
     let mode = req
         .on_conflict
@@ -413,30 +411,24 @@ async fn commit_detached(
         },
     )
     .await?;
+    let (m, rel) = mounts::resolve(&st, uid, &path).await?;
+    let node = vfs::stat(&st, &m, &rel).await?;
+    let answer = json!({ "path": path, "name": node.name, "size": node.size, "mtime": node.mtime, "etag": node.etag });
     // Kept (without its chunks) until the uploads expire, so a commit sent
-    // again learns where it landed instead of writing a second copy. (The
-    // file is saved either way: a failure here doesn't make this one fail.)
+    // again gets this answer instead of writing a second copy. (The file is
+    // saved either way: a failure here doesn't make this one fail.)
     if let Err(e) = sqlx::query(
-        "UPDATE uploads SET committed_path = $2, chunks = '{}', chunk_sizes = '{}' WHERE id = $1",
+        "UPDATE uploads SET committed = $2, chunks = '{}', chunk_sizes = '{}' WHERE id = $1",
     )
     .bind(&id)
-    .bind(&path)
+    .bind(sqlx::types::Json(&answer))
     .execute(&st.db)
     .await
     {
         tracing::warn!("upload {id} saved at {path}, but not recorded: {e}");
     }
     let _ = tokio::fs::remove_dir_all(staging_dir(&st, &id)).await;
-    committed(&st, uid, &path).await
-}
-
-/// The answer to a commit that landed at `path`.
-async fn committed(st: &AppState, uid: i64, path: &str) -> ApiResult<Json<serde_json::Value>> {
-    let (m, rel) = mounts::resolve(st, uid, path).await?;
-    let node = vfs::stat(st, &m, &rel).await?;
-    Ok(Json(
-        json!({ "path": path, "name": node.name, "size": node.size, "mtime": node.mtime, "etag": node.etag }),
-    ))
+    Ok(Json(answer))
 }
 
 pub async fn cancel(
