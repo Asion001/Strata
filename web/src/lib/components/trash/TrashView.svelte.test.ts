@@ -123,6 +123,14 @@ describe('Deleted files page', () => {
     comp = null;
     await show();
     expect(target.querySelector('[data-testid=trash-off]')).toBeTruthy();
+    // (Turned off with items left: they stay listed, to be restored.)
+    unmount(comp!);
+    trash = [item(1, 'notes.txt')];
+    comp = null;
+    await show();
+    expect(target.querySelector('[data-testid=trash-off]')).toBeNull();
+    expect(target.querySelector('[data-testid=retention]')!.textContent).toContain('turned off');
+    expect(target.textContent).toContain('notes.txt');
   });
 
   it('shows a load error', async () => {

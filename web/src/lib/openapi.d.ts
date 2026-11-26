@@ -830,7 +830,11 @@ export interface components {
         DeletedBody: {
             /** Format: int64 */
             deleted: number;
-            /** @description Their trash ids (for an undo), in the order of `paths`. */
+            /**
+             * @description The trash ids of the items that went to the trash (for an undo), in
+             *     request order. Items deleted for good have none, so this can be
+             *     shorter than `paths`.
+             */
             trash_ids: number[];
             /**
              * Format: int64

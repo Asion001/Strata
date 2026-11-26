@@ -121,6 +121,8 @@
       <h1 class={h1Class}>Deleted files</h1>
       {#if days}
         <p class={mutedClass} data-testid="retention">Items are removed for good after {days} days.</p>
+      {:else if days === 0 && items?.length}
+        <p class={mutedClass} data-testid="retention">Deleted files are turned off on this server. These items can still be restored until they expire.</p>
       {/if}
     </div>
     {#if items?.length}
@@ -141,7 +143,7 @@
     <p class="p-4 text-destructive" role="alert">{error}</p>
   {:else if items === null}
     <p class="p-4 {mutedClass}">Loading…</p>
-  {:else if days === 0}
+  {:else if days === 0 && !items.length}
     <p class="p-4 {mutedClass}" data-testid="trash-off">Deleted files are turned off on this server: deleting removes files for good.</p>
   {:else if !items.length}
     <div class="px-4 py-10 text-center" data-testid="trash-empty">

@@ -129,21 +129,11 @@ describe('restoring', () => {
 
   it('Undo restores exactly the items it was made for', async () => {
     handler = (_m, url) => ({ path: url.includes('/7/') ? 'x/a.txt' : 'x/b.txt' });
-    const after = vi.fn();
-    const a = trash.undoAction(
-      [
-        { id: 7, path: 'x/a.txt' },
-        { id: 8, path: 'x/b.txt' }
-      ],
-      after
-    );
-    expect(a.label).toBe('Undo');
-    a.run();
-    await vi.waitFor(() => expect(after).toHaveBeenCalled());
+    await trash.undo([
+      { id: 7, path: 'x/a.txt' },
+      { id: 8, path: 'x/b.txt' }
+    ]);
     expect(calls.map((c) => c.url)).toEqual(['/api/trash/7/restore', '/api/trash/8/restore']);
     expect(toasts.list.map((t) => t.text)).toEqual(['2 items restored.']);
-    // (Without a follow-up too.)
-    trash.undoAction([{ id: 7, path: 'x/a.txt' }]).run();
-    await vi.waitFor(() => expect(toasts.list).toHaveLength(2));
   });
 });

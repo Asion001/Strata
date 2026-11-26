@@ -19,7 +19,10 @@ export async function listTrash(): Promise<{ days: number; items: TrashItem[] }>
     const page = await api<Schemas['TrashListBody']>('GET', `/api/trash?limit=1000${before ? `&before=${before}` : ''}`);
     trashInfo.days = page.retention_days;
     items.push(...page.items);
-    if (!page.more || !page.items.length) return { days: page.retention_days, items };
+    if (!page.more || !page.items.length) {
+      trashInfo.any = items.length > 0;
+      return { days: page.retention_days, items };
+    }
     before = page.items[page.items.length - 1].id;
   }
 }
@@ -59,14 +62,7 @@ export function reportRestore(r: RestoreResult) {
 }
 
 /** Undo for a delete: restores exactly these trash items (by id, so a
- *  folder opened since doesn't matter). */
-export function undoAction(items: { id: number; path: string }[], after?: () => void): ToastAction {
-  return {
-    label: 'Undo',
-    run: () =>
-      void restoreItems(items).then((r) => {
-        reportRestore(r);
-        after?.();
-      })
-  };
+ *  folder opened since doesn't matter), and says how it went. */
+export async function undo(items: { id: number; path: string }[]): Promise<void> {
+  reportRestore(await restoreItems(items));
 }

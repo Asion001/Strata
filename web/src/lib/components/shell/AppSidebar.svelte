@@ -8,10 +8,10 @@
   import SearchIcon from '@lucide/svelte/icons/search';
   import { openPalette } from '$lib/palette.svelte';
   import { activeMount, folderHref, isActive, kindIcon, mainNav, manageNav, sidebarMounts, visibleNav } from './nav';
-  import { trashInfo } from '$lib/trash-info.svelte';
+  import { trashShown } from '$lib/trash-info.svelte';
 
   let { class: className = '' }: { class?: string } = $props();
-  const who = $derived({ admin: !!session.user?.is_admin, trash: (trashInfo.days ?? 0) > 0 });
+  const who = $derived({ admin: !!session.user?.is_admin, trash: trashShown() });
 
   const current = $derived(page.url.pathname === '/' ? (page.url.searchParams.get('p') ?? '') : null);
   const shown = $derived(sidebarMounts(mounts.list));

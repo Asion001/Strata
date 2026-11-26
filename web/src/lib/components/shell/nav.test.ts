@@ -56,5 +56,12 @@ describe('visibleNav', () => {
     expect(labels(visibleNav(mainNav, { admin: false, trash: false }))).not.toContain('Deleted files');
     expect(labels(visibleNav(manageNav, { admin: false, trash: true }))).not.toContain('Users');
     expect(labels(visibleNav(manageNav, { admin: true, trash: false }))).toContain('Users');
+    const { trashInfo, trashShown } = await import('$lib/trash-info.svelte');
+    // Unknown yet: shown. Known off: hidden, unless items are left in it.
+    expect(trashShown()).toBe(true);
+    trashInfo.days = 0;
+    expect(trashShown()).toBe(false);
+    trashInfo.any = true;
+    expect(trashShown()).toBe(true);
   });
 });

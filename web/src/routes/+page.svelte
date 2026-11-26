@@ -339,7 +339,7 @@
   /** Runs `fn` for each item in turn; one failure doesn't stop the rest.
    *  Says what failed, then refreshes. */
   const SKIPPED = Symbol('skipped');
-  async function each(items: Entry[], verb: string, fn: (e: Entry) => Promise<unknown>, fromSelection = true, action?: () => ToastAction | undefined) {
+  async function each(items: Entry[], verb: string, fn: (e: Entry) => Promise<unknown>, fromSelection = true, action?: () => ToastAction | undefined, doneText?: (done: Entry[]) => string) {
     const dir = listedPath;
     const failed: string[] = [];
     const done: Entry[] = [];
@@ -362,7 +362,7 @@
     const ms = act ? 10_000 : undefined;
     if (failed.length === 1) toast(`Couldn't ${verb} “${failed[0]}”: ${lastError}`, 'error', ms, act);
     else if (failed.length) toast(`Couldn't ${verb} ${failed.length} items (${failed.slice(0, 3).join(', ')}${failed.length > 3 ? ', …' : ''}). ${lastError}`, 'error', ms, act);
-    else if (done.length) toast(`${names(done)} ${verb === 'delete' ? (act ? 'moved to Deleted files' : 'deleted') : verb === 'move' ? 'moved' : 'copied'}.`, 'success', ms, act);
+    else if (done.length) toast(doneText?.(done) ?? `${names(done)} ${verb === 'delete' ? 'deleted' : verb === 'move' ? 'moved' : 'copied'}.`, 'success', ms, act);
     await load();
     reloadMounts();
     // What failed stays selected for a retry, if the user is still here.
@@ -455,9 +455,32 @@
         return r;
       },
       fromSelection,
-      // (Undo's code loads when it is pressed.)
-      () => (trashed.length ? { label: 'Undo', run: () => void import('$lib/trash.svelte').then((m) => m.undoAction(trashed, () => void load()).run()) } : undefined)
+      () => (trashed.length ? { label: 'Undo', run: () => void undo(trashed) } : undefined),
+      // (Some may have been deleted for good: the trash couldn't take them.)
+      (done) =>
+        !trashed.length
+          ? `${names(done)} deleted.`
+          : trashed.length === done.length
+            ? `${names(done)} moved to Deleted files.`
+            : `${names(done)} deleted: ${trashed.length} moved to Deleted files, ${done.length - trashed.length} permanently.`
     );
+  }
+
+  /** Undo for a delete: brings back exactly what it moved to the trash.
+   *  (Its code loads when it is pressed.) */
+  async function undo(items: { id: number; path: string }[]) {
+    const left = items.length === 1 ? 'It is still in Deleted files.' : 'They are still in Deleted files.';
+    if (busy) return void toast(`Couldn't undo while another action runs. ${left}`, 'info', 6000);
+    busy = true;
+    try {
+      await (await import('$lib/trash.svelte')).undo(items);
+    } catch (e) {
+      toast(`Couldn't undo: ${e instanceof Error ? e.message : String(e)}. ${left}`, 'error');
+    } finally {
+      busy = false;
+    }
+    await load();
+    reloadMounts();
   }
 
   /** Delete one path, to the trash where there is one (its trash id, if it
