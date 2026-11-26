@@ -33,13 +33,14 @@ export function canOpen(target: string, rules: PickRules) {
   return !(rules.exclude ?? []).some((d) => inside(t, clean(d)));
 }
 
-const KEY = 'strata.recentFolders';
+/** (Cleared on sign-out, in drafts.ts: the paths are private.) */
+export const RECENT_KEY = 'strata-recent-folders';
 const KEEP = 5;
 
 /** The last few folders picked, newest first (this browser only). */
 export function recent(): string[] {
   try {
-    const v = JSON.parse(localStorage.getItem(KEY) ?? '[]');
+    const v = JSON.parse(localStorage.getItem(RECENT_KEY) ?? '[]');
     return Array.isArray(v) ? v.filter((p): p is string => typeof p === 'string').slice(0, KEEP) : [];
   } catch {
     return [];
@@ -49,7 +50,7 @@ export function recent(): string[] {
 export function remember(path: string) {
   const p = clean(path);
   try {
-    localStorage.setItem(KEY, JSON.stringify([p, ...recent().filter((r) => r !== p)].slice(0, KEEP)));
+    localStorage.setItem(RECENT_KEY, JSON.stringify([p, ...recent().filter((r) => r !== p)].slice(0, KEEP)));
   } catch {
     // (Storage blocked or full: recents are only a convenience.)
   }

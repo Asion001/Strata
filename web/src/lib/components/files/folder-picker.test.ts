@@ -37,11 +37,11 @@ describe('folder picker rules', () => {
   });
 
   it('survives storage that is blocked or holds junk', () => {
-    localStorage.setItem('strata.recentFolders', '{"not":"a list"}');
+    localStorage.setItem('strata-recent-folders', '{"not":"a list"}');
     expect(recent()).toEqual([]);
-    localStorage.setItem('strata.recentFolders', '["a", 3, null]');
+    localStorage.setItem('strata-recent-folders', '["a", 3, null]');
     expect(recent()).toEqual(['a']);
-    localStorage.setItem('strata.recentFolders', 'not json');
+    localStorage.setItem('strata-recent-folders', 'not json');
     expect(recent()).toEqual([]);
     const set = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
       throw new Error('quota');

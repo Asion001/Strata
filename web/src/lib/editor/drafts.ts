@@ -206,6 +206,8 @@ export function markSignedOut() {
     localStorage.removeItem(AUTH_KEY);
     localStorage.removeItem(SEEN_KEY);
     localStorage.removeItem(ALIVE_KEY);
+    // Recent Move/Copy destinations (folder-picker.ts) name private paths.
+    localStorage.removeItem('strata-recent-folders');
   } catch {}
   // Playback positions name private paths too.
   clearPositions();

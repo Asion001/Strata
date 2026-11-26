@@ -3,7 +3,7 @@
   // <dialog> opened with showModal(): it sits above everything (viewer and
   // editor included), traps focus, makes the page behind inert, and gives
   // focus back to where it was when it closes.
-  import { cancelRequest, dialogs, type Request } from '$lib/dialogs.svelte';
+  import { cancelRequest, dialogs, native, type Request } from '$lib/dialogs.svelte';
   import Button from './button/button.svelte';
   import Input from './input/input.svelte';
   import CopyIcon from '@lucide/svelte/icons/copy';
@@ -21,15 +21,21 @@
   let opener: HTMLElement | null = null;
   // The folder browser loads on first use.
   let Picker = $state<typeof import('$lib/components/files/FolderPicker.svelte').default>();
+  let pickerLoading = false;
   $effect(() => {
-    if (req?.kind === 'folder' && !Picker)
-      import('$lib/components/files/FolderPicker.svelte').then(
-        (m) => (Picker = m.default),
-        (err) => {
-          console.error('could not load the folder picker', err);
-          cancelRequest(req);
-        }
-      );
+    const r = req;
+    if (r?.kind !== 'folder' || Picker || pickerLoading) return;
+    pickerLoading = true;
+    import('$lib/components/files/FolderPicker.svelte').then(
+      (m) => (Picker = m.default),
+      (err) => {
+        // Can't load (offline after an update): the browser's prompt asks
+        // instead, for each folder request waiting. Try again next time.
+        console.error('could not load the folder picker', err);
+        pickerLoading = false;
+        for (const q of dialogs.queue.filter((q) => q.kind === 'folder')) native(q);
+      }
+    );
   });
 
   // Fresh field values before the new request renders.

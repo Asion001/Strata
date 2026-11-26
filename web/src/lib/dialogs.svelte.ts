@@ -56,14 +56,17 @@ function loadHost() {
   );
 }
 
-function native(r: Request) {
+/** Answers a request with the browser's own dialogs. */
+export function native(r: Request) {
   const text = r.opts.body ? `${r.opts.title}\n\n${r.opts.body}` : r.opts.title;
   if (r.kind === 'confirm') r.done(window.confirm(text));
   else if (r.kind === 'folder') {
     // (The rules stay with the picker, out of the startup bundle: the
     // server refuses a move into itself, and the same folder does nothing.)
     const v = window.prompt(`${text}\n\nTo folder (full path, empty for Home)`, r.opts.start);
-    r.done(v === null ? null : v.trim().replace(/^\/+|\/+$/g, ''));
+    const to = v?.trim().replace(/^\/+|\/+$/g, '') ?? null;
+    if (to !== null && to === r.opts.from) window.alert('Pick a different folder.');
+    r.done(to === r.opts.from ? null : to);
   } else if (r.kind === 'alert') {
     window.alert(r.opts.copy ? `${text}\n\n${r.opts.copy}` : text);
     r.done();

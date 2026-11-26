@@ -131,6 +131,10 @@ describe('FolderPicker', () => {
     button('New folder').click();
     flushSync();
     const field = target.querySelector<HTMLInputElement>('input[aria-label="New folder name"]')!;
+    // ArrowDown stays in the field (it isn't the filter).
+    field.focus();
+    key(field, 'ArrowDown');
+    expect(document.activeElement).toBe(field);
     // Escape closes the field only.
     key(field, 'Escape');
     flushSync();
@@ -148,6 +152,27 @@ describe('FolderPicker', () => {
     expect(calls.find((c) => c.method === 'POST')!.body).toEqual({ path: 'docs/2026' });
     expect(target.querySelector('[aria-current]')!.textContent).toBe('2026');
     expect(button('Move here').disabled).toBe(false);
+  });
+
+  it('opens a new folder where it was made, even after moving on', async () => {
+    await open({ start: 'docs' });
+    let release!: () => void;
+    const slow = new Promise<void>((r) => (release = r));
+    const base = handler;
+    handler = (c) => (c.method === 'POST' ? slow.then(() => base(c)) : base(c));
+    button('New folder').click();
+    flushSync();
+    const field = target.querySelector<HTMLInputElement>('input[aria-label="New folder name"]')!;
+    field.value = 'x';
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    field.form!.requestSubmit();
+    button('Home').click();
+    await settle();
+    release();
+    await settle();
+    expect(calls.find((c) => c.method === 'POST')!.body).toEqual({ path: 'docs/x' });
+    expect([...target.querySelectorAll('nav button')].map((b) => b.textContent)).toEqual(['Home', 'docs', 'x']);
   });
 
   it('shows why a new folder failed, and keeps the field', async () => {
@@ -212,7 +237,7 @@ describe('FolderPicker', () => {
   });
 
   it('offers recent folders that are allowed here', async () => {
-    localStorage.setItem('strata.recentFolders', JSON.stringify(['docs/old', 'docs/new', '']));
+    localStorage.setItem('strata-recent-folders', JSON.stringify(['docs/old', 'docs/new', '']));
     await open({ start: 'docs', exclude: ['docs/old'] });
     const chips = [...target.querySelectorAll('[aria-label="Recent folders"] button')];
     expect(chips.map((c) => c.textContent!.trim())).toEqual(['new', 'Home']);
@@ -227,6 +252,7 @@ describe('FolderPicker', () => {
     expect(target.querySelector('[role="alert"]')!.textContent).toBe("Couldn't open this folder: Not found");
     expect(button('Move here').disabled).toBe(true);
     expect(button('New folder').disabled).toBe(true);
+    expect(status()).toBe('Pick another folder.');
 
     handler = ((base) => (c: Call) => ({ ...(base(c) as object), mount: mountInfo(true) }))(handler);
     button('Home').click();

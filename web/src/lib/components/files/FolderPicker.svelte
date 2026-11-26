@@ -35,7 +35,7 @@
   const byName = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
 
   let shown = $derived(filter ? folders.filter((f) => f.name.toLowerCase().includes(filter.trim().toLowerCase())) : folders);
-  let why = $derived(error ? error : mount?.offline ? 'This storage is offline.' : whyNot(path, opts));
+  let why = $derived(error ? 'Pick another folder.' : mount?.offline ? 'This storage is offline.' : whyNot(path, opts));
   const rowWhy = (e: Entry) => (e.offline ? 'This storage is offline.' : canOpen(join(listed, e.name), opts) ? null : whyNot(join(listed, e.name), opts));
 
   // Each listing supersedes the last: a slow answer for a folder already
@@ -88,11 +88,13 @@
   async function create() {
     const name = (naming ?? '').trim();
     if (!name || creating) return;
+    // (Where it was asked for, even if the user has moved on since.)
+    const made = join(path, name);
     creating = true;
     try {
-      await api('POST', '/api/files/mkdir', { path: join(path, name) });
+      await api('POST', '/api/files/mkdir', { path: made });
       naming = null;
-      await open(join(path, name));
+      await open(made);
     } catch (e) {
       // (Shown under the field; the listing stays.)
       createError = e instanceof Error ? e.message : String(e);
@@ -114,7 +116,7 @@
       e.preventDefault();
       all[Math.max(0, Math.min(all.length - 1, k))]?.focus();
     };
-    if (e.key === 'ArrowDown') go(i < 0 ? 0 : i + 1);
+    if (e.key === 'ArrowDown' && (i >= 0 || target === filterEl)) go(i + 1);
     else if (e.key === 'ArrowUp' && i >= 0) i === 0 ? (e.preventDefault(), filterEl?.focus()) : go(i - 1);
     else if (e.key === 'Home' && i >= 0) go(0);
     else if (e.key === 'End' && i >= 0) go(all.length - 1);

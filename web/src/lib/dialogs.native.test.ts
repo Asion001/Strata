@@ -24,6 +24,12 @@ describe('folder pick without the dialog component', () => {
     expect(prompt).toHaveBeenCalledWith(expect.stringContaining('Move'), 'a');
   });
 
+  it('refuses the folder the items are in', async () => {
+    const { alert } = stub('/a/');
+    expect(await pickFolder({ title: 'Move', start: 'a', from: 'a' })).toBeNull();
+    expect(alert).toHaveBeenCalledWith('Pick a different folder.');
+  });
+
   it('answers a cancel with null', async () => {
     stub(null);
     expect(await pickFolder({ title: 'Move', start: 'a' })).toBeNull();

@@ -35,7 +35,10 @@ describe('drafts', () => {
 
   it('a signed-out browser never recreates the wiped database', async () => {
     await saveDraft({ key: 'k', baseEtag: null, text: 'x', savedAt: 1 });
+    localStorage.setItem('strata-recent-folders', '["Medical/2026"]');
     markSignedOut();
+    // Recent Move/Copy folders are private paths too.
+    expect(localStorage.getItem('strata-recent-folders')).toBeNull();
     await clearAllDrafts();
     // a late writer from another tab
     await expect(saveDraft({ key: 'k', baseEtag: null, text: 'late', savedAt: 2 })).rejects.toBeTruthy();
