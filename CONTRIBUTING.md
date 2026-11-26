@@ -43,9 +43,11 @@ For UI work, `cd web && npm run dev` runs Vite with hot reload.
 | Web unit tests (Vitest)    | `cd web && npm test`                                          |
 | End-to-end (Playwright)    | `cd web && npm run e2e` (see `web/tests/e2e/README.md`)       |
 | Startup bundle size        | `cd web && npm run build && npm run size`                     |
+| Property tests             | part of `cargo test`; `PROPTEST_CASES` sets the case count (CI 256, nightly 10,000) |
+| API contract (Schemathesis)| `scripts/api-contract.sh` (Docker)                            |
+| Fuzzing (cargo-fuzz)       | `cd fuzz && cargo +nightly fuzz run -O <target>` (see `fuzz/README.md`) |
 
-More test kinds (property-based model tests, fuzzing, benchmarks, API
-contract tests) are planned; see the roadmap in `docs/DESIGN.md`.
+Benchmarks are planned; see the roadmap in `docs/DESIGN.md`.
 
 ### Coverage
 

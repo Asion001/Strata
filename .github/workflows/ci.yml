@@ -73,6 +73,58 @@ jobs:
         env:
           PROPTEST_CASES: "256"
 
+
+  # Each fuzz target for 2 minutes, in parallel (fuzz/README.md; nightly
+  # runs them for an hour). Postgres is for upload_protocol.
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [path_normalize, range_header, upload_protocol, token_decode, content_disposition]
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: strata
+          POSTGRES_PASSWORD: strata
+          POSTGRES_DB: strata
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U strata" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      STRATA_TEST_DATABASE_URL: postgres://strata:strata@localhost:5432/strata
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+          key: ${{ matrix.target }}
+      # (Its prebuilt binary is a musl build and would default to that
+      # target, which can't take the sanitizer: the target is given below.)
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      - name: Build
+        working-directory: fuzz
+        run: cargo +nightly fuzz build -O --target x86_64-unknown-linux-gnu ${{ matrix.target }}
+      - name: Fuzz for 2 minutes
+        working-directory: fuzz
+        run: cargo +nightly fuzz run -O --target x86_64-unknown-linux-gnu ${{ matrix.target }} corpus/${{ matrix.target }} -- -max_total_time=120 -print_final_stats=1
+      # A crash is saved in fuzz/artifacts/: reproduce it with
+      # `cargo +nightly fuzz run -O <target> <file>`.
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzz-${{ matrix.target }}
+          path: fuzz/artifacts
+          retention-days: 30
+
   web:
     runs-on: ubuntu-latest
     timeout-minutes: 15

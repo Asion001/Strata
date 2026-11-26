@@ -9,3 +9,4 @@
 
 Cargo.lock linguist-generated=true -diff
 web/package-lock.json linguist-generated=true -diff
+fuzz/corpus/** binary

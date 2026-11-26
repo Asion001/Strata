@@ -3,7 +3,7 @@
 // sign-out that leaves nothing behind.
 
 // (The queue, the cache and the chunker load on first use, not with the app.)
-import { META, SYNC_TAG, USER_KEY } from './keys';
+import { LAST_USER, META, SYNC_TAG, USER_KEY } from './keys';
 import { isActive, type Job } from './jobs';
 import type { Deps } from './queue';
 import { ApiError, type User } from '../api';
@@ -12,8 +12,6 @@ const Queue = () => import('./queue');
 const Recent = () => import('./recent');
 
 // ---------------------------------------------------------------- user
-
-const LAST_USER = 'strata-last-user';
 
 // (Pending until the first sign-in is recorded: the page can ask before
 // the layout has said who is signed in.)

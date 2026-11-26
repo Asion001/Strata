@@ -1,8 +1,8 @@
 name: Nightly
 
 # Slower checks that don't need to block every pull request: fresh advisory
-# scans (new advisories appear without code changes), a coverage report and
-# the property tests at 10,000 cases.
+# scans (new advisories appear without code changes), a coverage report,
+# the property tests at 10,000 cases and each fuzz target for an hour.
 
 on:
   schedule:
@@ -120,3 +120,48 @@ jobs:
           path: crates/*/proptest-regressions
           retention-days: 30
 
+  # Each fuzz target for an hour (2 minutes on every PR).
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [path_normalize, range_header, upload_protocol, token_decode, content_disposition]
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: strata
+          POSTGRES_PASSWORD: strata
+          POSTGRES_DB: strata
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U strata" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      STRATA_TEST_DATABASE_URL: postgres://strata:strata@localhost:5432/strata
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+          key: ${{ matrix.target }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      - name: Fuzz for an hour
+        working-directory: fuzz
+        run: cargo +nightly fuzz run -O --target x86_64-unknown-linux-gnu ${{ matrix.target }} corpus/${{ matrix.target }} -- -max_total_time=3600 -print_final_stats=1
+      # The crash, and the grown corpus to fold back in with `cargo fuzz cmin`.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fuzz-${{ matrix.target }}
+          path: |
+            fuzz/artifacts
+            fuzz/corpus/${{ matrix.target }}
+          retention-days: 14

@@ -4,10 +4,18 @@ import { MemoryCacheStorage } from '../testing/caches';
 import * as recent from './recent';
 import { MB } from './lru';
 import { tx } from './idb';
-import { META, USER_KEY } from './keys';
+import { LAST_USER, META, USER_KEY } from './keys';
 
 /** Who signed in on this device (as the app records it). */
-const signIn = async (user: number) => (await caches.open(META)).put(USER_KEY, new Response(String(user)));
+const signIn = async (user: number) => {
+  ls.set(LAST_USER, JSON.stringify({ id: user, username: 'u', is_admin: false }));
+  await (await caches.open(META)).put(USER_KEY, new Response(String(user)));
+};
+/** A sign-out, as the app does it: the last user first, then the record. */
+const signOut = async () => {
+  ls.delete(LAST_USER);
+  await caches.delete(META);
+};
 
 let store: MemoryCacheStorage;
 const ls = new Map<string, string>();
@@ -78,7 +86,8 @@ describe('recent files', () => {
     await recent.remember(1, 'big', '"v"', '/c/big');
     // (A size the server didn't declare is checked after reading.)
     served['/c/big2'] = { body: file(25), headers: { 'content-length': '' } };
-    vi.stubGlobal('localStorage', { getItem: () => null, setItem() {}, removeItem() {} });
+    // (No stored settings; still signed in.)
+    vi.stubGlobal('localStorage', { getItem: (k: string) => (k === LAST_USER ? (ls.get(k) ?? null) : null), setItem() {}, removeItem() {} });
     await recent.remember(1, 'big2', '"v"', '/c/big2');
     expect((await recent.list(1)).map((r) => r.path)).toEqual(['big2']);
   });
@@ -252,7 +261,7 @@ describe('recent files', () => {
     await recent.remember(1, 'a', '"v"', '/c/a');
     expect(await recent.pin(1, 'a', '"v"', '/c/a', true)).toBe('unreadable');
     expect(fetchMock).not.toHaveBeenCalled();
-    await store.delete(META);
+    await signOut();
     expect(await recent.signedInHere()).toBeNull();
   });
 
@@ -286,7 +295,7 @@ describe('recent files', () => {
 
   it('signed out while a file was being stored: nothing of it stays', async () => {
     vi.stubGlobal('fetch', async () => {
-      await caches.delete(META); // (the sign-out, in another tab, meanwhile)
+      await signOut(); // (in another tab, meanwhile)
       return new Response(file(4));
     });
     await recent.remember(1, 'a', '"v"', '/c/a');
@@ -294,7 +303,7 @@ describe('recent files', () => {
     expect(await recent.lookup(1, 'a')).toBeUndefined();
     await signIn(1);
     vi.stubGlobal('fetch', async () => {
-      await caches.delete(META);
+      await signOut();
       return new Response(file(4));
     });
     expect(await recent.pin(1, 'b', '"v"', '/c/b', true)).toBe('unreadable');
@@ -312,3 +321,33 @@ describe('recent files', () => {
   });
 });
 
+describe('who is signed in here', () => {
+  it('a page goes by localStorage, so a lost Cache Storage record costs no pin (issue #29)', async () => {
+    served['/c/a'] = { body: file(3) };
+    await signIn(1);
+    await caches.delete(META); // (what WebKit sometimes does to it)
+    expect(await recent.signedInHere()).toBe(1);
+    expect(await recent.pin(1, 'a', '"v"', '/c/a', true)).toBe(true);
+  });
+
+  it('the newest sign-in on the device wins, also over an older record', async () => {
+    await signIn(1);
+    ls.set(LAST_USER, JSON.stringify({ id: 2, username: 'b', is_admin: false }));
+    expect(await recent.signedInHere()).toBe(2);
+  });
+
+  it('nothing readable there is no one', async () => {
+    ls.set(LAST_USER, 'not json');
+    expect(await recent.signedInHere()).toBeNull();
+    ls.set(LAST_USER, JSON.stringify({ id: -1 }));
+    expect(await recent.signedInHere()).toBeNull();
+  });
+
+  it('the service worker, without localStorage, reads the record', async () => {
+    await signIn(3);
+    vi.stubGlobal('localStorage', undefined);
+    expect(await recent.signedInHere()).toBe(3);
+    await caches.delete(META);
+    expect(await recent.signedInHere()).toBeNull();
+  });
+});

@@ -5,12 +5,25 @@
 
 import { byUser, tx, wipe } from './idb';
 import { admits, evictions, limits, type Limits } from './lru';
-import { META, NETWORK_ONLY, USER_KEY } from './keys';
+import { LAST_USER, META, NETWORK_ONLY, USER_KEY } from './keys';
 
-/** Who signed in on this device last (written at sign-in). */
+/** Who signed in on this device last (written at sign-in, gone at
+ *  sign-out). A page reads localStorage: written at once at sign-in,
+ *  removed first at sign-out, shared by every tab. WebKit can silently
+ *  drop the Cache Storage record a page writes, so a "Keep offline" was
+ *  refused for the user who was signed in (issue #29). The service worker
+ *  has no localStorage and reads that record. */
 export async function signedInHere(): Promise<number | null> {
-  const r = await (await caches.open(META)).match(USER_KEY);
-  const n = r ? Number(await r.text()) : NaN;
+  let n = NaN;
+  if (typeof localStorage !== 'undefined') {
+    try {
+      n = Number(JSON.parse(localStorage.getItem(LAST_USER) ?? 'null')?.id);
+    } catch {}
+  } else {
+    // (`match` with a cache name never creates the cache, as `open` would.)
+    const r = await caches.match(USER_KEY, { cacheName: META });
+    n = r ? Number(await r.text()) : NaN;
+  }
   return Number.isInteger(n) && n > 0 ? n : null;
 }
 
