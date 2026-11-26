@@ -20,6 +20,12 @@ pub fn spawn(st: AppState) {
             if let Err(e) = crate::trash::reconcile(&st).await {
                 tracing::warn!("trash reconcile failed: {e}");
             }
+            // Replaces a crash interrupted (part of a move is shown again).
+            match crate::conflicts::reconcile(&st).await {
+                Ok(n) if n > 0 => tracing::info!("settled {n} interrupted replaces"),
+                Ok(_) => {}
+                Err(e) => tracing::warn!("replace reconcile failed: {e}"),
+            }
             match crate::trash::purge_expired(&st).await {
                 Ok(n) if n > 0 => tracing::info!("trash purged {n} expired items"),
                 Ok(_) => {}

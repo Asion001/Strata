@@ -733,7 +733,7 @@ export interface components {
             size: number;
         };
         CommitReq: {
-            on_conflict?: components["schemas"]["OnConflict"];
+            on_conflict?: null | components["schemas"]["OnConflict"];
         };
         CommittedBody: {
             etag: string | null;

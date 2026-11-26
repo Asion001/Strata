@@ -90,6 +90,7 @@ pub async fn app_with(tweak: impl FnOnce(&mut Config)) -> Option<TestApp> {
         raw_ttl_secs: 0,
         probe_secs: 60,
         trash_days: 30,
+        busy_wait_ms: 60_000,
     };
     let mut cfg = cfg;
     tweak(&mut cfg);

@@ -13,7 +13,10 @@
 //! it keeps its share links and history). Anything else is written beside
 //! the old item under a hidden temporary name, then the old one is deleted
 //! (to the trash where there is one, with its share links: a different item
-//! never inherits them), then the new one takes its name.
+//! never inherits them), then the new one takes its name. The hidden item is
+//! recorded until then, so one a crash leaves behind is settled by the
+//! background job (`reconcile`). Every step runs to its end even if the
+//! request goes away (`detached`).
 
 use serde::Deserialize;
 
@@ -37,6 +40,25 @@ pub enum OnConflict {
     Rename,
 }
 
+impl OnConflict {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OnConflict::Fail => "fail",
+            OnConflict::Replace => "replace",
+            OnConflict::Rename => "rename",
+        }
+    }
+
+    /// As stored by `as_str` (anything else: the default).
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "replace" => OnConflict::Replace,
+            "rename" => OnConflict::Rename,
+            _ => OnConflict::Fail,
+        }
+    }
+}
+
 /// A name claimed for an operation in flight (released when dropped).
 pub struct Claim {
     st: AppState,
@@ -52,12 +74,30 @@ impl Drop for Claim {
 /// Claim `rel` of `m`, keyed by where it is in storage (two raw mounts can
 /// show the same folder of one connection).
 fn claim(st: &AppState, m: &mounts::Mount, rel: &str) -> Option<Claim> {
-    let key = if m.is_hashed() {
+    claim_key(st, claim_key_of(m, rel))
+}
+
+fn claim_key_of(m: &mounts::Mount, rel: &str) -> String {
+    if m.is_hashed() {
         format!("v{}:{rel}", m.volume_id)
     } else {
         format!("c{}:{}", m.connection_id, paths::join(&m.base_path, rel))
-    };
-    claim_key(st, key)
+    }
+}
+
+/// Claim `key` once the operation holding it is done (`None` if it takes
+/// longer than `busy_wait_ms`).
+pub async fn wait_claim(st: &AppState, key: String) -> Option<Claim> {
+    let until = tokio::time::Instant::now() + std::time::Duration::from_millis(st.cfg.busy_wait_ms);
+    loop {
+        if let Some(c) = claim_key(st, key.clone()) {
+            return Some(c);
+        }
+        if tokio::time::Instant::now() >= until {
+            return None;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
 }
 
 /// Claim anything named by `key` (an upload being committed, say).
@@ -132,12 +172,17 @@ pub async fn place(
             return Err(conflict("something is mounted there"));
         }
         let (m, rel) = mounts::resolve(st, user_id, &candidate).await?;
-        let Some(c) = claim(st, &m, &rel) else {
+        let c = match claim(st, &m, &rel) {
+            Some(c) => c,
             // Another operation is writing this name right now.
-            if mode == OnConflict::Rename {
-                continue;
+            None if mode == OnConflict::Rename => continue,
+            // Its result is what this one replaces or asks about: after it.
+            None => {
+                let key = claim_key_of(&m, &rel);
+                wait_claim(st, key)
+                    .await
+                    .ok_or_else(|| conflict("something is still being written there; try again"))?
             }
-            return Err(conflict("something is being written there; try again"));
         };
         let node = match vfs::stat(st, &m, &rel).await {
             Err(ApiError::NotFound) => {
@@ -242,9 +287,11 @@ where
     let (tm, trel) = mounts::resolve(st, user_id, &target.path).await?;
     let (fm, frel) = mounts::resolve(st, user_id, from).await?;
     if vfs::contains(&tm, &trel, &fm, &frel) {
-        return Err(conflict(
-            "it can't replace the folder it is in; pick another folder or keep both",
-        ));
+        return Err(conflict(if vfs::contains(&fm, &frel, &tm, &trel) {
+            "it is already there (the same item, through another mount)"
+        } else {
+            "it can't replace the folder it is in; pick another folder or keep both"
+        }));
     }
     // Nothing mounted inside what goes: checked now, not after the whole
     // item was written beside it.
@@ -258,8 +305,9 @@ where
             "something is mounted inside it; keep both, or unmount it first",
         ));
     }
-    // Beside the old one first, under a hidden name of its own.
-    let (parent, name) = paths::split(&target.path).unwrap();
+    // Beside the old one first, under a hidden name of its own, recorded so
+    // a crash midway is settled later (`reconcile`).
+    let (parent, _) = paths::split(&target.path).unwrap();
     let staged = place(
         st,
         user_id,
@@ -269,59 +317,147 @@ where
         OnConflict::Fail,
     )
     .await?;
-    if let Err(e) = write(staged.path.clone(), false).await {
+    let row: i64 = sqlx::query_scalar(
+        "INSERT INTO staged_items (user_id, path, target, is_dir, is_move)
+         VALUES ($1, $2, $3, $4, $5) RETURNING id",
+    )
+    .bind(user_id)
+    .bind(&staged.path)
+    .bind(&target.path)
+    .bind(is_dir)
+    .bind(matches!(source, Source::Move(_)))
+    .fetch_one(&st.db)
+    .await?;
+    let r = replace(
+        st,
+        user_id,
+        &target.path,
+        &staged.path,
+        is_dir,
+        source,
+        from,
+        write,
+    )
+    .await;
+    // Settled, unless the staged item is still there (a cleanup that
+    // failed): then `reconcile` tries again. (Its name is still claimed.)
+    if !exists(st, user_id, &staged.path).await {
+        sqlx::query("DELETE FROM staged_items WHERE id = $1")
+            .bind(row)
+            .execute(&st.db)
+            .await?;
+    }
+    r.map(|()| target.path.clone())
+}
+
+/// Replace what is at `to` with the item `write` puts at `staged`.
+#[allow(clippy::too_many_arguments)]
+async fn replace<F, Fut>(
+    st: &AppState,
+    user_id: i64,
+    to: &str,
+    staged: &str,
+    is_dir: bool,
+    source: Source<'_>,
+    from: &str,
+    write: F,
+) -> ApiResult<()>
+where
+    F: Fn(String, bool) -> Fut,
+    Fut: std::future::Future<Output = ApiResult<()>>,
+{
+    let name = paths::split(to).unwrap().1;
+    let is_move = matches!(source, Source::Move(_));
+    if let Err(e) = write(staged.to_string(), false).await {
+        e.log_internal();
         // The old item is untouched. A partial copy goes; part of a move is
         // the user's only copy of it: shown, beside the old one.
-        if matches!(source, Source::Move(_)) {
-            if exists(st, user_id, &staged.path).await {
-                let kept = keep_visible(st, user_id, &staged.path, &target.path, is_dir).await;
+        if is_move {
+            if exists(st, user_id, staged).await {
+                let kept = keep_visible(st, user_id, staged, to, is_dir).await;
                 return Err(conflict(format!(
                     "{}; what was moved is in {kept}",
                     e.public_message()
                 )));
             }
         } else {
-            let _ = vfs::delete(st, user_id, &staged.path, false).await;
+            let _ = vfs::delete(st, user_id, staged, false).await;
         }
         return Err(e);
     }
     // Only now does the old one go (to the trash where there is one). Its
     // share links stay with it: a different item at the same path never
     // inherits them.
-    if let Err(e) = vfs::delete(st, user_id, &target.path, true).await {
+    if let Err(e) = vfs::delete(st, user_id, to, true).await {
+        e.log_internal();
         // The old one stays; so does the source of a move, which is now
         // the staged item: put it back where it was.
-        if matches!(source, Source::Move(_)) {
-            if vfs::move_path(st, user_id, &staged.path, from)
-                .await
-                .is_err()
-            {
+        if is_move {
+            if vfs::move_path(st, user_id, staged, from).await.is_err() {
                 return Err(conflict(format!(
                     "couldn't replace “{name}” ({}); the item is kept as {}",
                     e.public_message(),
-                    keep_visible(st, user_id, &staged.path, &target.path, is_dir).await
+                    keep_visible(st, user_id, staged, to, is_dir).await
                 )));
             }
         } else {
-            let _ = vfs::delete(st, user_id, &staged.path, false).await;
+            let _ = vfs::delete(st, user_id, staged, false).await;
         }
         return Err(e);
     }
     // (Once more if the first try fails: the name is free now, and the new
     // item belongs there.)
-    let mut moved = vfs::move_path(st, user_id, &staged.path, &target.path).await;
+    let mut moved = vfs::move_path(st, user_id, staged, to).await;
     if moved.is_err() {
-        moved = vfs::move_path(st, user_id, &staged.path, &target.path).await;
+        moved = vfs::move_path(st, user_id, staged, to).await;
     }
     if let Err(e) = moved {
+        e.log_internal();
         // (Never `to` itself: this operation still holds that name.)
         return Err(conflict(format!(
             "the old “{name}” was deleted, but the new one couldn't take its name ({}); it is kept as {}",
             e.public_message(),
-            keep_visible(st, user_id, &staged.path, &target.path, is_dir).await
+            keep_visible(st, user_id, staged, to, is_dir).await
         )));
     }
-    Ok(target.path)
+    Ok(())
+}
+
+/// Settle what crashed replaces left (see `staged_items`): part of a move
+/// is shown beside the item it was replacing (or in its place, if that one
+/// went already); part of a copy goes. Items an operation of this server is
+/// still writing are left alone. Returns how many were settled.
+pub async fn reconcile(st: &AppState) -> ApiResult<usize> {
+    let rows: Vec<(i64, i64, String, String, bool, bool)> = sqlx::query_as(
+        "SELECT id, user_id, path, target, is_dir, is_move FROM staged_items ORDER BY id",
+    )
+    .fetch_all(&st.db)
+    .await?;
+    let mut settled = 0;
+    for (id, user_id, path, target, is_dir, is_move) in rows {
+        // (A path that no longer resolves, or storage that can't be read
+        // now: next time.)
+        let Ok((m, rel)) = mounts::resolve(st, user_id, &path).await else {
+            continue;
+        };
+        let Some(_c) = claim(st, &m, &rel) else {
+            continue;
+        };
+        let done = match vfs::stat(st, &m, &rel).await {
+            Err(ApiError::NotFound) => true,
+            Err(_) => false,
+            Ok(_) if is_move => keep_visible(st, user_id, &path, &target, is_dir).await != path,
+            Ok(_) => vfs::delete(st, user_id, &path, false).await.is_ok(),
+        };
+        if done {
+            sqlx::query("DELETE FROM staged_items WHERE id = $1")
+                .bind(id)
+                .execute(&st.db)
+                .await?;
+            settled += 1;
+        }
+    }
+    Ok(settled)
 }
 
 async fn exists(st: &AppState, user_id: i64, path: &str) -> bool {

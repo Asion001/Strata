@@ -63,7 +63,15 @@
       "CommitReq": {
         "properties": {
           "on_conflict": {
-            "$ref": "#/components/schemas/OnConflict"
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/OnConflict",
+                "description": "The answer, if the name was taken meanwhile (left out: as asked at\ncreate)."
+              }
+            ]
           }
         },
         "type": "object"

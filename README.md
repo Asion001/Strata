@@ -76,6 +76,7 @@ Set these in `deploy/strata.env` (or the environment):
 | `STRATA_GC_GRACE_HOURS` | `24` | How long unreferenced blobs wait before garbage collection |
 | `STRATA_RAW_TTL_SECS` | `30` | Seconds before a raw mount is rescanned on access |
 | `STRATA_TRASH_DAYS` | `30` | Days deleted items stay in the trash; `0` makes new deletes permanent (items already in the trash keep their date) |
+| `STRATA_BUSY_WAIT_MS` | `60000` | How long a move, copy or upload waits for another one writing the same name before giving up |
 
 The container image sets its own defaults for the paths; see
 `deploy/strata.env.example`.

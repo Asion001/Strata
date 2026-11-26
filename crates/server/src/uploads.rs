@@ -56,13 +56,17 @@ pub struct CreateReq {
 
 #[derive(Deserialize, Default, utoipa::ToSchema)]
 pub struct CommitReq {
+    /// The answer, if the name was taken meanwhile (left out: as asked at
+    /// create).
     #[serde(default)]
-    pub on_conflict: OnConflict,
+    pub on_conflict: Option<OnConflict>,
 }
 
 #[derive(sqlx::FromRow)]
 struct Upload {
     path: String,
+    on_conflict: String,
+    committed_path: Option<String>,
     volume_id: i64,
     size: i64,
     chunks: Vec<Vec<u8>>,
@@ -71,7 +75,7 @@ struct Upload {
 }
 
 async fn load(st: &AppState, user_id: i64, id: &str) -> ApiResult<Upload> {
-    sqlx::query_as("SELECT path, volume_id, size, chunks, chunk_sizes, mtime FROM uploads WHERE id = $1 AND user_id = $2")
+    sqlx::query_as("SELECT path, on_conflict, committed_path, volume_id, size, chunks, chunk_sizes, mtime FROM uploads WHERE id = $1 AND user_id = $2")
         .bind(id)
         .bind(user_id)
         .fetch_optional(&st.db)
@@ -180,8 +184,8 @@ pub async fn create(
     vfs::check_raw_place(&st, &m, &rel).await?;
     let id = random_token(16);
     sqlx::query(
-        "INSERT INTO uploads (id, user_id, path, volume_id, size, chunks, chunk_sizes, mtime)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        "INSERT INTO uploads (id, user_id, path, volume_id, size, chunks, chunk_sizes, mtime, on_conflict)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
     )
     .bind(&id)
     .bind(u.id)
@@ -191,6 +195,7 @@ pub async fn create(
     .bind(&hashes)
     .bind(&sizes)
     .bind(req.mtime)
+    .bind(req.on_conflict.as_str())
     .execute(&st.db)
     .await?;
     let up = load(&st, u.id, &id).await?;
@@ -282,7 +287,7 @@ pub async fn commit(
     Path(id): Path<String>,
     body: Bytes,
 ) -> ApiResult<Json<serde_json::Value>> {
-    // (No body, `null` or `{}`: fail when the name is taken.)
+    // (No body, `null` or `{}`: as asked at create.)
     let req: CommitReq = if body.iter().all(u8::is_ascii_whitespace) {
         CommitReq::default()
     } else {
@@ -292,18 +297,13 @@ pub async fn commit(
     };
     load(&st, u.id, &id).await?;
     // One commit of an upload at a time: a retry sent while the first is
-    // still writing waits for it (and then finds the upload done: 404).
-    let mut waited = 0;
-    let one = loop {
-        if let Some(c) = conflicts::claim_key(&st, format!("upload:{id}")) {
-            break c;
-        }
-        waited += 1;
-        if waited > COMMIT_WAIT_TICKS {
-            return Err(conflict("this upload is still being saved; try again"));
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    };
+    // still writing waits for it (and then gets the same answer).
+    // (Past the wait, not a refusal: the first one is still at it.)
+    let one = conflicts::wait_claim(&st, format!("upload:{id}"))
+        .await
+        .ok_or_else(|| {
+            ApiError::Unavailable("this upload is still being saved; try again".into())
+        })?;
     // (To the end, even if this request goes away.)
     conflicts::detached(async move {
         let _one = one;
@@ -312,9 +312,6 @@ pub async fn commit(
     .await
 }
 
-/// How long a commit sent again waits for the first (in 50 ms ticks).
-const COMMIT_WAIT_TICKS: u32 = 1200;
-
 async fn commit_detached(
     st: AppState,
     uid: i64,
@@ -322,6 +319,13 @@ async fn commit_detached(
     req: CommitReq,
 ) -> ApiResult<Json<serde_json::Value>> {
     let up = load(&st, uid, &id).await?;
+    if let Some(path) = up.committed_path {
+        // Committed already (its answer was lost): the same answer.
+        return committed(&st, uid, &path).await;
+    }
+    let mode = req
+        .on_conflict
+        .unwrap_or_else(|| OnConflict::parse(&up.on_conflict));
     let miss = missing(&st, uid, &id, &up).await?;
     if !miss.is_empty() {
         return Err(conflict(format!("{} chunks still missing", miss.len())));
@@ -342,7 +346,7 @@ async fn commit_detached(
         uid,
         &up.path,
         false,
-        req.on_conflict,
+        mode,
         Source::Upload,
         |at, in_place| {
             let (st, hashes, sizes, dir) = (
@@ -393,13 +397,23 @@ async fn commit_detached(
         },
     )
     .await?;
-    let (m, rel) = mounts::resolve(&st, uid, &path).await?;
-    sqlx::query("DELETE FROM uploads WHERE id = $1")
-        .bind(&id)
-        .execute(&st.db)
-        .await?;
+    // Kept (without its chunks) until the uploads expire, so a commit sent
+    // again learns where it landed instead of writing a second copy.
+    sqlx::query(
+        "UPDATE uploads SET committed_path = $2, chunks = '{}', chunk_sizes = '{}' WHERE id = $1",
+    )
+    .bind(&id)
+    .bind(&path)
+    .execute(&st.db)
+    .await?;
     let _ = tokio::fs::remove_dir_all(staging_dir(&st, &id)).await;
-    let node = vfs::stat(&st, &m, &rel).await?;
+    committed(&st, uid, &path).await
+}
+
+/// The answer to a commit that landed at `path`.
+async fn committed(st: &AppState, uid: i64, path: &str) -> ApiResult<Json<serde_json::Value>> {
+    let (m, rel) = mounts::resolve(st, uid, path).await?;
+    let node = vfs::stat(st, &m, &rel).await?;
     Ok(Json(
         json!({ "path": path, "name": node.name, "size": node.size, "mtime": node.mtime, "etag": node.etag }),
     ))

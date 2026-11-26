@@ -343,7 +343,9 @@ async fn mount_points_are_never_replaced() {
 #[tokio::test]
 async fn names_in_flight_are_never_reused() {
     use strata_server::conflicts::{OnConflict, place};
-    let Some(t) = app().await else { return };
+    let Some(t) = app_with(|c| c.busy_wait_ms = 300).await else {
+        return;
+    };
     let uid: i64 = sqlx::query_scalar("SELECT id FROM users WHERE username = 'admin'")
         .fetch_one(&t.st.db)
         .await
@@ -353,6 +355,7 @@ async fn names_in_flight_are_never_reused() {
         .await
         .unwrap();
     assert_eq!(held.path, "f.txt");
+    // (Fail waits for the other one first, up to a limit.)
     let busy = place(&t.st, uid, "f.txt", false, OnConflict::Fail).await;
     assert!(matches!(
         busy,
@@ -362,15 +365,12 @@ async fn names_in_flight_are_never_reused() {
         .await
         .unwrap();
     assert_eq!(next.path, "f (2).txt");
-    // Released when the operation ends.
-    drop(held);
-    assert_eq!(
-        place(&t.st, uid, "f.txt", false, OnConflict::Fail)
-            .await
-            .unwrap()
-            .path,
-        "f.txt"
-    );
+    // Released when the operation ends, which one waiting sees.
+    let (after, ()) = tokio::join!(place(&t.st, uid, "f.txt", false, OnConflict::Fail), async {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        drop(held);
+    });
+    assert_eq!(after.unwrap().path, "f.txt");
     drop(next);
 
     // Every number taken: refused, not looped forever.
@@ -484,6 +484,13 @@ async fn never_replaces_the_folder_a_copy_comes_from_through_another_mount() {
     t.upload("Disk/x/y.txt", b"y").await;
     let (s, v) = op(&t, "copy", "Disk/x/y.txt", "Again/x", "replace").await;
     assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    // The same item: said so.
+    let (s, v) = op(&t, "move", "Disk/x/y.txt", "Again/x/y.txt", "replace").await;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    assert!(
+        v["error"].as_str().unwrap().contains("already there"),
+        "{v}"
+    );
     assert_eq!(std::fs::read(disk.join("x/y.txt")).unwrap(), b"y");
     assert!(trash_names(&t).await.is_empty());
 }
@@ -518,7 +525,110 @@ async fn a_commit_sent_again_waits_for_the_first() {
     });
     assert_eq!(s, StatusCode::OK, "{v}");
     assert_eq!(t.download("w.txt").await, b"mine");
-    // Once done, a commit sent again finds nothing to commit.
-    let (s, _) = t.json("POST", &commit, json!({})).await;
-    assert_eq!(s, StatusCode::NOT_FOUND);
+    // Once done, a commit sent again gets the same answer, writing nothing.
+    let (s, again) = t
+        .json("POST", &commit, json!({"on_conflict": "rename"}))
+        .await;
+    assert_eq!(s, StatusCode::OK, "{again}");
+    assert_eq!(again["path"], "w.txt");
+    assert_eq!(t.names("").await, vec!["w.txt"]);
+}
+
+#[tokio::test]
+async fn a_commit_waits_only_so_long_and_keeps_the_choice_from_create() {
+    let Some(t) = app_with(|c| c.busy_wait_ms = 100).await else {
+        return;
+    };
+    t.upload("k.txt", b"there").await;
+    let h = blake3::hash(b"mine").to_hex().to_string();
+    let v = t
+        .ok(
+            "POST",
+            "/api/uploads",
+            json!({"path": "k.txt", "size": 4, "chunks": [{"hash": h, "size": 4}], "on_conflict": "rename"}),
+        )
+        .await;
+    let id = v["id"].as_str().unwrap().to_string();
+    let (s, _, _) = t
+        .raw(
+            "PUT",
+            &format!("/api/uploads/{id}/chunks/{h}"),
+            axum::body::Body::from("mine"),
+            &[],
+        )
+        .await;
+    assert!(s.is_success());
+    let commit = format!("/api/uploads/{id}/commit");
+    let first = strata_server::conflicts::claim_key(&t.st, format!("upload:{id}")).unwrap();
+    let (s, v) = t.json("POST", &commit, json!({})).await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{v}");
+    drop(first);
+    // No answer at commit: keep both, as asked at create.
+    let v = t.ok("POST", &commit, json!({})).await;
+    assert_eq!(v["path"], "k (2).txt");
+    assert_eq!(t.download("k.txt").await, b"there");
+}
+
+#[tokio::test]
+async fn replaces_a_crash_interrupted_are_settled() {
+    use strata_server::conflicts::{OnConflict, place, reconcile};
+    let Some(t) = app().await else { return };
+    let uid: i64 = sqlx::query_scalar("SELECT id FROM users WHERE username = 'admin'")
+        .fetch_one(&t.st.db)
+        .await
+        .unwrap();
+    let staged = |path: &str, target: &str, is_move: bool| {
+        sqlx::query(
+            "INSERT INTO staged_items (user_id, path, target, is_dir, is_move) VALUES ($1, $2, $3, FALSE, $4)",
+        )
+        .bind(uid)
+        .bind(path.to_string())
+        .bind(target.to_string())
+        .bind(is_move)
+        .execute(&t.st.db)
+    };
+    // Part of a move: shown beside the item it was replacing, or in its
+    // place if that one went already.
+    t.upload("d/f.txt", b"old").await;
+    t.upload("d/.strata-moved", b"moved").await;
+    staged("d/.strata-moved", "d/f.txt", true).await.unwrap();
+    t.upload("d/.strata-alone", b"alone").await;
+    staged("d/.strata-alone", "d/g.txt", true).await.unwrap();
+    // Part of a copy: goes.
+    t.upload("d/.strata-copied", b"copied").await;
+    staged("d/.strata-copied", "d/f.txt", false).await.unwrap();
+    // Gone already: only the record goes.
+    staged("d/.strata-gone", "d/f.txt", false).await.unwrap();
+    // Still being written by an operation here: left alone.
+    let busy = place(&t.st, uid, "d/.strata-busy", false, OnConflict::Fail)
+        .await
+        .unwrap();
+    staged("d/.strata-busy", "d/f.txt", true).await.unwrap();
+    // Somewhere that doesn't resolve: next time.
+    local_mount(&t, "raw").await;
+    staged("Disk/.strata-trash/x", "Disk/x", true)
+        .await
+        .unwrap();
+
+    assert_eq!(reconcile(&t.st).await.unwrap(), 4);
+    assert_eq!(t.names("d").await, vec!["f (2).txt", "f.txt", "g.txt"]);
+    assert_eq!(t.download("d/f (2).txt").await, b"moved");
+    assert_eq!(t.download("d/g.txt").await, b"alone");
+    assert_eq!(t.download("d/f.txt").await, b"old");
+    drop(busy);
+    let left: Vec<String> = sqlx::query_scalar("SELECT path FROM staged_items ORDER BY id")
+        .fetch_all(&t.st.db)
+        .await
+        .unwrap();
+    assert_eq!(left, vec!["d/.strata-busy", "Disk/.strata-trash/x"]);
+    // Nothing is left after a replace that ran to its end.
+    t.upload("e/a.txt", b"1").await;
+    t.upload("e/b.txt", b"2").await;
+    let (s, v) = op(&t, "copy", "e/a.txt", "e/b.txt", "replace").await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM staged_items WHERE target = 'e/b.txt'")
+        .fetch_one(&t.st.db)
+        .await
+        .unwrap();
+    assert_eq!(n, 0);
 }

@@ -1159,6 +1159,7 @@ fn state_dir_inside_storage_base_is_refused() {
         raw_ttl_secs: 1,
         probe_secs: 60,
         trash_days: 30,
+        busy_wait_ms: 60_000,
     };
     assert!(cfg.clone().checked().is_err());
     cfg.data_dir = "/var/lib/strata".into();
