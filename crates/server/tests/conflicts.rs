@@ -173,7 +173,8 @@ async fn uploads_ask_at_create_and_again_at_commit() {
     assert_eq!(t.download("doc (2).txt").await, b"second");
     t.upload_replacing("doc.txt", b"third").await;
     assert_eq!(t.download("doc.txt").await, b"third");
-    assert_eq!(trash_names(&t).await, vec!["doc.txt"]);
+    // (A save over the file: the same file, nothing in the trash.)
+    assert!(trash_names(&t).await.is_empty());
     assert_eq!(t.names("").await, vec!["doc (2).txt", "doc.txt"]);
 
     // Free at create, taken by commit time: the commit asks.
@@ -200,6 +201,21 @@ async fn uploads_ask_at_create_and_again_at_commit() {
     let (s, v) = t.json("POST", &commit, json!({})).await;
     assert_eq!(s, StatusCode::CONFLICT, "{v}");
     assert_eq!(v["code"], "exists");
+    // No body or `null` is the default too; a body that isn't JSON is refused.
+    for (body, want) in [
+        (&b" null "[..], StatusCode::CONFLICT),
+        (&b"\n"[..], StatusCode::CONFLICT),
+        (&b"\xff\xfe"[..], StatusCode::BAD_REQUEST),
+        (
+            &b"{\"on_conflict\": \"sideways\"}"[..],
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        let (s, _, _) = t
+            .raw("POST", &commit, axum::body::Body::from(body.to_vec()), &[])
+            .await;
+        assert_eq!(s, want, "{body:?}");
+    }
     assert_eq!(t.download("late.txt").await, b"theirs");
     // The upload is still there for the answer.
     let v = t
@@ -378,33 +394,38 @@ async fn replace_keeps_share_links_and_kinds() {
         .ok("POST", "/api/shares", json!({"path": "b/f.txt"}))
         .await;
     let link = s["token"].as_str().unwrap().to_string();
+    let db = t.st.db.clone();
+    let share_node = || {
+        sqlx::query_scalar::<_, Option<i64>>("SELECT node_id FROM shares WHERE token = $1")
+            .bind(link.clone())
+            .fetch_one(&db)
+    };
+    let node_at = |name: &'static str| {
+        sqlx::query_scalar::<_, i64>("SELECT id FROM nodes WHERE parent = 'b' AND name = $1")
+            .bind(name)
+            .fetch_one(&db)
+    };
+    let old = node_at("f.txt").await.unwrap();
+    assert_eq!(share_node().await.unwrap(), Some(old));
+    // An upload saves over the file: the same file, its link still opens it.
     t.upload_replacing("b/f.txt", b"newer").await;
+    assert_eq!(node_at("f.txt").await.unwrap(), old);
+    assert_eq!(share_node().await.unwrap(), Some(old));
+    assert!(trash_names(&t).await.is_empty());
+    // An item moved in its place is another item: the link goes to the
+    // trash with the old one, never opening what took its name.
     let (s, v) = op(&t, "move", "a/f.txt", "b/f.txt", "replace").await;
     assert_eq!(s, StatusCode::OK, "{v}");
-    // The link still opens the file at that name: the newest one.
-    let share_node: Option<i64> = sqlx::query_scalar("SELECT node_id FROM shares WHERE token = $1")
-        .bind(&link)
-        .fetch_one(&t.st.db)
-        .await
-        .unwrap();
-    let node: i64 =
-        sqlx::query_scalar("SELECT id FROM nodes WHERE parent = 'b' AND name = 'f.txt'")
-            .fetch_one(&t.st.db)
-            .await
-            .unwrap();
-    assert_eq!(share_node, Some(node));
     assert_eq!(t.download("b/f.txt").await, b"new");
-    // A restore of an old version from the trash doesn't take the link back.
-    let (_, items) = t.get("/api/trash").await;
-    let id = items["items"][0]["id"].as_i64().unwrap();
-    t.ok("POST", &format!("/api/trash/{id}/restore"), json!({}))
-        .await;
-    let after: Option<i64> = sqlx::query_scalar("SELECT node_id FROM shares WHERE token = $1")
-        .bind(&link)
-        .fetch_one(&t.st.db)
-        .await
-        .unwrap();
-    assert_eq!(after, Some(node));
+    assert_ne!(node_at("f.txt").await.unwrap(), old);
+    assert_eq!(share_node().await.unwrap(), None);
+    assert_eq!(trash_names(&t).await, vec!["b/f.txt"]);
+
+    // Keep both counts on from a number already there.
+    t.upload("n/a (2).txt", b"2").await;
+    let (s, v) = op(&t, "copy", "n/a (2).txt", "n/a (2).txt", "rename").await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["path"], "n/a (3).txt");
 
     // A file never replaces a folder, nor a folder a file.
     t.upload("c/x/inner.txt", b"i").await;
@@ -421,4 +442,25 @@ async fn replace_keeps_share_links_and_kinds() {
     assert_eq!(s, StatusCode::BAD_REQUEST);
     let (s, _) = op(&t, "move", "gone", "gone", "rename").await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn never_replaces_the_folder_a_copy_comes_from_through_another_mount() {
+    let Some(t) = app().await else { return };
+    let disk = local_mount(&t, "raw").await;
+    let conn: i64 = sqlx::query_scalar("SELECT id FROM connections WHERE name = 'Disk'")
+        .fetch_one(&t.st.db)
+        .await
+        .unwrap();
+    t.ok(
+        "POST",
+        "/api/mounts",
+        json!({"path": "Again", "connection_id": conn, "mode": "raw"}),
+    )
+    .await;
+    t.upload("Disk/x/y.txt", b"y").await;
+    let (s, v) = op(&t, "copy", "Disk/x/y.txt", "Again/x", "replace").await;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    assert_eq!(std::fs::read(disk.join("x/y.txt")).unwrap(), b"y");
+    assert!(trash_names(&t).await.is_empty());
 }

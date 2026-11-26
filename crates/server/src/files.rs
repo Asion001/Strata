@@ -368,7 +368,7 @@ pub async fn move_(
         is_dir,
         b.on_conflict,
         Source::Move(&from),
-        |at| {
+        |at, _| {
             let (st, from) = (st.clone(), from.clone());
             async move { vfs::move_path(&st, u.id, &from, &at).await }
         },
@@ -390,7 +390,7 @@ pub async fn copy(
         is_dir,
         b.on_conflict,
         Source::Copy(&from),
-        |at| {
+        |at, _| {
             let (st, from) = (st.clone(), from.clone());
             async move { vfs::copy_path(&st, u.id, &from, &at).await }
         },

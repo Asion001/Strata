@@ -8,10 +8,12 @@
 //! outside Strata meanwhile is still caught by the operations' own checks
 //! (a move refuses an existing destination); nothing here overwrites.
 //!
-//! Replace never removes the old item before the new one is complete: the
-//! new one is written beside it under a hidden temporary name, then the old
-//! one is deleted (to the trash where there is one), then the new one takes
-//! its name.
+//! Replace never removes the old item before the new one is complete. An
+//! upload over a file saves new content into that same file, atomically (so
+//! it keeps its share links and history). Anything else is written beside
+//! the old item under a hidden temporary name, then the old one is deleted
+//! (to the trash where there is one, with its share links: a different item
+//! never inherits them), then the new one takes its name.
 
 use serde::Deserialize;
 
@@ -62,12 +64,21 @@ fn claim(st: &AppState, volume_id: i64, rel: &str) -> Option<Claim> {
 }
 
 /// "a.txt" → "a (2).txt"; a folder or a leading-dot name keeps its whole
-/// name before the number ("v1.2 (2)", ".env (2)").
+/// name before the number ("v1.2 (2)", ".env (2)"). A number already there
+/// is replaced, not added to ("a (2).txt" → "a (3).txt").
 pub fn numbered(name: &str, is_dir: bool, n: u32) -> String {
-    match name.rfind('.') {
-        Some(i) if i > 0 && !is_dir => format!("{} ({n}){}", &name[..i], &name[i..]),
-        _ => format!("{name} ({n})"),
-    }
+    let (stem, ext) = match name.rfind('.') {
+        Some(i) if i > 0 && !is_dir => name.split_at(i),
+        _ => (name, ""),
+    };
+    let stem = stem
+        .strip_suffix(')')
+        .and_then(|s| s.rsplit_once(" ("))
+        .filter(|(base, num)| {
+            !base.is_empty() && !num.is_empty() && num.bytes().all(|b| b.is_ascii_digit())
+        })
+        .map_or(stem, |(base, _)| base);
+    format!("{stem} ({n}){ext}")
 }
 
 /// Where an operation may write, claimed.
@@ -170,6 +181,11 @@ pub enum Source<'a> {
 
 /// Run `write` (which puts the new item at the path it is given) for an item
 /// arriving at `to`, by `mode`. Returns where it landed.
+///
+/// `write` is told whether it is saving over a file in place: only an
+/// upload replacing a file is (the old behavior of a save: the same file,
+/// with its share links and history, gets new content atomically). Anything
+/// else written where something is goes beside it first.
 pub async fn write_at<F, Fut>(
     st: &AppState,
     user_id: i64,
@@ -180,23 +196,28 @@ pub async fn write_at<F, Fut>(
     write: F,
 ) -> ApiResult<String>
 where
-    F: Fn(String) -> Fut,
+    F: Fn(String, bool) -> Fut,
     Fut: std::future::Future<Output = ApiResult<()>>,
 {
     let target = place(st, user_id, to, is_dir, mode).await?;
     if !target.existing {
-        write(target.path.clone()).await?;
+        write(target.path.clone(), false).await?;
         return Ok(target.path);
     }
     let from = match source {
-        Source::Move(f) | Source::Copy(f) => Some(f),
-        Source::Upload => None,
+        Source::Move(f) | Source::Copy(f) => f,
+        // (An upload is a file, and `place` refused one over a folder.)
+        Source::Upload => {
+            write(target.path.clone(), true).await?;
+            return Ok(target.path);
+        }
     };
     // (A copy would delete its own source; a move would empty the folder it
-    // replaces first, which is surprising at best.)
-    if let Some(from) = from
-        && paths::strip_prefix(from, &target.path).is_some()
-    {
+    // replaces first, which is surprising at best. Compared in storage: two
+    // mounts can show the same folder.)
+    let (tm, trel) = mounts::resolve(st, user_id, &target.path).await?;
+    let (fm, frel) = mounts::resolve(st, user_id, from).await?;
+    if vfs::contains(&tm, &trel, &fm, &frel) {
         return Err(conflict(
             "it can't replace the folder it is in; pick another folder or keep both",
         ));
@@ -212,9 +233,9 @@ where
         OnConflict::Fail,
     )
     .await?;
-    if let Err(e) = write(staged.path.clone()).await {
-        // The old item is untouched. A partial copy or upload goes; part of
-        // a move is the user's only copy of it: shown, beside the old one.
+    if let Err(e) = write(staged.path.clone(), false).await {
+        // The old item is untouched. A partial copy goes; part of a move is
+        // the user's only copy of it: shown, beside the old one.
         if matches!(source, Source::Move(_)) {
             if exists(st, user_id, &staged.path).await {
                 let kept = keep_visible(st, user_id, &staged.path, &target.path, is_dir).await;
@@ -228,57 +249,41 @@ where
         }
         return Err(e);
     }
-    // Share links of the old item move to the new one (a replaced file is
-    // still "the" file); a restore from the trash leaves them there.
-    let (m, rel) = mounts::resolve(st, user_id, &target.path).await?;
-    let shares: Vec<i64> = match vfs::node_id(st, m.volume_id, &rel).await? {
-        Some(id) => {
-            sqlx::query_scalar("SELECT id FROM shares WHERE node_id = $1")
-                .bind(id)
-                .fetch_all(&st.db)
-                .await?
-        }
-        None => Vec::new(),
-    };
-    // Only now does the old one go (to the trash where there is one).
+    // Only now does the old one go (to the trash where there is one). Its
+    // share links stay with it: a different item at the same path never
+    // inherits them.
     if let Err(e) = vfs::delete(st, user_id, &target.path, true).await {
         // The old one stays; so does the source of a move, which is now
         // the staged item: put it back where it was.
-        match source {
-            Source::Move(from) => {
-                if vfs::move_path(st, user_id, &staged.path, from)
-                    .await
-                    .is_err()
-                {
-                    return Err(conflict(format!(
-                        "couldn't replace “{name}” ({}); the item is kept as {}",
-                        e.public_message(),
-                        keep_visible(st, user_id, &staged.path, &target.path, is_dir).await
-                    )));
-                }
+        if matches!(source, Source::Move(_)) {
+            if vfs::move_path(st, user_id, &staged.path, from)
+                .await
+                .is_err()
+            {
+                return Err(conflict(format!(
+                    "couldn't replace “{name}” ({}); the item is kept as {}",
+                    e.public_message(),
+                    keep_visible(st, user_id, &staged.path, &target.path, is_dir).await
+                )));
             }
-            Source::Copy(_) | Source::Upload => {
-                let _ = vfs::delete(st, user_id, &staged.path, false).await;
-            }
+        } else {
+            let _ = vfs::delete(st, user_id, &staged.path, false).await;
         }
         return Err(e);
     }
-    if let Err(e) = vfs::move_path(st, user_id, &staged.path, &target.path).await {
+    // (Once more if the first try fails: the name is free now, and the new
+    // item belongs there.)
+    let mut moved = vfs::move_path(st, user_id, &staged.path, &target.path).await;
+    if moved.is_err() {
+        moved = vfs::move_path(st, user_id, &staged.path, &target.path).await;
+    }
+    if let Err(e) = moved {
+        // (Never `to` itself: this operation still holds that name.)
         return Err(conflict(format!(
             "the old “{name}” was deleted, but the new one couldn't take its name ({}); it is kept as {}",
             e.public_message(),
             keep_visible(st, user_id, &staged.path, &target.path, is_dir).await
         )));
-    }
-    if !shares.is_empty()
-        && let Some(id) = vfs::node_id(st, m.volume_id, &rel).await?
-    {
-        sqlx::query("UPDATE shares SET node_id = $1, is_dir = $2 WHERE id = ANY($3)")
-            .bind(id)
-            .bind(is_dir)
-            .bind(&shares)
-            .execute(&st.db)
-            .await?;
     }
     Ok(target.path)
 }
@@ -315,5 +320,10 @@ mod tests {
         assert_eq!(numbered("v1.2", true, 2), "v1.2 (2)");
         assert_eq!(numbered(".env", false, 2), ".env (2)");
         assert_eq!(numbered("noext", false, 4), "noext (4)");
+        assert_eq!(numbered("a (2).txt", false, 3), "a (3).txt");
+        assert_eq!(numbered("photos (12)", true, 2), "photos (2)");
+        assert_eq!(numbered("(2)", true, 3), "(2) (3)");
+        assert_eq!(numbered("a (x).txt", false, 2), "a (x) (2).txt");
+        assert_eq!(numbered("a ().txt", false, 2), "a () (2).txt");
     }
 }

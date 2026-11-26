@@ -282,12 +282,13 @@ pub async fn commit(
     Path(id): Path<String>,
     body: Bytes,
 ) -> ApiResult<Json<serde_json::Value>> {
-    // (No body, or `{}`: fail when the name is taken.)
-    let text = std::str::from_utf8(&body).unwrap_or("").trim();
-    let req: CommitReq = if text.is_empty() || text == "null" {
+    // (No body, `null` or `{}`: fail when the name is taken.)
+    let req: CommitReq = if body.iter().all(u8::is_ascii_whitespace) {
         CommitReq::default()
     } else {
-        serde_json::from_slice(&body).map_err(|e| bad(format!("bad request body: {e}")))?
+        serde_json::from_slice::<Option<CommitReq>>(&body)
+            .map_err(|e| bad(format!("bad request body: {e}")))?
+            .unwrap_or_default()
     };
     let up = load(&st, u.id, &id).await?;
     let miss = missing(&st, u.id, &id, &up).await?;
@@ -320,7 +321,7 @@ pub async fn commit(
         false,
         req.on_conflict,
         Source::Upload,
-        |at| {
+        |at, in_place| {
             let (st, hashes, sizes, dir) = (
                 st.clone(),
                 hashes.clone(),
@@ -328,6 +329,14 @@ pub async fn commit(
                 staging_dir(&st, &id),
             );
             let (mtime, volume) = (up.mtime, up.volume_id);
+            // Saving over the file (its new content, atomically), or only
+            // where nothing is (checked under the volume lock): a file
+            // written meanwhile outside these claims is never overwritten.
+            let expect = if in_place {
+                vfs::Expect::Any
+            } else {
+                vfs::Expect::Absent
+            };
             async move {
                 let (m, rel) = mounts::resolve(&st, u.id, &at).await?;
                 if m.volume_id != volume {
@@ -336,18 +345,8 @@ pub async fn commit(
                     ));
                 }
                 if m.is_hashed() {
-                    // Only where nothing is (checked under the volume lock): a file
-                    // written meanwhile outside these claims is never overwritten.
-                    match vfs::put_hashed_file_if(
-                        &st,
-                        &m,
-                        &rel,
-                        &hashes,
-                        &sizes,
-                        mtime,
-                        &vfs::Expect::Absent,
-                    )
-                    .await
+                    match vfs::put_hashed_file_if(&st, &m, &rel, &hashes, &sizes, mtime, &expect)
+                        .await
                     {
                         Err(ApiError::PreconditionFailed(_)) => {
                             Err(conflict("something was saved there meanwhile; try again"))
@@ -360,8 +359,7 @@ pub async fn commit(
                             let f = dir.join(h.hex());
                             async move { tokio::fs::read(f).await.map(Bytes::from) }
                         }));
-                    // (Only where nothing is, checked under the volume lock.)
-                    match vfs::write_stream_if(&st, &m, &rel, stream, &vfs::Expect::Absent).await {
+                    match vfs::write_stream_if(&st, &m, &rel, stream, &expect).await {
                         Err(ApiError::PreconditionFailed(_)) => {
                             Err(conflict("something was saved there meanwhile; try again"))
                         }

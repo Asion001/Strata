@@ -1634,6 +1634,16 @@ fn check_move_target(from: &str, to: &str) -> ApiResult<()> {
 /// The user-path check is not enough: two mounts may show the same volume, or
 /// overlapping folders of one connection (raw). Compare storage locations too.
 fn check_not_into_itself(sm: &Mount, srel: &str, dm: &Mount, drel: &str) -> ApiResult<()> {
+    if contains(sm, srel, dm, drel) {
+        return Err(bad("cannot move or copy a folder into itself"));
+    }
+    Ok(())
+}
+
+/// Whether `drel` of `dm` is `srel` of `sm` or inside it, in storage (two
+/// mounts can show the same volume, or overlapping folders of one raw
+/// connection).
+pub fn contains(sm: &Mount, srel: &str, dm: &Mount, drel: &str) -> bool {
     let same_volume = sm.volume_id == dm.volume_id && paths::strip_prefix(drel, srel).is_some();
     let overlapping_raw = !sm.is_hashed()
         && !dm.is_hashed()
@@ -1643,10 +1653,7 @@ fn check_not_into_itself(sm: &Mount, srel: &str, dm: &Mount, drel: &str) -> ApiR
             &paths::join(&sm.base_path, srel),
         )
         .is_some();
-    if same_volume || overlapping_raw {
-        return Err(bad("cannot move or copy a folder into itself"));
-    }
-    Ok(())
+    same_volume || overlapping_raw
 }
 
 async fn shift_mounts(st: &AppState, user_id: i64, from: &str, to: &str) -> ApiResult<()> {
