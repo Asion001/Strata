@@ -553,11 +553,14 @@ async fn a_commit_sent_again_waits_for_the_first() {
     assert_eq!(s, StatusCode::OK, "{again}");
     assert_eq!(again["path"], "w.txt");
     assert_eq!(t.names("").await, vec!["w.txt"]);
-    // Moved since: said so, never "not found" (which would upload it again).
+    // Moved since: still the same answer, never "not found" (which would
+    // upload it again).
     let (s, _) = op(&t, "move", "w.txt", "w2.txt", "fail").await;
     assert_eq!(s, StatusCode::OK);
     let (s, v) = t.json("POST", &commit, json!({})).await;
-    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["path"], "w.txt");
+    assert_eq!(v["size"], 4);
     assert_eq!(t.names("").await, vec!["w2.txt"]);
 }
 
@@ -683,4 +686,23 @@ async fn replaces_a_crash_interrupted_are_settled() {
         .await
         .unwrap();
     assert_eq!(n, 0);
+}
+
+#[tokio::test]
+async fn what_a_replace_writes_beside_is_not_listed() {
+    let Some(t) = app().await else { return };
+    t.upload("p/.strata-0123456789abcdef01", b"staged").await;
+    t.upload("p/.strata-notes", b"mine").await;
+    assert_eq!(t.names("p").await, vec![".strata-notes"]);
+    let (_, v) = t.get("/api/search?q=strata").await;
+    let hits: Vec<&str> = v["hits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(hits, vec![".strata-notes"]);
+    // A folder holding only that is still a folder (empty).
+    t.upload("q/.strata-0123456789abcdef01", b"staged").await;
+    assert!(t.names("q").await.is_empty());
 }

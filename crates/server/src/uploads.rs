@@ -72,6 +72,7 @@ struct Upload {
     path: String,
     on_conflict: String,
     committed_path: Option<String>,
+    created_at: DateTime<Utc>,
     volume_id: i64,
     size: i64,
     chunks: Vec<Vec<u8>>,
@@ -80,7 +81,7 @@ struct Upload {
 }
 
 async fn load(st: &AppState, user_id: i64, id: &str) -> ApiResult<Upload> {
-    sqlx::query_as("SELECT path, on_conflict, committed_path, volume_id, size, chunks, chunk_sizes, mtime FROM uploads WHERE id = $1 AND user_id = $2")
+    sqlx::query_as("SELECT path, on_conflict, committed_path, created_at, volume_id, size, chunks, chunk_sizes, mtime FROM uploads WHERE id = $1 AND user_id = $2")
         .bind(id)
         .bind(user_id)
         .fetch_optional(&st.db)
@@ -325,13 +326,17 @@ async fn commit_detached(
 ) -> ApiResult<Json<serde_json::Value>> {
     let up = load(&st, uid, &id).await?;
     if let Some(path) = up.committed_path {
-        // Committed already (its answer was lost): the same answer. (Never
-        // "not found", which would have the client upload it again.)
-        return committed(&st, uid, &path).await.map_err(|_| {
-            conflict(format!(
-                "this upload was saved as {path}, which has since been moved or deleted"
-            ))
-        });
+        // Committed already (its answer was lost): the same answer, from
+        // what was uploaded if the file has moved on since. (Never "not
+        // found", which would have the client upload it again.)
+        if let Ok(answer) = committed(&st, uid, &path).await {
+            return Ok(answer);
+        }
+        let name = paths::split(&path).map_or("", |(_, n)| n).to_string();
+        return Ok(Json(json!({
+            "path": path, "name": name, "size": up.size,
+            "mtime": up.mtime.unwrap_or(up.created_at), "etag": null
+        })));
     }
     let mode = req
         .on_conflict
@@ -366,10 +371,11 @@ async fn commit_detached(
                 staging_dir(&st, &id),
             );
             let (mtime, volume) = (up.mtime, up.volume_id);
-            // Saving over the file (its new content, atomically), or only
-            // where nothing is (checked under the volume lock): a file
-            // written meanwhile outside these claims is never overwritten.
-            let expect = if in_place {
+            // Saving over the file (its new content, atomically), as asked
+            // even if it appeared only now; otherwise only where nothing is
+            // (checked under the volume lock): a file written meanwhile
+            // outside these claims is never overwritten.
+            let expect = if in_place || mode == OnConflict::Replace {
                 vfs::Expect::Any
             } else {
                 vfs::Expect::Absent

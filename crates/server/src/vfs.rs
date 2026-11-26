@@ -270,7 +270,7 @@ pub async fn list(st: &AppState, user_id: i64, path: &str) -> ApiResult<(Mount, 
     let entries: Vec<Entry> = sqlx::query_as(
         "SELECT n.name, n.is_dir, n.size, n.mtime, n.etag, NULL::bigint AS mount_id, FALSE AS offline
          FROM nodes n
-         WHERE n.volume_id = $1 AND n.parent = $2
+         WHERE n.volume_id = $1 AND n.parent = $2 AND n.name !~ $5
            AND NOT EXISTS (SELECT 1 FROM mounts x WHERE x.owner_id = $3 AND x.parent_path = $4 AND x.name = n.name)
          UNION ALL
          SELECT x.name, TRUE, 0, x.created_at, NULL, x.id, c.health = 'offline'
@@ -282,6 +282,8 @@ pub async fn list(st: &AppState, user_id: i64, path: &str) -> ApiResult<(Mount, 
     .bind(&rel)
     .bind(user_id)
     .bind(path)
+    // (Not what a replace is writing beside the item it replaces.)
+    .bind(crate::conflicts::STAGED_NAME)
     .fetch_all(&st.db)
     .await?;
     if entries.is_empty() && !rel.is_empty() {
@@ -1886,7 +1888,7 @@ pub async fn search(st: &AppState, user_id: i64, q: &str, limit: i64) -> ApiResu
                 || CASE WHEN n.parent = '' THEN '' ELSE n.parent || '/' END || n.name AS path,
                 n.name, n.is_dir, n.size, n.mtime
          FROM nodes n JOIN mounts m ON m.volume_id = n.volume_id
-         WHERE m.owner_id = $1 AND n.name ILIKE $2
+         WHERE m.owner_id = $1 AND n.name ILIKE $2 AND n.name !~ $5
          ORDER BY similarity(n.name, $3) DESC, n.name
          LIMIT $4",
     )
@@ -1894,6 +1896,7 @@ pub async fn search(st: &AppState, user_id: i64, q: &str, limit: i64) -> ApiResu
     .bind(&pattern)
     .bind(q)
     .bind(limit)
+    .bind(crate::conflicts::STAGED_NAME)
     .fetch_all(&st.db)
     .await?;
     Ok(hits)

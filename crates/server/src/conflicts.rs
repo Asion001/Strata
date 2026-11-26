@@ -59,6 +59,10 @@ impl OnConflict {
     }
 }
 
+/// Names of items a replace writes beside the one it replaces (`.strata-`
+/// and a token), as a regular expression: left out of listings and search.
+pub const STAGED_NAME: &str = r"^\.strata-[0-9a-f]{18}$";
+
 /// A name claimed for an operation in flight (released when dropped).
 pub struct Claim {
     st: AppState,
