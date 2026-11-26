@@ -271,13 +271,17 @@ pub async fn trash(
                 return Err(
                     if matches!(
                         e.kind(),
-                        std::io::ErrorKind::CrossesDevices | std::io::ErrorKind::ResourceBusy
+                        std::io::ErrorKind::CrossesDevices
+                            | std::io::ErrorKind::ResourceBusy
+                            | std::io::ErrorKind::PermissionDenied
+                            | std::io::ErrorKind::ReadOnlyFilesystem
                     ) {
                         // A disk mounted inside the connection (or on the item
-                        // itself): no rename to the trash folder is possible. Say
-                        // so; the client may then delete permanently.
+                        // itself), or a trash folder that can't be written: no
+                        // rename to the trash is possible. Say so; the client
+                        // may then delete permanently.
                         conflict(
-                            "this item is on another disk than its connection, so it can't go to the trash; delete it permanently instead",
+                            "this item can't be moved to the trash (it is on another disk than its connection, or the trash folder can't be written); delete it permanently instead",
                         )
                     } else {
                         io_error(e)
@@ -293,7 +297,12 @@ pub async fn trash(
             return Ok(id);
         }
     };
-    journal::record_volume(st, m.volume_id, vec![Change::delete(rel, node.is_dir)]).await?;
+    // Done already: a failed feed entry is logged, not an error to retry.
+    if let Err(e) =
+        journal::record_volume(st, m.volume_id, vec![Change::delete(rel, node.is_dir)]).await
+    {
+        tracing::warn!("trash {id}: journaling the delete failed: {e}");
+    }
     lock.release().await?;
     Ok(id)
 }
@@ -614,7 +623,12 @@ pub async fn restore(st: &AppState, user_id: i64, id: i64) -> ApiResult<String> 
             }
         }
     }
-    journal::record_volume(st, m.volume_id, vec![Change::create(&new_rel, row.is_dir)]).await?;
+    // Done already: a failed feed entry is logged, not an error to retry.
+    if let Err(e) =
+        journal::record_volume(st, m.volume_id, vec![Change::create(&new_rel, row.is_dir)]).await
+    {
+        tracing::warn!("restore {id}: journaling the create failed: {e}");
+    }
     lock.release().await?;
     Ok(paths::join(&m.path, &new_rel))
 }
@@ -937,7 +951,20 @@ pub async fn remove_raw_items(st: &AppState, items: &[(i64, i64)]) {
         let Ok(root) = local_root(st, connection_id).await else {
             continue;
         };
-        match tokio::fs::remove_dir_all(item_dir(&root, id)).await {
+        remove_items_at(&root, &[id]).await;
+    }
+}
+
+/// The folder of a local connection (for removing its trash after the
+/// connection itself is gone).
+pub(crate) async fn connection_root(st: &AppState, connection_id: i64) -> ApiResult<PathBuf> {
+    local_root(st, connection_id).await
+}
+
+/// Remove raw trash items under a known connection folder. Best effort.
+pub(crate) async fn remove_items_at(root: &Path, ids: &[i64]) {
+    for &id in ids {
+        match tokio::fs::remove_dir_all(item_dir(root, id)).await {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => tracing::warn!("removing trash item {id} failed: {e}"),

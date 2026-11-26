@@ -436,7 +436,7 @@
       if (!(e instanceof ApiError && e.status === 409 && e.message.includes('delete it permanently'))) throw e;
       const ok = await confirmDialog({
         title: `Delete “${name}” for good?`,
-        body: 'It is on another disk, so it can’t go to the trash. It will be deleted permanently.',
+        body: 'It can’t be moved to the trash here, so it will be deleted permanently.',
         confirm: 'Delete permanently',
         danger: true
       });

@@ -539,7 +539,17 @@ pub async fn delete(
         Ok(c) if c.kind() == "local" => st.operator_unchecked(id).await.ok(),
         _ => None,
     };
+    let root = crate::trash::connection_root(&st, id).await.ok();
     let mut tx = st.db.begin().await?;
+    // Anything trashed since the purge above goes too (its files below).
+    let late: Vec<i64> = sqlx::query_scalar(
+        "DELETE FROM trash t USING volumes v
+         WHERE v.id = t.volume_id AND v.connection_id = $1 AND v.mode = 'raw'
+         RETURNING t.id",
+    )
+    .bind(id)
+    .fetch_all(&mut *tx)
+    .await?;
     sqlx::query("DELETE FROM volumes WHERE connection_id = $1")
         .bind(id)
         .execute(&mut *tx)
@@ -549,6 +559,11 @@ pub async fn delete(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
+    if let Some(root) = root
+        && !late.is_empty()
+    {
+        crate::trash::remove_items_at(&root, &late).await;
+    }
     st.forget_connection(id);
     if let Some(op) = local_op {
         crate::state::LocalRoot::remove_marker(&op, id).await;
