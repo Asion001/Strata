@@ -66,20 +66,27 @@ function withoutMounts(items: Entry[], verb: string) {
 export const BATCH = 50;
 type Result = Schemas['DeleteResult'];
 
-/** Delete `paths`, going on past failures: one result per path. A batch
- *  that fails as a whole is tried again one path at a time. */
+/** Delete `paths`, going on past failures: one result per path. */
 async function deleteBatch(paths: string[], permanent: boolean): Promise<Result[]> {
+  const failed = (p: string, e: unknown): Result => ({ path: p, trashed: false, trash_id: null, error: message(e), status: e instanceof ApiError ? e.status : null });
   try {
     const r = await api<Schemas['DeletedBody']>('POST', '/api/files/delete', { paths, permanent, keep_going: true });
     if (r.results?.length === paths.length) return r.results;
-  } catch {}
+    // (No per-path answer: everything was deleted.)
+    return paths.map((p) => ({ path: p, trashed: r.trashed === paths.length, trash_id: null, error: null, status: null }));
+  } catch (e) {
+    // Refused as a whole (signed out, forbidden, offline): no path was tried.
+    if ((e instanceof ApiError && e.status < 500) || !navigator.onLine) return paths.map((p) => failed(p, e));
+  }
+  // No answer (a gateway timed out, the connection dropped): some paths may
+  // be gone already. One at a time; one already gone counts as done.
   const out: Result[] = [];
   for (const p of paths) {
     try {
       const r = await api<Schemas['DeletedBody']>('POST', '/api/files/delete', { paths: [p], permanent });
       out.push(r.results[0]);
     } catch (e) {
-      out.push({ path: p, trashed: false, trash_id: null, error: message(e), status: e instanceof ApiError ? e.status : null });
+      out.push(e instanceof ApiError && e.status === 404 ? { path: p, trashed: false, trash_id: null, error: null, status: null } : failed(p, e));
     }
   }
   return out;
