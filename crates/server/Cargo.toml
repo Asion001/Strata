@@ -47,3 +47,12 @@ proptest-state-machine = "0.9"
 testcontainers-modules = { version = "0.15", features = ["minio"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+criterion = { version = "0.5", features = ["async_tokio"] }
+
+[[bench]]
+name = "range"
+harness = false
+
+[[bench]]
+name = "db"
+harness = false

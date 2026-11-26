@@ -1,0 +1,85 @@
+name: Bench
+
+# Criterion benches (crates/*/benches). On a pull request, the base commit and
+# this change are benched one after the other in this job, on this runner,
+# and the job fails on a regression over 10% (shared runners vary too much
+# between machines for a stored wall-clock baseline). Every run also checks
+# the performance targets (scripts/bench-check.py). On main, the results are
+# kept as the baseline artifact. The load test runs nightly (nightly.yml).
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: strata
+          POSTGRES_PASSWORD: strata
+          POSTGRES_DB: strata
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U strata" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      STRATA_TEST_DATABASE_URL: postgres://strata:strata@localhost:5432/strata
+      CARGO_TERM_COLOR: always
+      # Base and head share one target dir (and so target/criterion).
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: bench
+      - name: Runner
+        run: |
+          {
+            echo "### Runner"
+            echo
+            echo "$(nproc) cores: $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2-)"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Bench the base
+        if: github.event_name == 'pull_request'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git worktree add "$RUNNER_TEMP/base" "$BASE"
+          cd "$RUNNER_TEMP/base"
+          # (A base from before the benches existed has nothing to compare.)
+          if cargo bench --workspace --benches --no-run; then
+            cargo bench --workspace --benches -- --save-baseline base
+          else
+            echo "The base doesn't build its benches: nothing to compare." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Bench this change
+        run: cargo bench --workspace --benches -- --save-baseline head
+      - name: Targets
+        run: python3 scripts/bench-check.py targets head | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Compare with the base
+        if: always() && github.event_name == 'pull_request'
+        run: python3 scripts/bench-check.py compare base head | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          # On main: the baseline. The attempt keeps reruns apart.
+          name: criterion-${{ github.event_name == 'pull_request' && 'pr' || 'main' }}-${{ github.run_attempt }}
+          path: target/criterion
+          retention-days: ${{ github.event_name == 'pull_request' && 14 || 90 }}

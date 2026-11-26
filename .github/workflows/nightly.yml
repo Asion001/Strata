@@ -2,7 +2,8 @@ name: Nightly
 
 # Slower checks that don't need to block every pull request: fresh advisory
 # scans (new advisories appear without code changes), a coverage report,
-# the property tests at 10,000 cases and each fuzz target for an hour.
+# the property tests at 10,000 cases, each fuzz target for an hour and the
+# load test.
 
 on:
   schedule:
@@ -165,3 +166,24 @@ jobs:
             fuzz/artifacts
             fuzz/corpus/${{ matrix.target }}
           retention-days: 14
+
+  # oha against the Docker stack, and a 1,000-client WebSocket fan-out
+  # (scripts/load-test.sh). Reports in the job summary; no thresholds.
+  load:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: Web dependencies (BLAKE3 for the upload chunk)
+        working-directory: web
+        run: npm ci
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: oha
+      - name: Load test
+        run: scripts/load-test.sh
