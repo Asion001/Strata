@@ -325,8 +325,13 @@ async fn commit_detached(
 ) -> ApiResult<Json<serde_json::Value>> {
     let up = load(&st, uid, &id).await?;
     if let Some(path) = up.committed_path {
-        // Committed already (its answer was lost): the same answer.
-        return committed(&st, uid, &path).await;
+        // Committed already (its answer was lost): the same answer. (Never
+        // "not found", which would have the client upload it again.)
+        return committed(&st, uid, &path).await.map_err(|_| {
+            conflict(format!(
+                "this upload was saved as {path}, which has since been moved or deleted"
+            ))
+        });
     }
     let mode = req
         .on_conflict

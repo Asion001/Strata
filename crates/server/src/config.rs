@@ -79,6 +79,7 @@ impl Config {
                 .unwrap_or(30),
             busy_wait_ms: env("STRATA_BUSY_WAIT_MS")
                 .and_then(|v| v.parse().ok())
+                .map(|ms: u64| ms.min(3_600_000))
                 .unwrap_or(60_000),
             data_dir,
         }

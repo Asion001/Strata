@@ -88,7 +88,10 @@ fn claim_key_of(m: &mounts::Mount, rel: &str) -> String {
 /// Claim `key` once the operation holding it is done (`None` if it takes
 /// longer than `busy_wait_ms`).
 pub async fn wait_claim(st: &AppState, key: String) -> Option<Claim> {
-    let until = tokio::time::Instant::now() + std::time::Duration::from_millis(st.cfg.busy_wait_ms);
+    let now = tokio::time::Instant::now();
+    let until = now
+        .checked_add(std::time::Duration::from_millis(st.cfg.busy_wait_ms))
+        .unwrap_or(now + std::time::Duration::from_secs(86400));
     loop {
         if let Some(c) = claim_key(st, key.clone()) {
             return Some(c);
@@ -329,7 +332,7 @@ where
     .fetch_one(&st.db)
     .await?;
     // (Alive while it runs: no server settles it meanwhile.)
-    let beat = tokio::spawn({
+    let _beat = Heartbeat(tokio::spawn({
         let db = st.db.clone();
         async move {
             let mut every = tokio::time::interval(HEARTBEAT);
@@ -342,7 +345,7 @@ where
                     .await;
             }
         }
-    });
+    }));
     let r = replace(
         st,
         user_id,
@@ -354,7 +357,6 @@ where
         write,
     )
     .await;
-    beat.abort();
     // Settled, unless the staged item may still be there (a cleanup that
     // failed, storage that can't say): then `reconcile` tries again.
     if !maybe_there(st, user_id, &staged.path).await
@@ -388,11 +390,13 @@ where
     let name = paths::split(to).unwrap().1;
     let is_move = matches!(source, Source::Move(_));
     if let Err(e) = write(staged.to_string(), false).await {
-        e.log_internal();
         // The old item is untouched. A partial copy goes; part of a move is
-        // the user's only copy of it: shown, beside the old one.
+        // the user's only copy of it: shown, beside the old one. (Only if it
+        // is surely there: otherwise the error says what happened, and the
+        // record stays for `reconcile`.)
         if is_move {
-            if maybe_there(st, user_id, staged).await {
+            if is_there(st, user_id, staged).await {
+                e.log_internal();
                 let kept = keep_visible(st, user_id, staged, to, is_dir).await;
                 return Err(conflict(format!(
                     "{}; what was moved is in {kept}",
@@ -408,11 +412,11 @@ where
     // share links stay with it: a different item at the same path never
     // inherits them.
     if let Err(e) = vfs::delete(st, user_id, to, true).await {
-        e.log_internal();
         // The old one stays; so does the source of a move, which is now
         // the staged item: put it back where it was.
         if is_move {
             if vfs::move_path(st, user_id, staged, from).await.is_err() {
+                e.log_internal();
                 return Err(conflict(format!(
                     "couldn't replace “{name}” ({}); the item is kept as {}",
                     e.public_message(),
@@ -468,7 +472,15 @@ pub async fn reconcile(st: &AppState) -> ApiResult<usize> {
             Err(ApiError::NotFound) => true,
             Err(_) => false,
             Ok(_) if is_move => keep_visible(st, user_id, &path, &target, is_dir).await != path,
-            Ok(_) => vfs::delete(st, user_id, &path, false).await.is_ok(),
+            // Part of a copy: unless the old item went already (a crash
+            // just before the rename), when it is the only copy there is.
+            Ok(_) => match maybe_there(st, user_id, &target).await {
+                true if is_there(st, user_id, &target).await => {
+                    vfs::delete(st, user_id, &path, false).await.is_ok()
+                }
+                true => false,
+                false => keep_visible(st, user_id, &path, &target, is_dir).await != path,
+            },
         };
         if done {
             sqlx::query("DELETE FROM staged_items WHERE id = $1")
@@ -479,6 +491,23 @@ pub async fn reconcile(st: &AppState) -> ApiResult<usize> {
         }
     }
     Ok(settled)
+}
+
+/// Stops a running replace's heartbeat when the replace ends (or unwinds).
+struct Heartbeat(tokio::task::JoinHandle<()>);
+
+impl Drop for Heartbeat {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Whether something is surely at `path`.
+async fn is_there(st: &AppState, user_id: i64, path: &str) -> bool {
+    match mounts::resolve(st, user_id, path).await {
+        Ok((m, rel)) => vfs::stat(st, &m, &rel).await.is_ok(),
+        Err(_) => false,
+    }
 }
 
 /// Whether something may be at `path`: only a clear "not found" says no.

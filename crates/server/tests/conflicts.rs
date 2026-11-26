@@ -553,6 +553,12 @@ async fn a_commit_sent_again_waits_for_the_first() {
     assert_eq!(s, StatusCode::OK, "{again}");
     assert_eq!(again["path"], "w.txt");
     assert_eq!(t.names("").await, vec!["w.txt"]);
+    // Moved since: said so, never "not found" (which would upload it again).
+    let (s, _) = op(&t, "move", "w.txt", "w2.txt", "fail").await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, v) = t.json("POST", &commit, json!({})).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    assert_eq!(t.names("").await, vec!["w2.txt"]);
 }
 
 #[tokio::test]
@@ -619,6 +625,10 @@ async fn replaces_a_crash_interrupted_are_settled() {
     // Part of a copy: goes.
     t.upload("d/.strata-copied", b"copied").await;
     staged("d/.strata-copied", "d/f.txt", false).await.unwrap();
+    // Part of a copy whose old item went already: the only copy, so it
+    // takes the name.
+    t.upload("d/.strata-only", b"only").await;
+    staged("d/.strata-only", "d/h.txt", false).await.unwrap();
     // Gone already: only the record goes.
     staged("d/.strata-gone", "d/f.txt", false).await.unwrap();
     // Still being written by an operation here: left alone.
@@ -641,13 +651,14 @@ async fn replaces_a_crash_interrupted_are_settled() {
         .await
         .unwrap();
 
-    assert_eq!(reconcile(&t.st).await.unwrap(), 4);
+    assert_eq!(reconcile(&t.st).await.unwrap(), 5);
     assert_eq!(
         t.names("d").await,
-        vec![".strata-elsewhere", "f (2).txt", "f.txt", "g.txt"]
+        vec![".strata-elsewhere", "f (2).txt", "f.txt", "g.txt", "h.txt"]
     );
     assert_eq!(t.download("d/f (2).txt").await, b"moved");
     assert_eq!(t.download("d/g.txt").await, b"alone");
+    assert_eq!(t.download("d/h.txt").await, b"only");
     assert_eq!(t.download("d/f.txt").await, b"old");
     drop(busy);
     let left: Vec<String> = sqlx::query_scalar("SELECT path FROM staged_items ORDER BY id")
