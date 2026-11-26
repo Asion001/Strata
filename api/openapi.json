@@ -368,6 +368,10 @@
       },
       "DeleteBody": {
         "properties": {
+          "keep_going": {
+            "description": "Go on past a path that fails, and report it in `results` (otherwise\nthe first failure is the answer, and later paths aren't tried).",
+            "type": "boolean"
+          },
           "paths": {
             "items": {
               "type": "string"
@@ -384,11 +388,61 @@
         ],
         "type": "object"
       },
+      "DeleteResult": {
+        "description": "What happened to one path of a delete.",
+        "properties": {
+          "error": {
+            "description": "Why it failed (only with `keep_going`), and the HTTP status that error\nwould have had.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "type": "string"
+          },
+          "status": {
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "trash_id": {
+            "description": "Its trash id, for an undo. None when deleted for good, failed, or (rarely)\nwhile its move into the trash is still being completed.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "trashed": {
+            "description": "It went to the trash (rather than being deleted for good).",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "path",
+          "trashed",
+          "error",
+          "status",
+          "trash_id"
+        ],
+        "type": "object"
+      },
       "DeletedBody": {
         "properties": {
           "deleted": {
             "format": "int64",
             "type": "integer"
+          },
+          "results": {
+            "description": "One entry per path, in request order.",
+            "items": {
+              "$ref": "#/components/schemas/DeleteResult"
+            },
+            "type": "array"
           },
           "trash_ids": {
             "description": "The trash ids of the items that went to the trash (for an undo), in\nrequest order. Items deleted for good have none (nor, rarely, one\nwhose move is still being completed), so this can be shorter than\n`paths`.",
@@ -407,7 +461,8 @@
         "required": [
           "deleted",
           "trashed",
-          "trash_ids"
+          "trash_ids",
+          "results"
         ],
         "type": "object"
       },
