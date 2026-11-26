@@ -25,7 +25,7 @@
   import XIcon from '@lucide/svelte/icons/x';
   import InfoIcon from '@lucide/svelte/icons/info';
   import { fileHref } from '$lib/components/shell/nav';
-  import { cancelUpload, clearFinished, enqueue as queueFiles, net, retryUpload, uploads } from '$lib/offline/app.svelte';
+  import { cancelUpload, clearFinished, enqueue as queueFiles, net, retryUpload, uploads, userRecorded } from '$lib/offline/app.svelte';
   import { isActive, progress as jobProgress } from '$lib/offline/jobs';
   const Recent = () => import('$lib/offline/recent');
   import { reloadMounts } from '$lib/mounts.svelte';
@@ -60,6 +60,8 @@
     if (!session.user) return;
     const p = join(listedPath, e.name);
     const on = !pinned.has(p);
+    // (Right after the page loads, who is signed in may not be recorded yet.)
+    await userRecorded();
     const r = await (await Recent()).pin(session.user.id, p, e.etag, contentUrl(p), on, e.size).catch(() => 'failed' as const);
     const why = { 'no-version': 'it has no version to keep', unreadable: "it couldn't be read", 'too-big': 'it is too big, or offline storage is full', failed: 'offline storage is not available' };
     if (r !== true) toast(`Couldn't keep “${e.name}” offline: ${why[r]}.`, 'error');
@@ -245,7 +247,7 @@
     const it = viewerIndex >= 0 ? viewerItems[viewerIndex] : undefined;
     if (!it || !session.user || offlineAt) return;
     const user = session.user.id;
-    void Recent().then((r) => r.remember(user, it.path, it.etag, contentUrl(it.path), it.size)).catch(() => {});
+    void userRecorded().then(Recent).then((r) => r.remember(user, it.path, it.etag, contentUrl(it.path), it.size)).catch(() => {});
   });
 
   function open(e: Entry) {
