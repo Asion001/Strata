@@ -451,7 +451,47 @@ struct Server {
     s3: i64,
     /// Fresh base folders, so no two mounts overlap.
     next: u32,
-    case: u32,
+    /// Unique per case in this run: names its database and storage folders.
+    case: String,
+}
+
+/// Each case gets its own database and S3 folder; drop both when the case
+/// ends, passed or failed (shrinking fails many), so long runs don't fill
+/// the disk. Local folders go with the temp dir.
+impl Drop for Server {
+    fn drop(&mut self) {
+        let db = self.t.st.db.clone();
+        let url = self.t.st.cfg.database_url.clone();
+        let case = self.case.clone();
+        // On a thread of its own: this may run inside the runtime.
+        let _ = std::thread::spawn(move || {
+            rt().block_on(async move {
+                db.close().await;
+                let name = url.rsplit('/').next().unwrap().to_string();
+                if let Ok(admin) =
+                    sqlx::PgPool::connect(&std::env::var("STRATA_TEST_DATABASE_URL").unwrap()).await
+                {
+                    let _ =
+                        sqlx::query(&format!("DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)"))
+                            .execute(&admin)
+                            .await;
+                    admin.close().await;
+                }
+                if let Some(Some((_, c))) = MINIO.get()
+                    && let Ok(mut r) = c
+                        .exec(ExecCommand::new([
+                            "sh",
+                            "-c",
+                            &format!("mc rm --recursive --force l/prop/c{case}/"),
+                        ]))
+                        .await
+                {
+                    let _ = r.stdout_to_vec().await;
+                }
+            })
+        })
+        .join();
+    }
 }
 
 impl Server {
@@ -536,7 +576,7 @@ impl Server {
             }
             Op::Mount(p, store) => {
                 self.next += 1;
-                let base = format!("c{}-m{}", self.case, self.next);
+                let base = format!("c{}/m{}", self.case, self.next);
                 let (conn, mode) = match store {
                     Store::LocalRaw => (self.local, "raw"),
                     Store::LocalHashed => (self.local, "hashed"),
@@ -569,7 +609,33 @@ impl Server {
                 }
             }
             Op::Gc => {
+                // With grace 0 every unreferenced blob goes, from the
+                // database and from its backend.
+                let unreferenced = "SELECT b.volume_id, b.hash FROM blobs b WHERE
+                      NOT EXISTS (SELECT 1 FROM nodes n WHERE n.volume_id = b.volume_id AND n.chunks @> ARRAY[b.hash])
+                  AND NOT EXISTS (SELECT 1 FROM uploads u WHERE u.volume_id = b.volume_id AND u.chunks @> ARRAY[b.hash])";
+                let before: Vec<(i64, Vec<u8>)> = sqlx::query_as(unreferenced)
+                    .fetch_all(&self.t.st.db)
+                    .await
+                    .unwrap();
                 background::gc(&self.t.st, 0).await.unwrap();
+                let after: Vec<(i64, Vec<u8>)> = sqlx::query_as(unreferenced)
+                    .fetch_all(&self.t.st.db)
+                    .await
+                    .unwrap();
+                assert!(
+                    after.is_empty(),
+                    "unreferenced blobs left after a GC: {}",
+                    after.len()
+                );
+                for (vid, h) in before {
+                    let h = Hash::from_slice(&h).unwrap();
+                    assert!(
+                        !store_of(self, vid).await.exists(&h).await.unwrap(),
+                        "collected blob {} of volume {vid} still on its backend",
+                        h.hex()
+                    );
+                }
                 true
             }
         }
@@ -622,7 +688,10 @@ impl StateMachineTest for Sut {
                 local: local["id"].as_i64().unwrap(),
                 s3: s3["id"].as_i64().unwrap(),
                 next: 0,
-                case: rand::random(),
+                case: {
+                    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                    format!("p{}-{}-{}", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::Relaxed), rand::random::<u16>())
+                },
                 t,
             })
         })

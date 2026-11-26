@@ -1445,6 +1445,7 @@ async fn paths_below_a_file_are_not_found() {
     .await;
     t.upload("raw/f", b"").await;
     t.upload("home-f", b"x").await;
+    t.upload("src", b"s").await;
     for p in ["raw/f/x", "home-f/x"] {
         let (s, v) = t
             .json(
@@ -1460,5 +1461,22 @@ async fn paths_below_a_file_are_not_found() {
             .json("POST", "/api/files/delete", json!({"paths": [p]}))
             .await;
         assert_eq!(s, StatusCode::NOT_FOUND, "delete {p}: {v}");
+        // Writing below a file is a conflict, not a missing path.
+        let (s, v) = t
+            .json(
+                "POST",
+                "/api/files/mkdir",
+                json!({"path": format!("{p}/y")}),
+            )
+            .await;
+        assert_eq!(s, StatusCode::CONFLICT, "mkdir below {p}: {v}");
+        let (s, v) = t
+            .json(
+                "POST",
+                "/api/files/move",
+                json!({"from": "src", "to": format!("{p}/y")}),
+            )
+            .await;
+        assert_eq!(s, StatusCode::CONFLICT, "move to below {p}: {v}");
     }
 }

@@ -59,6 +59,10 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov
+      # The browser chunker property runs the web chunker under Node.
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
       - name: Rust coverage
         run: |
           cargo llvm-cov --workspace --lcov --output-path lcov.info
@@ -75,7 +79,8 @@ jobs:
           retention-days: 14
 
   # The property tests at length: 10,000 cases of the file-tree state
-  # machine against the real server (Postgres, MinIO), and of the others.
+  # machine against the real server (Postgres, MinIO) and of the cheap
+  # properties (the chunker ones cap themselves: 512 cases, 64 under Node).
   properties:
     runs-on: ubuntu-latest
     timeout-minutes: 350

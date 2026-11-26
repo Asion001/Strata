@@ -403,19 +403,27 @@ pub async fn delete(
     if m.path.is_empty() {
         return Err(bad("the root folder cannot be unmounted"));
     }
-    let nested = user_mounts(&st, u.id)
-        .await?
-        .iter()
-        .any(|o| o.id != m.id && paths::strip_prefix(&o.path, &m.path).is_some());
-    if nested {
-        return Err(conflict(
-            "other mounts live inside this one; remove them first",
-        ));
-    }
-    sqlx::query("DELETE FROM mounts WHERE id = $1")
+    // Under the layout lock, so a mount can't be added inside this one
+    // while it goes (it would be cut off from the tree).
+    let (mut tx, _layout) = lock_layout(&st).await?;
+    mounts_inside(&mut *tx, u.id, &m.path)
+        .await
+        .map_err(|e| match e {
+            ApiError::Conflict(_) => {
+                conflict("other mounts live inside this one; remove them first")
+            }
+            e => e,
+        })?;
+    let gone = sqlx::query("DELETE FROM mounts WHERE id = $1 AND owner_id = $2")
         .bind(id)
-        .execute(&st.db)
-        .await?;
+        .bind(u.id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    if gone == 0 {
+        return Err(ApiError::NotFound);
+    }
+    tx.commit().await?;
     invalidate(&st, u.id);
     journal::record_user(
         &st,
