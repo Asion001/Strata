@@ -13,7 +13,6 @@ const Recent = () => import('./recent');
 
 // ---------------------------------------------------------------- user
 
-
 // (Pending until the first sign-in is recorded: the page can ask before
 // the layout has said who is signed in.)
 let firstRecorded: () => void = () => {};

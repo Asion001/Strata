@@ -321,7 +321,6 @@ describe('recent files', () => {
   });
 });
 
-
 describe('who is signed in here', () => {
   it('a page goes by localStorage, so a lost Cache Storage record costs no pin (issue #29)', async () => {
     served['/c/a'] = { body: file(3) };
