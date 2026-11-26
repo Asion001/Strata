@@ -201,7 +201,7 @@
         "description": "A deleted connection.",
         "properties": {
           "left_on_storage": {
-            "description": "Trashed items from its local folder that couldn't be removed (the\nfolder couldn't be reached); they stay in its `.strata-trash` folder.",
+            "description": "Trashed items from its local folder that couldn't be removed (the\nfolder couldn't be reached, or removing failed); they stay in its\n`.strata-trash` folder.",
             "minimum": 0,
             "type": "integer"
           }

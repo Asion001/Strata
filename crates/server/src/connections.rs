@@ -529,6 +529,7 @@ pub async fn delete(
              restore them, or delete the connection with purge_trash to remove them for good"
         )));
     }
+    let mut removed = 0usize;
     if trashed > 0 && q.purge_trash {
         let ids: Vec<i64> = sqlx::query_scalar(
             "SELECT t.id FROM trash t JOIN volumes v ON v.id = t.volume_id WHERE v.connection_id = $1",
@@ -538,7 +539,8 @@ pub async fn delete(
         .await?;
         for t in ids {
             match crate::trash::purge(&st, t).await {
-                Ok(()) | Err(ApiError::NotFound) => {}
+                Ok(()) => removed += 1,
+                Err(ApiError::NotFound) => {}
                 // Storage gone, offline or failing: the connection goes
                 // anyway (asked for). Its row goes with the others below, a
                 // raw item's files are removed there if the folder is there,
@@ -552,10 +554,9 @@ pub async fn delete(
     // Every volume locked: no trash or restore is half done on them while
     // their rows go, and none starts.
     // (A refusal after a purge says that the trash is gone already.)
-    let purged = trashed > 0 && q.purge_trash;
     let refused = |e: ApiError| match e {
-        ApiError::Conflict(m) if purged => conflict(format!(
-            "the deleted items from this connection were removed, but the connection wasn't: {m}"
+        ApiError::Conflict(m) if removed > 0 => conflict(format!(
+            "{removed} deleted item(s) from this connection were removed for good, but the connection wasn't: {m}"
         )),
         e => e,
     };
