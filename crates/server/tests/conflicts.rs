@@ -207,6 +207,7 @@ async fn uploads_ask_at_create_and_again_at_commit() {
         (&b""[..], false, StatusCode::CONFLICT),
         (&b"\n"[..], false, StatusCode::CONFLICT),
         (&b""[..], true, StatusCode::CONFLICT),
+        (&b"null"[..], true, StatusCode::CONFLICT),
         (&b"\xff\xfe"[..], true, StatusCode::BAD_REQUEST),
         (
             &b"{\"on_conflict\": \"sideways\"}"[..],

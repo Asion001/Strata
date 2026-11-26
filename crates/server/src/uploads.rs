@@ -306,14 +306,15 @@ pub async fn commit(
     Path(id): Path<String>,
     body: Bytes,
 ) -> ApiResult<Json<serde_json::Value>> {
-    // (No body, or `{}`: as asked at create. A body is JSON, checked as the
-    // `Json` extractor checks any other.)
+    // (No body, `null` or `{}`: as asked at create. A body is JSON, checked
+    // as the `Json` extractor checks any other.)
     let req = if body.iter().all(u8::is_ascii_whitespace) {
         CommitReq::default()
     } else {
-        Json::<CommitReq>::from_bytes(&body)
+        Json::<Option<CommitReq>>::from_bytes(&body)
             .map_err(|e| ApiError::BadRequest(e.body_text()))?
             .0
+            .unwrap_or_default()
     };
     load(&st, u.id, &id).await?;
     // One commit of an upload at a time: a retry sent while the first is
