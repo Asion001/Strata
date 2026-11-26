@@ -1174,6 +1174,31 @@ pub async fn put_hashed_file(
     )
 }
 
+/// Every chunk of a hashed file must be a stored blob of exactly the size
+/// the file says, or reads of it would come up short (an upload may declare
+/// any size for a hash whose blob is already stored).
+async fn check_chunks_stored(
+    st: &AppState,
+    volume_id: i64,
+    chunks: &[Hash],
+    sizes: &[i64],
+) -> ApiResult<()> {
+    let wrong: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM unnest($2::bytea[], $3::bigint[]) AS c(hash, size)
+         LEFT JOIN blobs b ON b.volume_id = $1 AND b.hash = c.hash
+         WHERE b.size IS DISTINCT FROM c.size",
+    )
+    .bind(volume_id)
+    .bind(chunks.iter().map(|c| c.0.to_vec()).collect::<Vec<_>>())
+    .bind(sizes)
+    .fetch_one(&st.db)
+    .await?;
+    if wrong > 0 {
+        return Err(conflict("the chunk sizes do not match the stored chunks"));
+    }
+    Ok(())
+}
+
 /// `put_hashed_file` with a precondition, checked under the volume lock in
 /// the same critical section as the write. Returns whether the file is new
 /// and the version that was written (taken under the lock, so it is ours).
@@ -1187,6 +1212,10 @@ pub async fn put_hashed_file_if(
     expect: &Expect,
 ) -> ApiResult<(bool, Node)> {
     ensure_writable(st, m).await?;
+    if chunks.len() != sizes.len() {
+        return Err(bad("chunk sizes do not match the chunk list"));
+    }
+    check_chunks_stored(st, m.volume_id, chunks, sizes).await?;
     let (parent, name) = paths::split(rel).ok_or_else(|| bad("cannot write to a mount point"))?;
     // Saving over an existing file needs no parent folders: if the file is
     // still there, so is its folder. Only plain writes and creations make
@@ -1198,6 +1227,8 @@ pub async fn put_hashed_file_if(
     if *expect != Expect::Any {
         check_expect(expect, get_node(st, m.volume_id, rel).await?.as_ref())?;
     }
+    // Again under the lock (GC or another writer may have run since).
+    check_chunks_stored(st, m.volume_id, chunks, sizes).await?;
     let content = manifest_hash(chunks);
     let size: i64 = sizes.iter().sum();
     let mtime = mtime.unwrap_or_else(Utc::now);

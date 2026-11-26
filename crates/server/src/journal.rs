@@ -265,7 +265,12 @@ impl Cursor {
     }
     pub fn decode(s: &str) -> ApiResult<Self> {
         let bytes = hex::decode(s).map_err(|_| bad("invalid cursor"))?;
-        serde_json::from_slice(&bytes).map_err(|_| bad("invalid cursor"))
+        let c: Cursor = serde_json::from_slice(&bytes).map_err(|_| bad("invalid cursor"))?;
+        // Ids and sequence numbers are never negative.
+        if c.u < 0 || c.v.iter().any(|(id, seq)| *id < 0 || *seq < 0) {
+            return Err(bad("invalid cursor"));
+        }
+        Ok(c)
     }
 }
 
@@ -656,5 +661,9 @@ mod tests {
         };
         assert_eq!(Cursor::decode(&c.encode()).unwrap(), c);
         assert!(Cursor::decode("zz").is_err());
+        // Negative ids or positions are no cursor.
+        for bad in [r#"{"u":-1}"#, r#"{"v":{"-1":0}}"#, r#"{"v":{"1":-5}}"#] {
+            assert!(Cursor::decode(&hex::encode(bad)).is_err(), "{bad}");
+        }
     }
 }

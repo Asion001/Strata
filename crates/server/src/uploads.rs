@@ -145,6 +145,14 @@ pub async fn create(
         hashes.push(h.0.to_vec());
         sizes.push(c.size);
     }
+    // A hash fixes its content, so also its size: one hash listed with two
+    // sizes can't be uploaded (and its chunks are kept by hash).
+    let mut seen = std::collections::HashMap::new();
+    for (h, s) in hashes.iter().zip(&sizes) {
+        if *seen.entry(h.clone()).or_insert(*s) != *s {
+            return Err(bad("one chunk hash with two sizes"));
+        }
+    }
     if sizes.iter().sum::<i64>() != req.size {
         return Err(bad("chunk sizes do not add up to the file size"));
     }

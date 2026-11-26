@@ -129,7 +129,19 @@ fn access_key(st: &AppState, s: &ShareRow) -> String {
     blake3::keyed_hash(&key, msg.as_bytes()).to_hex()[..32].to_string()
 }
 
+/// Share tokens are `random_token(12)`: 24 lowercase hex characters.
+/// Anything else is no share; it is refused before the database is asked.
+pub fn token_is_well_formed(token: &str) -> bool {
+    token.len() == 24
+        && token
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 async fn load_share(st: &AppState, token: &str) -> ApiResult<ShareRow> {
+    if !token_is_well_formed(token) {
+        return Err(ApiError::NotFound);
+    }
     sqlx::query_as(
         "SELECT id, owner_id, path, volume_id, rel_path, node_id, is_dir, password_hash FROM shares
          WHERE token = $1 AND (expires_at IS NULL OR expires_at > now())",
@@ -260,4 +272,25 @@ pub async fn thumb(
     let (_, m, rel, _) = open(&st, &token, &q).await?;
     let node = vfs::stat(&st, &m, &rel).await?;
     thumbs::thumbnail(&st, &m, &rel, &node, q.size.unwrap_or(256), &headers).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_tokens_the_server_makes_are_looked_up() {
+        assert!(token_is_well_formed(&random_token(12)));
+        for bad in [
+            "",
+            "abc",
+            &"a".repeat(23),
+            &"a".repeat(25),
+            "0123456789ABCDEF01234567",
+            "0123456789abcdef0123456g",
+            "0123456789abcdef012345\u{e9}",
+        ] {
+            assert!(!token_is_well_formed(bad), "{bad:?}");
+        }
+    }
 }
