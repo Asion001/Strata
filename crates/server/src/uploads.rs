@@ -296,16 +296,10 @@ pub async fn commit(
     State(st): State<AppState>,
     AuthUser(u): AuthUser,
     Path(id): Path<String>,
-    body: Bytes,
+    body: Option<Json<CommitReq>>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    // (No body, `null` or `{}`: as asked at create.)
-    let req: CommitReq = if body.iter().all(u8::is_ascii_whitespace) {
-        CommitReq::default()
-    } else {
-        serde_json::from_slice::<Option<CommitReq>>(&body)
-            .map_err(|e| bad(format!("bad request body: {e}")))?
-            .unwrap_or_default()
-    };
+    // (No JSON body, or `{}`: as asked at create.)
+    let req = body.map(|Json(r)| r).unwrap_or_default();
     load(&st, u.id, &id).await?;
     // One commit of an upload at a time: a retry sent while the first is
     // still writing waits for it (and then gets the same answer).
@@ -411,9 +405,20 @@ async fn commit_detached(
         },
     )
     .await?;
-    let (m, rel) = mounts::resolve(&st, uid, &path).await?;
-    let node = vfs::stat(&st, &m, &rel).await?;
-    let answer = json!({ "path": path, "name": node.name, "size": node.size, "mtime": node.mtime, "etag": node.etag });
+    // (Saved: whatever fails from here, the answer says so, and is kept.)
+    let node = match mounts::resolve(&st, uid, &path).await {
+        Ok((m, rel)) => vfs::stat(&st, &m, &rel).await.ok(),
+        Err(_) => None,
+    };
+    let answer = match node {
+        Some(n) => {
+            json!({ "path": path, "name": n.name, "size": n.size, "mtime": n.mtime, "etag": n.etag })
+        }
+        None => json!({
+            "path": path, "name": paths::split(&path).map_or("", |(_, n)| n), "size": up.size,
+            "mtime": up.mtime.unwrap_or_else(Utc::now), "etag": null
+        }),
+    };
     // Kept (without its chunks) until the uploads expire, so a commit sent
     // again gets this answer instead of writing a second copy. (The file is
     // saved either way: a failure here doesn't make this one fail.)

@@ -201,18 +201,26 @@ async fn uploads_ask_at_create_and_again_at_commit() {
     let (s, v) = t.json("POST", &commit, json!({})).await;
     assert_eq!(s, StatusCode::CONFLICT, "{v}");
     assert_eq!(v["code"], "exists");
-    // No body or `null` is the default too; a body that isn't JSON is refused.
-    for (body, want) in [
-        (&b" null "[..], StatusCode::CONFLICT),
-        (&b"\n"[..], StatusCode::CONFLICT),
-        (&b"\xff\xfe"[..], StatusCode::BAD_REQUEST),
+    // No body is the default too; a JSON body that doesn't fit is refused.
+    let json_type = [("content-type", "application/json")];
+    for (body, json, want) in [
+        (&b""[..], false, StatusCode::CONFLICT),
+        (&b"\n"[..], false, StatusCode::CONFLICT),
+        (&b"\xff\xfe"[..], true, StatusCode::BAD_REQUEST),
         (
             &b"{\"on_conflict\": \"sideways\"}"[..],
-            StatusCode::BAD_REQUEST,
+            true,
+            StatusCode::UNPROCESSABLE_ENTITY,
         ),
     ] {
+        let headers: &[(&str, &str)] = if json { &json_type } else { &[] };
         let (s, _, _) = t
-            .raw("POST", &commit, axum::body::Body::from(body.to_vec()), &[])
+            .raw(
+                "POST",
+                &commit,
+                axum::body::Body::from(body.to_vec()),
+                headers,
+            )
             .await;
         assert_eq!(s, want, "{body:?}");
     }
@@ -376,11 +384,12 @@ async fn names_in_flight_are_never_reused() {
         .await
         .unwrap();
     assert_eq!(held.path, "f.txt");
-    // (Fail waits for the other one first, up to a limit.)
+    // (Fail waits for the other one first, up to a limit: then "try
+    // again", not a refusal.)
     let busy = place(&t.st, uid, "f.txt", false, OnConflict::Fail).await;
     assert!(matches!(
         busy,
-        Err(strata_server::error::ApiError::Conflict(_))
+        Err(strata_server::error::ApiError::Unavailable(_))
     ));
     let next = place(&t.st, uid, "f.txt", false, OnConflict::Rename)
         .await

@@ -183,7 +183,12 @@ pub async fn place(
                 let key = claim_key_of(&m, &rel);
                 wait_claim(st, key)
                     .await
-                    .ok_or_else(|| conflict("something is still being written there; try again"))?
+                    // (Not a refusal: the other one is still at it.)
+                    .ok_or_else(|| {
+                        ApiError::Unavailable(
+                            "something is still being written there; try again".into(),
+                        )
+                    })?
             }
         };
         let node = match vfs::stat(st, &m, &rel).await {
@@ -347,6 +352,7 @@ where
     }));
     let r = replace(
         st,
+        row,
         user_id,
         &target.path,
         &staged.path,
@@ -374,6 +380,7 @@ where
 #[allow(clippy::too_many_arguments)]
 async fn replace<F, Fut>(
     st: &AppState,
+    row: i64,
     user_id: i64,
     to: &str,
     staged: &str,
@@ -407,21 +414,19 @@ where
         }
         return Err(e);
     }
-    // (Whole now: if a crash comes next, a copy can still take the name.
-    // Only a copy needs to know; nothing stops here for it.)
-    if let Err(e) =
-        sqlx::query("UPDATE staged_items SET written = TRUE WHERE path = $2 AND user_id = $1")
-            .bind(user_id)
-            .bind(staged)
-            .execute(&st.db)
-            .await
-    {
-        tracing::warn!("staged item {staged} not marked whole: {e}");
-    }
-    // Only now does the old one go (to the trash where there is one). Its
-    // share links stay with it: a different item at the same path never
-    // inherits them.
-    if let Err(e) = vfs::delete(st, user_id, to, true).await {
+    // Whole now (recorded first: after a crash past this point, a copy may
+    // be all there is). Only now does the old one go (to the trash where
+    // there is one). Its share links stay with it: a different item at the
+    // same path never inherits them.
+    let marked = sqlx::query("UPDATE staged_items SET written = TRUE WHERE id = $1")
+        .bind(row)
+        .execute(&st.db)
+        .await;
+    let gone = match marked {
+        Ok(_) => vfs::delete(st, user_id, to, true).await,
+        Err(e) => Err(e.into()),
+    };
+    if let Err(e) = gone {
         // The old one stays; so does the source of a move, which is now
         // the staged item: put it back where it was.
         if is_move {
