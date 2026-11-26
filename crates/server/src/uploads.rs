@@ -290,31 +290,46 @@ pub async fn commit(
             .map_err(|e| bad(format!("bad request body: {e}")))?
             .unwrap_or_default()
     };
+    load(&st, u.id, &id).await?;
     // One commit of an upload at a time: a retry sent while the first is
     // still writing waits for it (and then finds the upload done: 404).
-    let _one = loop {
+    let mut waited = 0;
+    let one = loop {
         if let Some(c) = conflicts::claim_key(&st, format!("upload:{id}")) {
             break c;
         }
+        waited += 1;
+        if waited > COMMIT_WAIT_TICKS {
+            return Err(conflict("this upload is still being saved; try again"));
+        }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     };
-    let up = load(&st, u.id, &id).await?;
-    let miss = missing(&st, u.id, &id, &up).await?;
+    // (To the end, even if this request goes away.)
+    conflicts::detached(async move {
+        let _one = one;
+        commit_detached(st, u.id, id, req).await
+    })
+    .await
+}
+
+/// How long a commit sent again waits for the first (in 50 ms ticks).
+const COMMIT_WAIT_TICKS: u32 = 1200;
+
+async fn commit_detached(
+    st: AppState,
+    uid: i64,
+    id: String,
+    req: CommitReq,
+) -> ApiResult<Json<serde_json::Value>> {
+    let up = load(&st, uid, &id).await?;
+    let miss = missing(&st, uid, &id, &up).await?;
     if !miss.is_empty() {
         return Err(conflict(format!("{} chunks still missing", miss.len())));
     }
-    let (m, rel) = mounts::resolve(&st, u.id, &up.path).await?;
+    let (m, _) = mounts::resolve(&st, uid, &up.path).await?;
     if m.volume_id != up.volume_id {
         return Err(conflict(
             "the destination folder changed; restart the upload",
-        ));
-    }
-    if let Ok(n) = vfs::stat(&st, &m, &rel).await
-        && n.is_dir
-        && req.on_conflict == OnConflict::Replace
-    {
-        return Err(conflict(
-            "a folder has that name; keep both instead, or rename the folder",
         ));
     }
     let hashes: Vec<Hash> = up
@@ -324,7 +339,7 @@ pub async fn commit(
         .collect();
     let path = conflicts::write_at(
         &st,
-        u.id,
+        uid,
         &up.path,
         false,
         req.on_conflict,
@@ -346,7 +361,7 @@ pub async fn commit(
                 vfs::Expect::Absent
             };
             async move {
-                let (m, rel) = mounts::resolve(&st, u.id, &at).await?;
+                let (m, rel) = mounts::resolve(&st, uid, &at).await?;
                 if m.volume_id != volume {
                     return Err(conflict(
                         "the destination folder changed; restart the upload",
@@ -378,7 +393,7 @@ pub async fn commit(
         },
     )
     .await?;
-    let (m, rel) = mounts::resolve(&st, u.id, &path).await?;
+    let (m, rel) = mounts::resolve(&st, uid, &path).await?;
     sqlx::query("DELETE FROM uploads WHERE id = $1")
         .bind(&id)
         .execute(&st.db)

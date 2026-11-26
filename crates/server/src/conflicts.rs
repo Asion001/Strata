@@ -180,6 +180,18 @@ pub async fn place(
     Err(conflict("too many items with that name"))
 }
 
+/// Run `op` to its end even if the request that started it goes away: a
+/// replace dropped halfway would leave the item under its hidden name.
+pub async fn detached<T, Fut>(op: Fut) -> ApiResult<T>
+where
+    T: Send + 'static,
+    Fut: std::future::Future<Output = ApiResult<T>> + Send + 'static,
+{
+    tokio::spawn(op)
+        .await
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("operation stopped: {e}")))?
+}
+
 /// Where the arriving item comes from.
 #[derive(Clone, Copy)]
 pub enum Source<'a> {

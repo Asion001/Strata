@@ -361,18 +361,21 @@ pub async fn move_(
     Json(b): Json<FromTo>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let (from, to, is_dir) = from_to(&st, u.id, &b, false).await?;
-    let path = conflicts::write_at(
-        &st,
-        u.id,
-        &to,
-        is_dir,
-        b.on_conflict,
-        Source::Move(&from),
-        |at, _| {
-            let (st, from) = (st.clone(), from.clone());
-            async move { vfs::move_path(&st, u.id, &from, &at).await }
-        },
-    )
+    let path = conflicts::detached(async move {
+        conflicts::write_at(
+            &st,
+            u.id,
+            &to,
+            is_dir,
+            b.on_conflict,
+            Source::Move(&from),
+            |at, _| {
+                let (st, from) = (st.clone(), from.clone());
+                async move { vfs::move_path(&st, u.id, &from, &at).await }
+            },
+        )
+        .await
+    })
     .await?;
     Ok(Json(json!({ "path": path })))
 }
@@ -383,18 +386,21 @@ pub async fn copy(
     Json(b): Json<FromTo>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let (from, to, is_dir) = from_to(&st, u.id, &b, true).await?;
-    let path = conflicts::write_at(
-        &st,
-        u.id,
-        &to,
-        is_dir,
-        b.on_conflict,
-        Source::Copy(&from),
-        |at, _| {
-            let (st, from) = (st.clone(), from.clone());
-            async move { vfs::copy_path(&st, u.id, &from, &at).await }
-        },
-    )
+    let path = conflicts::detached(async move {
+        conflicts::write_at(
+            &st,
+            u.id,
+            &to,
+            is_dir,
+            b.on_conflict,
+            Source::Copy(&from),
+            |at, _| {
+                let (st, from) = (st.clone(), from.clone());
+                async move { vfs::copy_path(&st, u.id, &from, &at).await }
+            },
+        )
+        .await
+    })
     .await?;
     Ok(Json(json!({ "path": path })))
 }
