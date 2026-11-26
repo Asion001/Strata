@@ -823,13 +823,39 @@ export interface components {
             username: string;
         };
         DeleteBody: {
+            /**
+             * @description Go on past a path that fails, and report it in `results` (otherwise
+             *     the first failure is the answer, and later paths aren't tried).
+             */
+            keep_going?: boolean;
             paths: string[];
             /** @description Skip the trash and delete for good. */
             permanent?: boolean;
         };
+        /** @description What happened to one path of a delete. */
+        DeleteResult: {
+            /**
+             * @description Why it failed (only with `keep_going`), and the HTTP status that error
+             *     would have had.
+             */
+            error: string | null;
+            path: string;
+            /** Format: int32 */
+            status: number | null;
+            /**
+             * Format: int64
+             * @description Its trash id, for an undo. None when deleted for good, failed, or (rarely)
+             *     while its move into the trash is still being completed.
+             */
+            trash_id: number | null;
+            /** @description It went to the trash (rather than being deleted for good). */
+            trashed: boolean;
+        };
         DeletedBody: {
             /** Format: int64 */
             deleted: number;
+            /** @description One entry per path, in request order. */
+            results: components["schemas"]["DeleteResult"][];
             /**
              * @description The trash ids of the items that went to the trash (for an undo), in
              *     request order. Items deleted for good have none (nor, rarely, one
