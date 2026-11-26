@@ -1,14 +1,6 @@
-import { api } from './api';
+import { api, type Schemas } from './api';
 
-export type MountInfo = {
-  id: number;
-  path: string;
-  mode: string;
-  connection_id: number;
-  connection_name: string;
-  connection_kind: string;
-  base_path: string;
-};
+export type MountInfo = Schemas['Mount'];
 
 /** The signed-in user's mounts, shared by the sidebar and the Mounts page. */
 export const mounts = $state<{ list: MountInfo[] }>({ list: [] });

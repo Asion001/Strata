@@ -10,3 +10,6 @@ deploy/local/
 test-results
 playwright-report
 /web/static/pdfjs
+
+# Schemathesis run cache
+.schemathesis/

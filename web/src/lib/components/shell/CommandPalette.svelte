@@ -2,7 +2,7 @@
   // ⌘K: jump to a page, or find a file or folder by name. A native modal
   // <dialog>, like DialogHost, so it sits above everything and traps focus.
   import { goto } from '$app/navigation';
-  import { api } from '$lib/api';
+  import { api, type Schemas } from '$lib/api';
   import { bytes } from '$lib/format';
   import { cn } from '$lib/utils';
   import { palette } from '$lib/palette.svelte';
@@ -13,7 +13,7 @@
   import { fileHref, folderHref, mainNav, manageNav } from './nav';
   import type { Component } from 'svelte';
 
-  type Hit = { path: string; name: string; is_dir: boolean; size: number; mtime: string };
+  type Hit = Schemas['SearchHit'];
   type Item = { id: string; label: string; detail?: string; href: string; icon?: Component; hit?: Hit };
 
   let el = $state<HTMLDialogElement | null>(null);

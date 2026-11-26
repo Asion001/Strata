@@ -15,7 +15,7 @@ use crate::mounts::{self, Mount};
 use crate::state::AppState;
 use crate::{files, thumbs, vfs};
 
-#[derive(Serialize, sqlx::FromRow)]
+#[derive(Serialize, sqlx::FromRow, utoipa::ToSchema)]
 pub struct Share {
     pub id: i64,
     pub token: String,
@@ -41,7 +41,8 @@ pub async fn list(
     ))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
+#[schema(as = ShareInput)]
 pub struct CreateReq {
     pub path: String,
     pub password: Option<String>,
@@ -196,7 +197,7 @@ pub async fn info(
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct UnlockReq {
     pub password: String,
 }

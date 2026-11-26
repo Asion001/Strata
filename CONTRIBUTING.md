@@ -53,6 +53,24 @@ Code that can lose data (the hashed store, garbage collection, mount
 resolution, moves, and save and write paths) is held to 100% test coverage.
 Everything else aims for at least 90%, and coverage should never drop.
 
+## The API document
+
+The HTTP API is described by an OpenAPI document generated from the code
+(`crates/server/src/openapi.rs`, served at `/api/v1/openapi.json`). A copy is
+committed at `api/openapi.json`, and the web app's API types are generated
+from it. When you change a route or what it sends or takes:
+
+```bash
+UPDATE_OPENAPI=1 cargo test -p strata-server openapi   # rewrite api/openapi.json
+cd web && npm run api:types                            # regenerate the TypeScript types
+```
+
+CI fails when either is out of date, when a route is missing from the
+document, or when an operation documents no 4xx answer.
+`scripts/api-contract.sh` runs Schemathesis against a server in Docker
+(Postgres and MinIO): no 5xx and only documented answers, for every
+operation.
+
 ## Pull requests
 
 - One focused change per PR. Small PRs get reviewed faster.

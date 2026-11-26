@@ -40,21 +40,48 @@ import { isSvg } from './format';
 
 export const enc = encodeURIComponent;
 
-export interface Entry {
-  name: string;
-  is_dir: boolean;
-  size: number;
-  mtime: string;
-  etag: string | null;
-  mount_id: number | null;
-  /** A mount point whose storage is offline. */
-  offline?: boolean;
-}
+// The API's types come from its OpenAPI document (api/openapi.json, made
+// from the server's code): `npm run api:types` writes ./openapi.d.ts.
+import type { components, paths } from './openapi';
+export type Schemas = components['schemas'];
+export type Entry = Schemas['Entry'];
+export type User = Schemas['User'];
 
-export interface User {
-  id: number;
-  username: string;
-  is_admin: boolean;
+type Method = 'get' | 'put' | 'post' | 'delete';
+/** The methods a path has (not `parameters`, nor ones it lacks). */
+export type MethodOf<P extends keyof paths> = {
+  [M in Method]: paths[P][M] extends never | undefined ? never : M;
+}[Method];
+type Op<P extends keyof paths, M extends MethodOf<P>> = paths[P][M];
+type JsonOf<R> = R extends { content: { 'application/json': infer T } } ? T : never;
+/** The JSON answer of an operation (`ApiOk<'/api/auth/me', 'get'>`). */
+export type ApiOk<P extends keyof paths, M extends MethodOf<P>> = Op<P, M> extends { responses: { 200: infer R } } ? JsonOf<R> : never;
+/** The JSON body an operation takes (undefined: none). */
+export type ApiBody<P extends keyof paths, M extends MethodOf<P>> = Op<P, M> extends {
+  requestBody: { content: { 'application/json': infer B } };
+}
+  ? B
+  : undefined;
+/** The values of a path's `{placeholders}`. */
+export type ApiPathParams<P extends keyof paths, M extends MethodOf<P>> = Op<P, M> extends {
+  parameters: { path: infer X };
+}
+  ? X
+  : never;
+
+/** `api()`, typed by the OpenAPI document: path (its placeholders filled
+ *  in from `params`), method, body and answer. */
+export function call<P extends keyof paths, M extends MethodOf<P>>(
+  method: M,
+  path: P,
+  opts: { params?: ApiPathParams<P, M>; body?: ApiBody<P, M>; query?: string } = {}
+): Promise<ApiOk<P, M>> {
+  const params = (opts.params ?? {}) as Record<string, string | number>;
+  const url = String(path).replace(/\{(\w+)\}/g, (_, k: string) => {
+    if (params[k] === undefined) throw new Error(`call: no value for {${k}} in ${String(path)}`);
+    return enc(String(params[k]));
+  });
+  return api(method.toUpperCase(), url + (opts.query ?? ''), opts.body);
 }
 
 export function contentUrl(path: string, download = false) {

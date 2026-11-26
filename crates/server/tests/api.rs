@@ -1365,3 +1365,26 @@ fn walk(dir: &std::path::Path) -> Vec<String> {
     }
     out
 }
+
+/// Text Postgres can't store (a NUL character) is a bad request, not a
+/// server error (found by the API contract test).
+#[tokio::test]
+async fn nul_characters_are_bad_requests() {
+    let Some(t) = app().await else { return };
+    let (s, v) = t
+        .json(
+            "POST",
+            "/api/auth/login",
+            json!({"username": "a\u{0}", "password": "x"}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
+    let (s, v) = t
+        .json(
+            "POST",
+            "/api/shares",
+            json!({"path": "", "password": "p\u{0}w"}),
+        )
+        .await;
+    assert!(s.is_client_error(), "{s} {v}");
+}

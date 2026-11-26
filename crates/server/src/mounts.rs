@@ -17,7 +17,7 @@ use crate::journal::{self, Change};
 use crate::state::AppState;
 use crate::vfs;
 
-#[derive(Clone, Debug, Serialize, sqlx::FromRow)]
+#[derive(Clone, Debug, Serialize, sqlx::FromRow, utoipa::ToSchema)]
 pub struct Mount {
     pub id: i64,
     pub owner_id: i64,
@@ -118,7 +118,8 @@ pub async fn list(
     Ok(Json(v))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
+#[schema(as = MountInput)]
 pub struct CreateReq {
     pub path: String,
     pub connection_id: i64,

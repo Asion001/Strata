@@ -1,7 +1,7 @@
 <script lang="ts">
   import { alertDialog, confirmDialog } from '$lib/dialogs.svelte';
   import { toast, toastError } from '$lib/toast.svelte';
-  import { api } from '$lib/api';
+  import { api, type Schemas } from '$lib/api';
   import { when } from '$lib/format';
   import { cn } from '$lib/utils';
   import Button from '$lib/components/ui/button/button.svelte';
@@ -13,7 +13,7 @@
   import LockIcon from '@lucide/svelte/icons/lock';
   import TrashIcon from '@lucide/svelte/icons/trash';
 
-  type Share = { id: number; token: string; path: string; is_dir: boolean; has_password: boolean; expires_at: string | null; created_at: string };
+  type Share = Schemas['Share'];
   let shares = $state<Share[] | null>(null);
   const load = async () => {
     try { shares = await api('GET', '/api/shares'); } catch (e) { shares ??= []; toastError(e); }

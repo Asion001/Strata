@@ -296,7 +296,7 @@ pub async fn stat(
     ))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct PathBody {
     pub path: String,
 }
@@ -314,7 +314,7 @@ pub async fn mkdir(
     Ok(Json(json!({ "path": path })))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct FromTo {
     pub from: String,
     pub to: String,
@@ -342,7 +342,7 @@ pub async fn copy(
     Ok(Json(json!({ "path": to })))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct DeleteBody {
     pub paths: Vec<String>,
 }
