@@ -30,10 +30,11 @@
       (m) => (Picker = m.default),
       (err) => {
         // Can't load (offline after an update): the browser's prompt asks
-        // instead, for each folder request waiting. Try again next time.
+        // instead.
         console.error('could not load the folder picker', err);
         pickerLoading = false;
-        for (const q of dialogs.queue.filter((q) => q.kind === 'folder')) native(q);
+        // (The one showing; a later one tries again when its turn comes.)
+        if (dialogs.queue[0]?.kind === 'folder') native(dialogs.queue[0]);
       }
     );
   });

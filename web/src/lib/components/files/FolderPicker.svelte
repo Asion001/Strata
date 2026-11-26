@@ -66,15 +66,16 @@
     if (n !== seq) return;
     // Focus left with the row that was opened: back into the list.
     await tick();
-    if (root && !root.contains(document.activeElement)) (rows()[0] ?? filterEl)?.focus();
+    if (root && !root.contains(document.activeElement)) (rows()[0] ?? (fine() ? filterEl : null))?.focus();
   }
   // svelte-ignore state_referenced_locally
   void open(opts.start);
 
   // A mouse or trackpad starts in the filter; a phone doesn't (its keyboard
   // would cover the list).
+  const fine = () => !!window.matchMedia?.('(pointer: fine)').matches;
   $effect(() => {
-    if (window.matchMedia?.('(pointer: fine)').matches) filterEl?.focus();
+    if (fine()) filterEl?.focus();
   });
 
   const rows = () => [...(root?.querySelectorAll<HTMLElement>('[data-row]') ?? [])];
@@ -91,6 +92,7 @@
     // (Where it was asked for, even if the user has moved on since.)
     const made = join(path, name);
     creating = true;
+    createError = '';
     try {
       await api('POST', '/api/files/mkdir', { path: made });
       naming = null;
@@ -169,6 +171,7 @@
           <!-- svelte-ignore a11y_autofocus -->
           <Input
             bind:value={naming}
+            oninput={() => (createError = '')}
             aria-label="New folder name"
             autocomplete="off"
             autofocus

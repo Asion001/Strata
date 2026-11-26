@@ -19,7 +19,7 @@ vi.spyOn(console, 'error').mockImplementation(() => {});
 
 describe('folder pick without the dialog component', () => {
   it('asks for a path, starting at the current folder', async () => {
-    const { prompt } = stub(' /b/c/ ');
+    const { prompt } = stub(' /b//c/ ');
     expect(await pickFolder({ title: 'Move', start: 'a', from: 'a' })).toBe('b/c');
     expect(prompt).toHaveBeenCalledWith(expect.stringContaining('Move'), 'a');
   });

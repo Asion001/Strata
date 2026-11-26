@@ -64,7 +64,8 @@ export function native(r: Request) {
     // (The rules stay with the picker, out of the startup bundle: the
     // server refuses a move into itself, and the same folder does nothing.)
     const v = window.prompt(`${text}\n\nTo folder (full path, empty for Home)`, r.opts.start);
-    const to = v?.trim().replace(/^\/+|\/+$/g, '') ?? null;
+    // (As folder-picker's clean(): "/a//b/ " is a/b.)
+    const to = v === null ? null : v.trim().split('/').filter(Boolean).join('/');
     if (to !== null && to === r.opts.from) window.alert('Pick a different folder.');
     r.done(to === r.opts.from ? null : to);
   } else if (r.kind === 'alert') {
