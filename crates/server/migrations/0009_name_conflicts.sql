@@ -19,5 +19,7 @@ CREATE TABLE staged_items (
     target     TEXT NOT NULL,
     is_dir     BOOLEAN NOT NULL,
     is_move    BOOLEAN NOT NULL,
+    -- The whole item is there (only then can part of a copy take the name).
+    written    BOOLEAN NOT NULL DEFAULT FALSE,
     alive_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );

@@ -1888,7 +1888,7 @@ pub async fn search(st: &AppState, user_id: i64, q: &str, limit: i64) -> ApiResu
                 || CASE WHEN n.parent = '' THEN '' ELSE n.parent || '/' END || n.name AS path,
                 n.name, n.is_dir, n.size, n.mtime
          FROM nodes n JOIN mounts m ON m.volume_id = n.volume_id
-         WHERE m.owner_id = $1 AND n.name ILIKE $2 AND n.name !~ $5
+         WHERE m.owner_id = $1 AND n.name ILIKE $2 AND (n.parent || '/' || n.name) !~ $5
          ORDER BY similarity(n.name, $3) DESC, n.name
          LIMIT $4",
     )
@@ -1896,7 +1896,7 @@ pub async fn search(st: &AppState, user_id: i64, q: &str, limit: i64) -> ApiResu
     .bind(&pattern)
     .bind(q)
     .bind(limit)
-    .bind(crate::conflicts::STAGED_NAME)
+    .bind(crate::conflicts::STAGED_PART)
     .fetch_all(&st.db)
     .await?;
     Ok(hits)

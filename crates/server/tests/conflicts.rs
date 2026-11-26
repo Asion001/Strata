@@ -632,6 +632,13 @@ async fn replaces_a_crash_interrupted_are_settled() {
     // takes the name.
     t.upload("d/.strata-only", b"only").await;
     staged("d/.strata-only", "d/h.txt", false).await.unwrap();
+    sqlx::query("UPDATE staged_items SET written = TRUE WHERE path = 'd/.strata-only'")
+        .execute(&t.st.db)
+        .await
+        .unwrap();
+    // Part of a copy that never finished: goes, even with the name free.
+    t.upload("d/.strata-partial", b"par").await;
+    staged("d/.strata-partial", "d/k.txt", false).await.unwrap();
     // Gone already: only the record goes.
     staged("d/.strata-gone", "d/f.txt", false).await.unwrap();
     // Still being written by an operation here: left alone.
@@ -654,7 +661,7 @@ async fn replaces_a_crash_interrupted_are_settled() {
         .await
         .unwrap();
 
-    assert_eq!(reconcile(&t.st).await.unwrap(), 5);
+    assert_eq!(reconcile(&t.st).await.unwrap(), 6);
     assert_eq!(
         t.names("d").await,
         vec![".strata-elsewhere", "f (2).txt", "f.txt", "g.txt", "h.txt"]
@@ -702,6 +709,11 @@ async fn what_a_replace_writes_beside_is_not_listed() {
         .map(|h| h["name"].as_str().unwrap())
         .collect();
     assert_eq!(hits, vec![".strata-notes"]);
+    // Nor what is inside one.
+    t.upload("p/.strata-0123456789abcdef02/inner-notes.txt", b"x")
+        .await;
+    let (_, v) = t.get("/api/search?q=inner").await;
+    assert_eq!(v["hits"], json!([]));
     // A folder holding only that is still a folder (empty).
     t.upload("q/.strata-0123456789abcdef01", b"staged").await;
     assert!(t.names("q").await.is_empty());

@@ -62,6 +62,8 @@ impl OnConflict {
 /// Names of items a replace writes beside the one it replaces (`.strata-`
 /// and a token), as a regular expression: left out of listings and search.
 pub const STAGED_NAME: &str = r"^\.strata-[0-9a-f]{18}$";
+/// The same, as any part of a path (what is inside one too).
+pub const STAGED_PART: &str = r"(^|/)\.strata-[0-9a-f]{18}(/|$)";
 
 /// A name claimed for an operation in flight (released when dropped).
 pub struct Claim {
@@ -412,6 +414,12 @@ where
         }
         return Err(e);
     }
+    // (Whole now: if a crash comes next, a copy can still take the name.)
+    sqlx::query("UPDATE staged_items SET written = TRUE WHERE path = $2 AND user_id = $1")
+        .bind(user_id)
+        .bind(staged)
+        .execute(&st.db)
+        .await?;
     // Only now does the old one go (to the trash where there is one). Its
     // share links stay with it: a different item at the same path never
     // inherits them.
@@ -455,15 +463,15 @@ where
 /// went already); part of a copy goes. Items an operation (of any server)
 /// is still writing are left alone. Returns how many were settled.
 pub async fn reconcile(st: &AppState) -> ApiResult<usize> {
-    let rows: Vec<(i64, i64, String, String, bool, bool)> = sqlx::query_as(
-        "SELECT id, user_id, path, target, is_dir, is_move FROM staged_items
+    let rows: Vec<(i64, i64, String, String, bool, bool, bool)> = sqlx::query_as(
+        "SELECT id, user_id, path, target, is_dir, is_move, written FROM staged_items
          WHERE alive_at < now() - make_interval(secs => $1) ORDER BY id",
     )
     .bind(STALE_SECS as f64)
     .fetch_all(&st.db)
     .await?;
     let mut settled = 0;
-    for (id, user_id, path, target, is_dir, is_move) in rows {
+    for (id, user_id, path, target, is_dir, is_move, written) in rows {
         // (A path that no longer resolves, or storage that can't be read
         // now: next time.)
         let Ok((m, rel)) = mounts::resolve(st, user_id, &path).await else {
@@ -476,14 +484,13 @@ pub async fn reconcile(st: &AppState) -> ApiResult<usize> {
             Err(ApiError::NotFound) => true,
             Err(_) => false,
             Ok(_) if is_move => keep_visible(st, user_id, &path, &target, is_dir).await != path,
-            // Part of a copy: unless the old item went already (a crash
-            // just before the rename), when it is the only copy there is.
+            // Part of a copy goes (its source is still there), unless it is
+            // whole and the old item went already (a crash just before the
+            // rename): then it is the only copy of what was there.
             Ok(_) => match maybe_there(st, user_id, &target).await {
-                true if is_there(st, user_id, &target).await => {
-                    vfs::delete(st, user_id, &path, false).await.is_ok()
-                }
-                true => false,
-                false => keep_visible(st, user_id, &path, &target, is_dir).await != path,
+                false if written => keep_visible(st, user_id, &path, &target, is_dir).await != path,
+                true if !is_there(st, user_id, &target).await => false,
+                _ => vfs::delete(st, user_id, &path, false).await.is_ok(),
             },
         };
         if done {
