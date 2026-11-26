@@ -61,7 +61,8 @@
     const p = join(listedPath, e.name);
     const on = !pinned.has(p);
     // (Right after the page loads, who is signed in may not be recorded yet.)
-    await userRecorded();
+    if (!session.user) return;
+    await userRecorded(session.user.id);
     if (!session.user) return;
     const r = await (await Recent()).pin(session.user.id, p, e.etag, contentUrl(p), on, e.size).catch(() => 'failed' as const);
     const why = { 'no-version': 'it has no version to keep', unreadable: "it couldn't be read", 'too-big': 'it is too big, or offline storage is full', failed: 'offline storage is not available' };
@@ -249,7 +250,7 @@
     const it = viewerIndex >= 0 ? viewerItems[viewerIndex] : undefined;
     if (!it || !session.user || offlineAt) return;
     const user = session.user.id;
-    void userRecorded().then(Recent).then((r) => r.remember(user, it.path, it.etag, contentUrl(it.path), it.size)).catch(() => {});
+    void userRecorded(user).then(Recent).then((r) => r.remember(user, it.path, it.etag, contentUrl(it.path), it.size)).catch(() => {});
   });
 
   function open(e: Entry) {

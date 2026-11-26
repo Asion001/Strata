@@ -19,11 +19,30 @@ const LAST_USER = 'strata-last-user';
 // the layout has said who is signed in.)
 let firstRecorded: () => void = () => {};
 let recorded: Promise<void> = new Promise((r) => (firstRecorded = r));
-/** Settles once the signed-in user is recorded for offline use: files are
- *  only kept for whoever is recorded, so a "Keep offline" right after the
- *  page loads waits for it (at most 3 s: storage that never answers must
- *  not swallow the click). */
-export const userRecorded = () => Promise.race([recorded, new Promise<void>((r) => setTimeout(r, 3000))]);
+/** Settles once `user` is recorded for offline use: files are only kept
+ *  for whoever is recorded, so a "Keep offline" right after the page loads
+ *  waits for it (at most 3 s: storage that never answers must not swallow
+ *  the click). */
+export async function userRecorded(user: number): Promise<void> {
+  await Promise.race([recorded, new Promise<void>((r) => setTimeout(r, 3000))]);
+  // WebKit can come back without the record right after a few quick
+  // reloads, though each load wrote it (issue #29). This tab still knows
+  // who it signed in as (written at once at sign-in, removed first at
+  // sign-out): if that is `user`, write the record again. A sign-out or
+  // another user's sign-in elsewhere still wins.
+  if (typeof caches === 'undefined' || lastUser()?.id !== user) return;
+  try {
+    if ((await (await Recent()).signedInHere()) === user) return;
+    await record(user);
+    // (Signed out meanwhile, after its delete: take it back.)
+    if (lastUser()?.id !== user) await caches.delete(META);
+  } catch {}
+}
+
+/** Who is signed in, for the service worker and the offline caches. */
+async function record(user: number) {
+  await (await caches.open(META)).put(USER_KEY, new Response(String(user)));
+}
 
 /** Someone is signed in: tell the service worker (it keys cached files by
  *  user), drop what other users left here, remember them for offline. */
@@ -34,9 +53,8 @@ export async function signedIn(u: User) {
   // (Apart: with no Cache Storage, other users' queued uploads still go.)
   const done = (async () => {
     try {
-      if (typeof caches !== 'undefined') await (await caches.open(META)).put(USER_KEY, new Response(String(u.id)));
-      console.log('DBG recorded', u.id);
-    } catch (e) { console.log('DBG record failed', String(e)); }
+      if (typeof caches !== 'undefined') await record(u.id);
+    } catch {}
   })();
   recorded = done;
   await done;
