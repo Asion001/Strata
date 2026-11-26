@@ -930,24 +930,6 @@ async fn sweep_orphans(st: &AppState) -> usize {
     handled
 }
 
-/// Drop a trash row whose storage can't be reached, removing its files if
-/// they happen to be there (best effort). For deleting a connection only.
-pub async fn forget(st: &AppState, id: i64) -> ApiResult<()> {
-    let conn: Option<(i64, String)> = sqlx::query_as(
-        "DELETE FROM trash t USING volumes v WHERE v.id = t.volume_id AND t.id = $1
-         RETURNING v.connection_id, v.mode",
-    )
-    .bind(id)
-    .fetch_optional(&st.db)
-    .await?;
-    if let Some((connection_id, mode)) = conn
-        && mode == "raw"
-    {
-        remove_raw_items(st, &[(id, connection_id)]).await;
-    }
-    Ok(())
-}
-
 /// Remove raw trash items (id, connection) whose rows are already gone.
 /// Best effort: a failure is logged and leaves only hidden files behind.
 pub async fn remove_raw_items(st: &AppState, items: &[(i64, i64)]) {

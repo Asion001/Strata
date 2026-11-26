@@ -768,7 +768,8 @@ export interface components {
         ConnectionDeletedBody: {
             /**
              * @description Trashed items from it that couldn't be removed from its storage (it
-             *     couldn't be reached); they stay in its `.strata-trash` folder.
+             *     couldn't be reached); they stay there (a local folder keeps them in
+             *     `.strata-trash`).
              */
             left_on_storage: number;
         };

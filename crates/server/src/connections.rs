@@ -302,34 +302,9 @@ pub async fn update(
     if repointed {
         // A raw trash lives in the connection's folder: re-pointed, its
         // items could no longer be found (and reconcile would drop them).
-        let raw_ids = || async {
-            sqlx::query_scalar::<_, i64>(
-                "SELECT id FROM volumes WHERE connection_id = $1 AND mode = 'raw' ORDER BY id",
-            )
-            .bind(id)
-            .fetch_all(&st.db)
-            .await
-        };
-        // Locked, then read again: a raw volume made meanwhile is retried.
-        let mut tries = 0;
-        loop {
-            let raw = raw_ids().await?;
-            locked_raw = raw.clone();
-            if raw.is_empty() {
-                break;
-            }
-            let lock = crate::vfs::lock_volumes(&st, &raw).await?;
-            if raw_ids().await? == raw {
-                raw_lock = Some(lock);
-                break;
-            }
-            lock.release().await?;
-            tries += 1;
-            if tries == 3 {
-                return Err(conflict(
-                    "the connection's storage keeps changing; try again",
-                ));
-            }
+        if let Some((lock, ids)) = lock_connection_volumes(&st, id, true).await? {
+            locked_raw = ids;
+            raw_lock = Some(lock);
         }
         let raw_trash: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM trash t JOIN volumes v ON v.id = t.volume_id
@@ -466,6 +441,39 @@ pub struct DeleteQuery {
     pub purge_trash: bool,
 }
 
+/// Lock every volume of a connection (only its raw ones with `raw_only`),
+/// read again once locked: a volume made meanwhile is retried. None when it
+/// has none. Returns the locked ids.
+async fn lock_connection_volumes(
+    st: &AppState,
+    id: i64,
+    raw_only: bool,
+) -> ApiResult<Option<(crate::vfs::VolumeLock, Vec<i64>)>> {
+    let ids = || async {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT id FROM volumes WHERE connection_id = $1 AND (mode = 'raw' OR NOT $2) ORDER BY id",
+        )
+        .bind(id)
+        .bind(raw_only)
+        .fetch_all(&st.db)
+        .await
+    };
+    for _ in 0..3 {
+        let want = ids().await?;
+        if want.is_empty() {
+            return Ok(None);
+        }
+        let lock = crate::vfs::lock_volumes(st, &want).await?;
+        if ids().await? == want {
+            return Ok(Some((lock, want)));
+        }
+        lock.release().await?;
+    }
+    Err(conflict(
+        "the connection's storage keeps changing; try again",
+    ))
+}
+
 pub async fn delete(
     State(st): State<AppState>,
     AuthUser(u): AuthUser,
@@ -510,6 +518,8 @@ pub async fn delete(
     // Trashed items that couldn't be removed from the storage (it can't be
     // reached): the connection still goes, and the answer says so.
     let mut left_on_storage = 0usize;
+    // Raw trash items whose rows are gone: their files are removed below.
+    let mut raw_left: Vec<i64> = Vec::new();
     // (Without purge_trash, trashed items refuse the delete: checked in the
     // transaction below, so one trashed meanwhile counts too.)
     if trashed > 0 && q.purge_trash {
@@ -523,12 +533,23 @@ pub async fn delete(
             match crate::trash::purge(&st, t).await {
                 Ok(()) | Err(ApiError::NotFound) => {}
                 // Storage gone, offline or failing: the connection goes
-                // anyway (asked for), so drop the row; its bytes may stay on
-                // the storage, which the answer reports.
+                // anyway (asked for), so the row goes; a raw item's files
+                // are removed below if the folder is there, and what stays
+                // on the storage is reported.
                 Err(e) => {
                     tracing::warn!("purging trash item {t} for a connection delete failed: {e}");
-                    crate::trash::forget(&st, t).await?;
-                    left_on_storage += 1;
+                    let mode: Option<String> = sqlx::query_scalar(
+                        "DELETE FROM trash t USING volumes v WHERE v.id = t.volume_id AND t.id = $1
+                         RETURNING v.mode",
+                    )
+                    .bind(t)
+                    .fetch_optional(&st.db)
+                    .await?;
+                    match mode.as_deref() {
+                        Some("raw") => raw_left.push(t),
+                        Some(_) => left_on_storage += 1,
+                        None => {}
+                    }
                 }
             }
         }
@@ -552,19 +573,22 @@ pub async fn delete(
             .map(|lr| (root, lr)),
         _ => None,
     };
+    // Every volume locked: no trash or restore is half done on them while
+    // their rows go, and none starts.
+    let lock = lock_connection_volumes(&st, id, false).await?;
     let mut tx = st.db.begin().await?;
     // Trashed items: without purge_trash they aren't removed unasked; with
     // it, any trashed since the purge above go too.
     if !q.purge_trash {
-        let late: i64 = sqlx::query_scalar(
+        let n: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM trash t JOIN volumes v ON v.id = t.volume_id WHERE v.connection_id = $1",
         )
         .bind(id)
         .fetch_one(&mut *tx)
         .await?;
-        if late > 0 {
+        if n > 0 {
             return Err(conflict(format!(
-                "{late} deleted item(s) from this connection are still in the trash; \
+                "{n} deleted item(s) from this connection are still in the trash; \
                  restore them, or delete the connection with purge_trash to remove them for good"
             )));
         }
@@ -577,6 +601,7 @@ pub async fn delete(
     .bind(id)
     .fetch_all(&mut *tx)
     .await?;
+    raw_left.extend(late);
     sqlx::query("DELETE FROM volumes WHERE connection_id = $1")
         .bind(id)
         .execute(&mut *tx)
@@ -586,20 +611,33 @@ pub async fn delete(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
-    if !late.is_empty() {
+    if let Some((lock, _)) = lock {
+        lock.release().await?;
+    }
+    if !raw_left.is_empty() {
         // (Only a folder that is there and the right one: an unmounted
-        // disk's empty mount point would pass every removal as done.)
+        // disk's empty mount point would pass every removal as done. With
+        // no root marker written yet, its trash folder must be there.)
         let there = match root {
-            Some((root, lr)) => st
-                .check_root(id, lr, std::time::Duration::from_secs(20))
-                .await
-                .is_ok()
-                .then_some(root),
+            Some((root, lr)) => {
+                let unmarked = lr.marker.is_none();
+                let ok = st
+                    .check_root(id, lr, std::time::Duration::from_secs(20))
+                    .await
+                    .is_ok()
+                    && (!unmarked
+                        || tokio::fs::symlink_metadata(
+                            root.join(strata_storage::backend::TRASH_DIR),
+                        )
+                        .await
+                        .is_ok_and(|m| m.is_dir()));
+                ok.then_some(root)
+            }
             None => None,
         };
         left_on_storage += match &there {
-            Some(root) => crate::trash::remove_items_at(root, &late).await,
-            None => late.len(),
+            Some(root) => crate::trash::remove_items_at(root, &raw_left).await,
+            None => raw_left.len(),
         };
     }
     st.forget_connection(id);

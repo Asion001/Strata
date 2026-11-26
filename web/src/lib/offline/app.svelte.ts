@@ -15,7 +15,10 @@ const Recent = () => import('./recent');
 
 const LAST_USER = 'strata-last-user';
 
-let recorded: Promise<void> = Promise.resolve();
+// (Pending until the first sign-in is recorded: the page can ask before
+// the layout has said who is signed in.)
+let firstRecorded: () => void = () => {};
+let recorded: Promise<void> = new Promise((r) => (firstRecorded = r));
 /** Settles once the signed-in user is recorded for offline use: files are
  *  only kept for whoever is recorded, so a "Keep offline" right after the
  *  page loads waits for it. */
@@ -28,12 +31,14 @@ export async function signedIn(u: User) {
     localStorage.setItem(LAST_USER, JSON.stringify({ id: u.id, username: u.username, is_admin: u.is_admin }));
   } catch {}
   // (Apart: with no Cache Storage, other users' queued uploads still go.)
-  recorded = (async () => {
+  const done = (async () => {
     try {
       if (typeof caches !== 'undefined') await (await caches.open(META)).put(USER_KEY, new Response(String(u.id)));
     } catch {}
   })();
-  await recorded;
+  recorded = done;
+  await done;
+  firstRecorded();
   try {
     await (await Recent()).keepOnlyUser(u.id);
   } catch {}
