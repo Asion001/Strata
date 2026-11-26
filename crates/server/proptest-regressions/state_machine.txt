@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc ac7e6691f0b162c4198657cfbfd2e12aa1dddad77784879273345a2106ce917f # shrinks to (initial_state, transitions, seen_counter) = (Model { vols: [(LocalHashed, Vol { tree: {} })], mounts: {"": 0} }, [Mount("b/b", LocalRaw), Upload("b/b/d/a", Content { seed: 0, size: 0 }), Move("b/b/d/a/b", "c/c/b")], None)
+cc b8fcfbd7856efbcdd9bc3bec646b5061ad7781532789d3416e043901a1cf47d5 # shrinks to (initial_state, transitions, seen_counter) = (Model { vols: [(LocalHashed, Vol { tree: {} })], mounts: {"": 0} }, [Mount("a", S3Raw), Upload("a/b/a", Content { seed: 0, size: 0 }), Delete("a/b/a")], None)

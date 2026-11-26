@@ -1480,6 +1480,19 @@ pub async fn delete_if_unchanged(
     Ok(true)
 }
 
+/// Storage without real folders (S3) drops a folder with its last item:
+/// keep the parent of what went (a folder marker; a no-op where folders are
+/// real).
+async fn keep_parent(m: &Mount, op: &opendal::Operator, rel: &str) -> ApiResult<()> {
+    if let Some((parent, _)) = paths::split(rel)
+        && !parent.is_empty()
+        && op.info().capability().create_dir
+    {
+        op.create_dir(&backend_path(m, parent, true)).await?;
+    }
+    Ok(())
+}
+
 async fn delete_locked(st: &AppState, m: &Mount, rel: &str, node: &Node) -> ApiResult<()> {
     if !m.is_hashed() {
         let op = op(st, m).await?;
@@ -1490,6 +1503,7 @@ async fn delete_locked(st: &AppState, m: &Mount, rel: &str, node: &Node) -> ApiR
         } else {
             op.delete(&backend_path(m, rel, false)).await?;
         }
+        keep_parent(m, &op, rel).await?;
     }
     // Hashed blobs are reclaimed later by GC.
     delete_subtree_rows(st, m.volume_id, rel).await?;
