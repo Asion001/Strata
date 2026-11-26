@@ -195,8 +195,14 @@ export const DRAFT_TOUCH_MS = 60 * 60 * 1000;
 // cross-tab). Autosave only writes while it names the draft's user.
 export const AUTH_KEY = 'strata-signed-in';
 
+/** Recent Move/Copy destinations (folder-picker.ts): private paths. */
+const RECENT_FOLDERS = 'strata-recent-folders';
+
 export function markSignedIn(userId: number) {
   try {
+    // Another account, signed in without a sign-out first: not its paths.
+    const before = localStorage.getItem(AUTH_KEY);
+    if (before !== null && before !== String(userId)) localStorage.removeItem(RECENT_FOLDERS);
     localStorage.setItem(AUTH_KEY, String(userId));
   } catch {}
 }
@@ -206,6 +212,7 @@ export function markSignedOut() {
     localStorage.removeItem(AUTH_KEY);
     localStorage.removeItem(SEEN_KEY);
     localStorage.removeItem(ALIVE_KEY);
+    localStorage.removeItem(RECENT_FOLDERS);
   } catch {}
   // Playback positions name private paths too.
   clearPositions();

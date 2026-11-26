@@ -10,7 +10,8 @@
   import FileIcon from '$lib/components/files/FileIcon.svelte';
   import SearchIcon from '@lucide/svelte/icons/search';
   import SettingsIcon from '@lucide/svelte/icons/settings';
-  import { fileHref, folderHref, mainNav, manageNav } from './nav';
+  import { fileHref, folderHref, mainNav, manageNav, visibleNav } from './nav';
+  import { trashShown } from '$lib/trash-info.svelte';
   import type { Component } from 'svelte';
 
   type Hit = Schemas['SearchHit'];
@@ -25,8 +26,7 @@
   let seq = 0;
 
   const pages = $derived(
-    [...mainNav, ...manageNav, { href: '/settings', label: 'Settings', icon: SettingsIcon }]
-      .filter((p) => !('adminOnly' in p && p.adminOnly) || session.user?.is_admin)
+    visibleNav([...mainNav, ...manageNav, { href: '/settings', label: 'Settings', icon: SettingsIcon }], { admin: !!session.user?.is_admin, trash: trashShown() })
   );
   const items = $derived<Item[]>([
     ...pages

@@ -22,7 +22,7 @@ use utoipa::{Modify, OpenApi, ToSchema};
 
 use crate::auth::{ChangePasswordReq, CreateUserReq, LoginReq, SetPasswordReq, User};
 use crate::connections::{ConnectionView, TestReq, UpsertReq};
-use crate::files::{DeleteBody, FromTo, PathBody};
+use crate::files::{DeleteBody, DeleteResult, FromTo, PathBody};
 use crate::journal::FeedEntry;
 use crate::mounts::{CreateReq as MountInput, Mount};
 use crate::shares::{CreateReq as ShareInput, Share, UnlockReq};
@@ -142,6 +142,13 @@ pub struct DeletedBody {
     pub deleted: i64,
     /// How many of them went to the trash.
     pub trashed: i64,
+    /// The trash ids of the items that went to the trash (for an undo), in
+    /// request order. Items deleted for good have none (nor, rarely, one
+    /// whose move is still being completed), so this can be shorter than
+    /// `paths`.
+    pub trash_ids: Vec<i64>,
+    /// One entry per path, in request order.
+    pub results: Vec<DeleteResult>,
 }
 
 #[derive(Serialize, ToSchema)]

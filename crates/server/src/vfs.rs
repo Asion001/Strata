@@ -1447,10 +1447,19 @@ pub async fn write_stream_if(
 
 // ---------------------------------------------------------------- delete
 
+/// How a delete went.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Deleted {
+    /// Gone for good.
+    Permanently,
+    /// In the trash, under this id; `None` while its bookkeeping is
+    /// unfinished (reconcile completes it, and only then can it be restored).
+    Trashed(Option<i64>),
+}
+
 /// Delete `path` from the user's tree: to the trash when `to_trash` and the
-/// mount supports it (see `trash`), otherwise for good. Returns whether it
-/// went to the trash.
-pub async fn delete(st: &AppState, user_id: i64, path: &str, to_trash: bool) -> ApiResult<bool> {
+/// mount supports it (see `trash`), otherwise for good.
+pub async fn delete(st: &AppState, user_id: i64, path: &str, to_trash: bool) -> ApiResult<Deleted> {
     if path.is_empty() {
         return Err(bad("cannot delete the root folder"));
     }
@@ -1468,11 +1477,12 @@ pub async fn delete(st: &AppState, user_id: i64, path: &str, to_trash: bool) -> 
     }
     let (m, rel) = mounts::resolve(st, user_id, path).await?;
     if to_trash && crate::trash::enabled(st) && crate::trash::supports_trash(&m) {
-        crate::trash::trash(st, user_id, path, &m, &rel).await?;
-        return Ok(true);
+        return crate::trash::trash(st, user_id, path, &m, &rel)
+            .await
+            .map(Deleted::Trashed);
     }
     delete_in(st, &m, &rel).await?;
-    Ok(false)
+    Ok(Deleted::Permanently)
 }
 
 pub async fn delete_in(st: &AppState, m: &Mount, rel: &str) -> ApiResult<()> {
