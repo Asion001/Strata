@@ -356,16 +356,19 @@ pub async fn delete(
     AuthUser(u): AuthUser,
     Json(b): Json<DeleteBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let mut trashed = 0;
+    let (mut trashed, mut trash_ids) = (0, Vec::new());
     for p in &b.paths {
         let p = paths::normalize(p)?;
-        if vfs::delete(&st, u.id, &p, !b.permanent).await? {
+        if let vfs::Deleted::Trashed(id) = vfs::delete(&st, u.id, &p, !b.permanent).await? {
             trashed += 1;
+            trash_ids.extend(id);
         }
     }
-    Ok(Json(
-        json!({ "deleted": b.paths.len(), "trashed": trashed }),
-    ))
+    Ok(Json(json!({
+        "deleted": b.paths.len(),
+        "trashed": trashed,
+        "trash_ids": trash_ids,
+    })))
 }
 
 #[derive(Deserialize)]

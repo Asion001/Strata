@@ -7,13 +7,24 @@ import UsersIcon from '@lucide/svelte/icons/users';
 import CloudIcon from '@lucide/svelte/icons/cloud';
 import ServerIcon from '@lucide/svelte/icons/server';
 import HardDriveIcon from '@lucide/svelte/icons/hard-drive';
+import Trash2Icon from '@lucide/svelte/icons/trash-2';
 
-export type NavItem = { href: string; label: string; icon: Component; adminOnly?: boolean };
+export type NavItem = { href: string; label: string; icon: Component; adminOnly?: boolean; needsTrash?: boolean };
+
+/** Deleted files: shown only while the server keeps a trash. */
+export const trashNav: NavItem = { href: '/trash', label: 'Deleted files', icon: Trash2Icon, needsTrash: true };
 
 export const mainNav: NavItem[] = [
   { href: '/', label: 'All files', icon: FolderIcon },
-  { href: '/shares', label: 'Share links', icon: LinkIcon }
+  { href: '/shares', label: 'Share links', icon: LinkIcon },
+  trashNav
 ];
+
+/** The items this user sees: admin pages for admins, Deleted files while
+ *  there is a trash. */
+export function visibleNav(items: NavItem[], who: { admin: boolean; trash: boolean }): NavItem[] {
+  return items.filter((l) => (!l.adminOnly || who.admin) && (!l.needsTrash || who.trash));
+}
 
 export const manageNav: NavItem[] = [
   { href: '/mounts', label: 'Mounts', icon: FolderTreeIcon },

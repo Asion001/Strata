@@ -3,7 +3,9 @@
 // startup bundle).
 import type { Component } from 'svelte';
 
-export type Toast = { id: number; kind: 'info' | 'success' | 'error'; text: string };
+/** A button on a toast (such as Undo): pressing it runs `run` and closes the toast. */
+export type ToastAction = { label: string; run: () => void };
+export type Toast = { id: number; kind: 'info' | 'success' | 'error'; text: string; action?: ToastAction };
 
 export const toasts = $state<{ list: Toast[] }>({ list: [] });
 
@@ -32,14 +34,22 @@ export function dismissToast(id: number) {
 }
 
 /** Shows a message; errors stay longer. Returns its id. */
-export function toast(text: string, kind: Toast['kind'] = 'info', ms = kind === 'error' ? 8000 : 4000): number {
+export function toast(text: string, kind: Toast['kind'] = 'info', ms = kind === 'error' ? 8000 : 4000, action?: ToastAction): number {
   const id = ++next;
-  const t: Toast = { id, kind, text };
+  const t: Toast = { id, kind, text, action };
   toasts.list.push(t);
   if (!toaster.component) loadToaster();
   if (toasts.list.length > MAX) toasts.list.splice(0, toasts.list.length - MAX);
   if (ms > 0) setTimeout(() => dismissToast(id), ms);
   return id;
+}
+
+/** Runs a toast's action once and closes the toast. */
+export function runToastAction(id: number) {
+  const t = toasts.list.find((x) => x.id === id);
+  if (!t?.action) return;
+  dismissToast(id);
+  t.action.run();
 }
 
 /** Shows an error's message (or a fallback for non-Error values). */
