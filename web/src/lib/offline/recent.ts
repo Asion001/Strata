@@ -9,7 +9,10 @@ import { META, NETWORK_ONLY, USER_KEY } from './keys';
 
 /** Who signed in on this device last (written at sign-in). */
 export async function signedInHere(): Promise<number | null> {
-  const r = await (await caches.open(META)).match(USER_KEY);
+  // (`caches.match` with a name never creates the cache: an `open` here,
+  // racing the sign-in's own `open` that creates it, can leave WebKit with
+  // two caches by that name and the record in the one it drops. #29)
+  const r = await caches.match(USER_KEY, { cacheName: META });
   const n = r ? Number(await r.text()) : NaN;
   return Number.isInteger(n) && n > 0 ? n : null;
 }

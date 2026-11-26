@@ -41,9 +41,15 @@ export async function userRecorded(user: number): Promise<void> {
   } catch {}
 }
 
-/** Who is signed in, for the service worker and the offline caches. */
+/** Who is signed in, for the service worker and the offline caches. Read
+ *  back, and written again if it didn't stick (see `signedInHere`). */
 async function record(user: number) {
-  await (await caches.open(META)).put(USER_KEY, new Response(String(user)));
+  for (let i = 0; i < 3; i++) {
+    await (await caches.open(META)).put(USER_KEY, new Response(String(user)));
+    const r = await caches.match(USER_KEY, { cacheName: META });
+    if (r && (await r.text()) === String(user)) return;
+    await new Promise((res) => setTimeout(res, 50 * (i + 1)));
+  }
 }
 
 /** Someone is signed in: tell the service worker (it keys cached files by
