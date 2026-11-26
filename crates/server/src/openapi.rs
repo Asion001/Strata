@@ -128,6 +128,14 @@ pub struct PathResultBody {
     pub path: String,
 }
 
+/// A deleted connection.
+#[derive(Serialize, ToSchema)]
+pub struct ConnectionDeletedBody {
+    /// Trashed items from it that couldn't be removed from its storage (it
+    /// couldn't be reached); they stay in its `.strata-trash` folder.
+    pub left_on_storage: usize,
+}
+
 #[derive(Serialize, ToSchema)]
 pub struct DeletedBody {
     pub deleted: i64,
@@ -285,7 +293,7 @@ fn get_connection() {}
 fn update_connection() {}
 #[utoipa::path(delete, path = "/api/connections/{id}", tag = "connections", params(("id" = i64, Path),
     ("purge_trash" = Option<bool>, Query, description = "Also purge the trashed items that came from it")), responses(
-    (status = 200, body = EmptyBody), (status = 409, description = "Still in use", body = ErrorBody)))]
+    (status = 200, body = ConnectionDeletedBody), (status = 409, description = "Still in use", body = ErrorBody)))]
 fn delete_connection() {}
 #[utoipa::path(post, path = "/api/connections/{id}/probe", tag = "connections", params(("id" = i64, Path)), responses(
     (status = 200, body = ConnectionView)))]

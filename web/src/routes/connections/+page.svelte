@@ -1,6 +1,6 @@
 <script lang="ts">
   import { confirmDialog } from '$lib/dialogs.svelte';
-  import { toastError } from '$lib/toast.svelte';
+  import { toast, toastError } from '$lib/toast.svelte';
   import { api, ApiError, type Schemas } from '$lib/api';
   import { session } from '$lib/session.svelte';
   import { cn } from '$lib/utils';
@@ -112,7 +112,11 @@
         danger: true
       });
       if (!purge) return;
-      try { await api('DELETE', `/api/connections/${c.id}?purge_trash=true`); } catch (e2) { return toastError(e2); }
+      let r: Schemas['ConnectionDeletedBody'];
+      try { r = await api('DELETE', `/api/connections/${c.id}?purge_trash=true`); } catch (e2) { return toastError(e2); }
+      // (Its storage couldn't be reached: those files are still on it.)
+      const left = r?.left_on_storage ?? 0;
+      if (left > 0) toast(`“${c.name}” is deleted, but ${left} deleted item(s) couldn’t be removed from its storage because it can’t be reached. They stay in its .strata-trash folder; remove that folder by hand when the storage is back.`, 'error', 15000);
     }
     await load();
   }

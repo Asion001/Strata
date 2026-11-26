@@ -513,6 +513,9 @@ pub async fn delete(
              restore them, or delete the connection with purge_trash to remove them for good"
         )));
     }
+    // Trashed items that couldn't be removed from the storage (it can't be
+    // reached): the connection still goes, and the answer says so.
+    let mut left_on_storage = 0usize;
     if trashed > 0 {
         let ids: Vec<i64> = sqlx::query_scalar(
             "SELECT t.id FROM trash t JOIN volumes v ON v.id = t.volume_id WHERE v.connection_id = $1",
@@ -524,11 +527,12 @@ pub async fn delete(
             match crate::trash::purge(&st, t).await {
                 Ok(()) | Err(ApiError::NotFound) => {}
                 // Storage gone, offline or failing: the connection goes
-                // anyway (asked for), so drop the row and remove what can be
-                // removed; nothing is left half-deleted.
+                // anyway (asked for), so drop the row; its bytes may stay on
+                // the storage, which the answer reports.
                 Err(e) => {
                     tracing::warn!("purging trash item {t} for a connection delete failed: {e}");
                     crate::trash::forget(&st, t).await?;
+                    left_on_storage += 1;
                 }
             }
         }
@@ -539,7 +543,22 @@ pub async fn delete(
         Ok(c) if c.kind() == "local" => st.operator_unchecked(id).await.ok(),
         _ => None,
     };
-    let root = crate::trash::connection_root(&st, id).await.ok();
+    // (Only a folder that is there and the right one: an unmounted disk's
+    // empty mount point would pass every removal as already done.)
+    let root = match (
+        crate::trash::connection_root(&st, id).await,
+        st.connection_config(id).await,
+    ) {
+        (Ok(root), Ok(cfg)) => match st.local_root(id, &cfg).await {
+            Ok(Some(lr)) => st
+                .check_root(id, lr, std::time::Duration::from_secs(20))
+                .await
+                .is_ok()
+                .then_some(root),
+            _ => None,
+        },
+        _ => None,
+    };
     let mut tx = st.db.begin().await?;
     // Anything trashed since the purge above goes too (its files below).
     let late: Vec<i64> = sqlx::query_scalar(
@@ -559,16 +578,17 @@ pub async fn delete(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
-    if let Some(root) = root
-        && !late.is_empty()
-    {
-        crate::trash::remove_items_at(&root, &late).await;
+    if !late.is_empty() {
+        left_on_storage += match &root {
+            Some(root) => crate::trash::remove_items_at(root, &late).await,
+            None => late.len(),
+        };
     }
     st.forget_connection(id);
     if let Some(op) = local_op {
         crate::state::LocalRoot::remove_marker(&op, id).await;
     }
-    Ok(Json(json!({})))
+    Ok(Json(json!({ "left_on_storage": left_on_storage })))
 }
 
 pub async fn probe(

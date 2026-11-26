@@ -764,6 +764,14 @@ export interface components {
             root?: string | null;
             user?: string | null;
         };
+        /** @description A deleted connection. */
+        ConnectionDeletedBody: {
+            /**
+             * @description Trashed items from it that couldn't be removed from its storage (it
+             *     couldn't be reached); they stay in its `.strata-trash` folder.
+             */
+            left_on_storage: number;
+        };
         ConnectionInput: {
             config: components["schemas"]["ConnectionConfig"];
             name: string;
@@ -2355,7 +2363,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["EmptyBody"];
+                    "application/json": components["schemas"]["ConnectionDeletedBody"];
                 };
             };
             /** @description Bad request (a parameter or the body) */

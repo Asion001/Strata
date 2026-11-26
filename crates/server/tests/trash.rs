@@ -785,13 +785,85 @@ async fn connection_on_a_vanished_disk_can_still_be_deleted() {
     // The disk is gone for good: trash folder and marker with it.
     std::fs::remove_dir_all(disk.join(".strata-trash")).unwrap();
     std::fs::remove_dir_all(disk.join(".strata-probe")).unwrap();
-    t.ok(
-        "DELETE",
-        &format!("/api/connections/{cid}?purge_trash=true"),
-        json!({}),
-    )
-    .await;
+    let v = t
+        .ok(
+            "DELETE",
+            &format!("/api/connections/{cid}?purge_trash=true"),
+            json!({}),
+        )
+        .await;
     assert!(items(&t).await.is_empty());
+    // (Not removed from the storage: the answer says so.)
+    assert_eq!(v["left_on_storage"], 1, "{v}");
+}
+
+#[tokio::test]
+async fn deleting_a_connection_says_when_trash_stays_on_an_unmounted_disk() {
+    let Some(t) = app().await else { return };
+    let cid = local_conn(&t, "Disk", "disk").await;
+    let disk = t.dir.path().join("local/disk");
+    std::fs::create_dir_all(&disk).unwrap();
+    std::fs::write(disk.join("a.txt"), b"a").unwrap();
+    let v = t
+        .ok(
+            "POST",
+            "/api/mounts",
+            json!({"path": "Disk", "connection_id": cid, "mode": "raw"}),
+        )
+        .await;
+    delete(&t, &["Disk/a.txt"]).await;
+    let id = items(&t).await[0]["id"].as_i64().unwrap();
+    let mid = v["id"].as_i64().unwrap();
+    t.ok("DELETE", &format!("/api/mounts/{mid}"), json!({}))
+        .await;
+    // Unmounted: an empty mount point is left where the disk was.
+    let parked = t.dir.path().join("local/parked");
+    std::fs::rename(&disk, &parked).unwrap();
+    std::fs::create_dir(&disk).unwrap();
+    let v = t
+        .ok(
+            "DELETE",
+            &format!("/api/connections/{cid}?purge_trash=true"),
+            json!({}),
+        )
+        .await;
+    assert_eq!(v["left_on_storage"], 1, "{v}");
+    // (It really is still there, as the answer said.)
+    assert_eq!(
+        std::fs::read(parked.join(format!(".strata-trash/{id}/a.txt"))).unwrap(),
+        b"a"
+    );
+
+    // With the disk there, nothing is left.
+    let cid = local_conn(&t, "Disk2", "disk2").await;
+    let disk = t.dir.path().join("local/disk2");
+    std::fs::create_dir_all(&disk).unwrap();
+    std::fs::write(disk.join("b.txt"), b"b").unwrap();
+    let v = t
+        .ok(
+            "POST",
+            "/api/mounts",
+            json!({"path": "Disk2", "connection_id": cid, "mode": "raw"}),
+        )
+        .await;
+    delete(&t, &["Disk2/b.txt"]).await;
+    let mid = v["id"].as_i64().unwrap();
+    t.ok("DELETE", &format!("/api/mounts/{mid}"), json!({}))
+        .await;
+    let v = t
+        .ok(
+            "DELETE",
+            &format!("/api/connections/{cid}?purge_trash=true"),
+            json!({}),
+        )
+        .await;
+    assert_eq!(v["left_on_storage"], 0, "{v}");
+    assert_eq!(
+        std::fs::read_dir(disk.join(".strata-trash"))
+            .map(|d| d.count())
+            .unwrap_or(0),
+        0
+    );
 }
 
 #[tokio::test]

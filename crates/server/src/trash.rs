@@ -961,15 +961,21 @@ pub(crate) async fn connection_root(st: &AppState, connection_id: i64) -> ApiRes
     local_root(st, connection_id).await
 }
 
-/// Remove raw trash items under a known connection folder. Best effort.
-pub(crate) async fn remove_items_at(root: &Path, ids: &[i64]) {
+/// Remove raw trash items under a known connection folder. Best effort:
+/// returns how many couldn't be removed.
+pub(crate) async fn remove_items_at(root: &Path, ids: &[i64]) -> usize {
+    let mut left = 0;
     for &id in ids {
         match tokio::fs::remove_dir_all(item_dir(root, id)).await {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => tracing::warn!("removing trash item {id} failed: {e}"),
+            Err(e) => {
+                tracing::warn!("removing trash item {id} failed: {e}");
+                left += 1;
+            }
         }
     }
+    left
 }
 
 /// Purge everything past its retention date. Returns how many were purged.
