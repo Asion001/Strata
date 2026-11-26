@@ -412,8 +412,11 @@ pub async fn update(
     tx.commit().await?;
     drop(layout);
     st.forget_operator(id);
-    if let Some(l) = raw_lock {
-        l.release().await?;
+    // (Saved already: whatever happens to the lock, the rest runs.)
+    if let Some(l) = raw_lock
+        && let Err(e) = l.release().await
+    {
+        tracing::warn!("releasing the volume locks of connection {id} failed: {e}");
     }
     if repointed {
         // A new target starts over: not offline, a fresh failure count, and
@@ -518,8 +521,14 @@ pub async fn delete(
     // Trashed items that couldn't be removed from the storage (it can't be
     // reached): the connection still goes, and the answer says so.
     let mut left_on_storage = 0usize;
-    // (Without purge_trash, trashed items refuse the delete: checked in the
-    // transaction below, so one trashed meanwhile counts too.)
+    // Without purge_trash, trashed items refuse the delete (checked again in
+    // the transaction below, so one trashed meanwhile counts too).
+    if trashed > 0 && !q.purge_trash {
+        return Err(conflict(format!(
+            "{trashed} deleted item(s) from this connection are still in the trash; \
+             restore them, or delete the connection with purge_trash to remove them for good"
+        )));
+    }
     if trashed > 0 && q.purge_trash {
         let ids: Vec<i64> = sqlx::query_scalar(
             "SELECT t.id FROM trash t JOIN volumes v ON v.id = t.volume_id WHERE v.connection_id = $1",
@@ -542,7 +551,17 @@ pub async fn delete(
     }
     // Every volume locked: no trash or restore is half done on them while
     // their rows go, and none starts.
-    let lock = lock_connection_volumes(&st, id, false).await?;
+    // (A refusal after a purge says that the trash is gone already.)
+    let purged = trashed > 0 && q.purge_trash;
+    let refused = |e: ApiError| match e {
+        ApiError::Conflict(m) if purged => conflict(format!(
+            "the deleted items from this connection were removed, but the connection wasn't: {m}"
+        )),
+        e => e,
+    };
+    let lock = lock_connection_volumes(&st, id, false)
+        .await
+        .map_err(refused)?;
     // (The config as read here: a re-point meanwhile is refused below.)
     let seen_cfg: Option<Vec<u8>> =
         sqlx::query_scalar("SELECT config_enc FROM connections WHERE id = $1")
@@ -573,7 +592,9 @@ pub async fn delete(
             .fetch_optional(&mut *tx)
             .await?;
     if now_cfg != seen_cfg {
-        return Err(conflict("the connection changed meanwhile; try again"));
+        return Err(refused(conflict(
+            "the connection changed meanwhile; try again",
+        )));
     }
     // Trashed items: without purge_trash they aren't removed unasked; with
     // it, any left by the purge above (or trashed since) go too.
