@@ -918,7 +918,11 @@ async fn sweep_orphans(st: &AppState) -> usize {
                     );
                     handled += 1;
                 }
-                Err(e) => tracing::warn!("setting aside trash folder {id} failed: {e}"),
+                Err(err) => {
+                    tracing::warn!("setting aside trash folder {id} failed: {err}");
+                    // (Still seen: the next sweep tries again.)
+                    now.push(e.path());
+                }
             }
         }
         seen().extend(now);

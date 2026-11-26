@@ -507,16 +507,12 @@ pub async fn delete(
     .bind(id)
     .fetch_one(&st.db)
     .await?;
-    if trashed > 0 && !q.purge_trash {
-        return Err(conflict(format!(
-            "{trashed} deleted item(s) from this connection are still in the trash; \
-             restore them, or delete the connection with purge_trash to remove them for good"
-        )));
-    }
     // Trashed items that couldn't be removed from the storage (it can't be
     // reached): the connection still goes, and the answer says so.
     let mut left_on_storage = 0usize;
-    if trashed > 0 {
+    // (Without purge_trash, trashed items refuse the delete: checked in the
+    // transaction below, so one trashed meanwhile counts too.)
+    if trashed > 0 && q.purge_trash {
         let ids: Vec<i64> = sqlx::query_scalar(
             "SELECT t.id FROM trash t JOIN volumes v ON v.id = t.volume_id WHERE v.connection_id = $1",
         )
@@ -543,24 +539,36 @@ pub async fn delete(
         Ok(c) if c.kind() == "local" => st.operator_unchecked(id).await.ok(),
         _ => None,
     };
-    // (Only a folder that is there and the right one: an unmounted disk's
-    // empty mount point would pass every removal as already done.)
+    // (Built now, checked only if needed after the rows are gone.)
     let root = match (
         crate::trash::connection_root(&st, id).await,
         st.connection_config(id).await,
     ) {
-        (Ok(root), Ok(cfg)) => match st.local_root(id, &cfg).await {
-            Ok(Some(lr)) => st
-                .check_root(id, lr, std::time::Duration::from_secs(20))
-                .await
-                .is_ok()
-                .then_some(root),
-            _ => None,
-        },
+        (Ok(root), Ok(cfg)) => st
+            .local_root(id, &cfg)
+            .await
+            .ok()
+            .flatten()
+            .map(|lr| (root, lr)),
         _ => None,
     };
     let mut tx = st.db.begin().await?;
-    // Anything trashed since the purge above goes too (its files below).
+    // Trashed items: without purge_trash they aren't removed unasked; with
+    // it, any trashed since the purge above go too.
+    if !q.purge_trash {
+        let late: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM trash t JOIN volumes v ON v.id = t.volume_id WHERE v.connection_id = $1",
+        )
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if late > 0 {
+            return Err(conflict(format!(
+                "{late} deleted item(s) from this connection are still in the trash; \
+                 restore them, or delete the connection with purge_trash to remove them for good"
+            )));
+        }
+    }
     let late: Vec<i64> = sqlx::query_scalar(
         "DELETE FROM trash t USING volumes v
          WHERE v.id = t.volume_id AND v.connection_id = $1 AND v.mode = 'raw'
@@ -579,7 +587,17 @@ pub async fn delete(
         .await?;
     tx.commit().await?;
     if !late.is_empty() {
-        left_on_storage += match &root {
+        // (Only a folder that is there and the right one: an unmounted
+        // disk's empty mount point would pass every removal as done.)
+        let there = match root {
+            Some((root, lr)) => st
+                .check_root(id, lr, std::time::Duration::from_secs(20))
+                .await
+                .is_ok()
+                .then_some(root),
+            None => None,
+        };
+        left_on_storage += match &there {
             Some(root) => crate::trash::remove_items_at(root, &late).await,
             None => late.len(),
         };
