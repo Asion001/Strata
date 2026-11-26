@@ -74,10 +74,9 @@ async function store(user: number, path: string, etag: string, url: string, pinn
   // Only for whoever is signed in on this device now (a tab can be stale:
   // the bytes come with the current session, maybe someone else's).
   // (No one recorded: signed out here, maybe in another tab.)
-  const here = await signedInHere();
-  if (here !== user) { console.log('DBG store: signedInHere', here, 'user', user); return 'unreadable'; }
+  if ((await signedInHere()) !== user) return 'unreadable';
   const r = await fetch(url, { credentials: 'same-origin', headers: { [NETWORK_ONLY]: '1' } });
-  if (!r.ok) { console.log('DBG store: status', r.status); return 'unreadable'; }
+  if (!r.ok) return 'unreadable';
   const declared = Number(r.headers.get('content-length') ?? NaN);
   // Too big: don't even read it.
   if (Number.isFinite(declared) && !admits(declared, pinned, others, l)) {
@@ -164,11 +163,11 @@ export async function pin(user: number, path: string, etag: string | null, url: 
     await put({ ...old, pinned: true, used: Date.now() });
     return true;
   }
-  console.log('DBG pin store start'); const r = await store(user, path, etag, url, true, l, size).catch((e) => { console.log('DBG store threw', String(e)); return 'unreadable' as const; });
+  const r = await store(user, path, etag, url, true, l, size).catch(() => 'unreadable' as const);
   if (typeof r === 'string') return r;
   if (old) await (await caches.open(filesCache(user))).delete(fileKey(user, path, old.etag));
   await put(r);
-  if (!(await stillTheirs(r))) { console.log('DBG not theirs'); return 'unreadable'; }
+  if (!(await stillTheirs(r))) return 'unreadable';
   await trim(user, l);
   return true;
 }
