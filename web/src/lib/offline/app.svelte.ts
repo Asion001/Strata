@@ -3,7 +3,7 @@
 // sign-out that leaves nothing behind.
 
 // (The queue, the cache and the chunker load on first use, not with the app.)
-import { META, SYNC_TAG, USER_KEY } from './keys';
+import { LAST_USER, META, SYNC_TAG, USER_KEY } from './keys';
 import { isActive, type Job } from './jobs';
 import type { Deps } from './queue';
 import { ApiError, type User } from '../api';
@@ -13,47 +13,16 @@ const Recent = () => import('./recent');
 
 // ---------------------------------------------------------------- user
 
-const LAST_USER = 'strata-last-user';
 
 // (Pending until the first sign-in is recorded: the page can ask before
 // the layout has said who is signed in.)
 let firstRecorded: () => void = () => {};
 let recorded: Promise<void> = new Promise((r) => (firstRecorded = r));
-/** Settles once `user` is recorded for offline use: files are only kept
- *  for whoever is recorded, so a "Keep offline" right after the page loads
- *  waits for it (at most 3 s: storage that never answers must not swallow
- *  the click). */
-export async function userRecorded(user: number): Promise<void> {
-  await Promise.race([recorded, new Promise<void>((r) => setTimeout(r, 3000))]);
-  // WebKit can come back without the record right after a few quick
-  // reloads, though each load wrote it (issue #29). This tab still knows
-  // who it signed in as (written at once at sign-in, removed first at
-  // sign-out): if that is `user` and there is no record, write it again.
-  // A sign-out or another user's sign-in elsewhere still wins.
-  if (typeof caches === 'undefined' || lastUser()?.id !== user) return;
-  try {
-    // Only a missing record: one naming someone else stays (their sign-in
-    // may be the newer one, and the session cookie theirs).
-    const h = await (await Recent()).signedInHere();
-    console.log('DBG userRecorded', user, 'here', h);
-    if (h !== null) return;
-    await record(user).catch((e) => console.log('DBG store: rewrite failed', String(e)));
-    console.log('DBG store: rewritten', await (await Recent()).signedInHere(), JSON.stringify(await navigator.storage?.estimate?.()), (await caches.keys()).join(','));
-    // (Signed out meanwhile, after its delete: take it back.)
-    if (lastUser()?.id !== user) await caches.delete(META);
-  } catch {}
-}
-
-/** Who is signed in, for the service worker and the offline caches. Read
- *  back, and written again if it didn't stick (see `signedInHere`). */
-async function record(user: number) {
-  for (let i = 0; i < 3; i++) {
-    await (await caches.open(META)).put(USER_KEY, new Response(String(user)));
-    const r = await caches.match(USER_KEY, { cacheName: META });
-    if (r && (await r.text()) === String(user)) return;
-    await new Promise((res) => setTimeout(res, 50 * (i + 1)));
-  }
-}
+/** Settles once the signed-in user is recorded for offline use: files are
+ *  only kept for whoever is recorded, so a "Keep offline" right after the
+ *  page loads waits for it (at most 3 s: storage that never answers must
+ *  not swallow the click). */
+export const userRecorded = () => Promise.race([recorded, new Promise<void>((r) => setTimeout(r, 3000))]);
 
 /** Someone is signed in: tell the service worker (it keys cached files by
  *  user), drop what other users left here, remember them for offline. */
@@ -64,8 +33,8 @@ export async function signedIn(u: User) {
   // (Apart: with no Cache Storage, other users' queued uploads still go.)
   const done = (async () => {
     try {
-      if (typeof caches !== 'undefined') await record(u.id);
-    } catch (e) { console.log('DBG store: record failed', String(e)); }
+      if (typeof caches !== 'undefined') await (await caches.open(META)).put(USER_KEY, new Response(String(u.id)));
+    } catch {}
   })();
   recorded = done;
   await done;

@@ -5,15 +5,25 @@
 
 import { byUser, tx, wipe } from './idb';
 import { admits, evictions, limits, type Limits } from './lru';
-import { META, NETWORK_ONLY, USER_KEY } from './keys';
+import { LAST_USER, META, NETWORK_ONLY, USER_KEY } from './keys';
 
-/** Who signed in on this device last (written at sign-in). */
+/** Who signed in on this device last (written at sign-in, gone at
+ *  sign-out). A page reads localStorage: written at once at sign-in,
+ *  removed first at sign-out, shared by every tab. WebKit can silently
+ *  drop the Cache Storage record a page writes, so a "Keep offline" was
+ *  refused for the user who was signed in (issue #29). The service worker
+ *  has no localStorage and reads that record. */
 export async function signedInHere(): Promise<number | null> {
-  // (`caches.match` with a name never creates the cache: an `open` here,
-  // racing the sign-in's own `open` that creates it, can leave WebKit with
-  // two caches by that name and the record in the one it drops. #29)
-  const r = await caches.match(USER_KEY, { cacheName: META });
-  const n = r ? Number(await r.text()) : NaN;
+  let n = NaN;
+  if (typeof localStorage !== 'undefined') {
+    try {
+      n = Number(JSON.parse(localStorage.getItem(LAST_USER) ?? 'null')?.id);
+    } catch {}
+  } else {
+    // (`match` with a cache name never creates the cache, as `open` would.)
+    const r = await caches.match(USER_KEY, { cacheName: META });
+    n = r ? Number(await r.text()) : NaN;
+  }
   return Number.isInteger(n) && n > 0 ? n : null;
 }
 
@@ -77,10 +87,9 @@ async function store(user: number, path: string, etag: string, url: string, pinn
   // Only for whoever is signed in on this device now (a tab can be stale:
   // the bytes come with the current session, maybe someone else's).
   // (No one recorded: signed out here, maybe in another tab.)
-  const here = await signedInHere();
-  if (here !== user) { console.log('DBG store: here', here, 'user', user, JSON.stringify(await navigator.storage?.estimate?.()), (await caches.keys()).join(',')); return 'unreadable'; }
+  if ((await signedInHere()) !== user) return 'unreadable';
   const r = await fetch(url, { credentials: 'same-origin', headers: { [NETWORK_ONLY]: '1' } });
-  if (!r.ok) { console.log('DBG store: status', r.status); return 'unreadable'; }
+  if (!r.ok) return 'unreadable';
   const declared = Number(r.headers.get('content-length') ?? NaN);
   // Too big: don't even read it.
   if (Number.isFinite(declared) && !admits(declared, pinned, others, l)) {
@@ -167,11 +176,11 @@ export async function pin(user: number, path: string, etag: string | null, url: 
     await put({ ...old, pinned: true, used: Date.now() });
     return true;
   }
-  const r = await store(user, path, etag, url, true, l, size).catch((e) => { console.log('DBG store threw', String(e)); return 'unreadable' as const; });
+  const r = await store(user, path, etag, url, true, l, size).catch(() => 'unreadable' as const);
   if (typeof r === 'string') return r;
   if (old) await (await caches.open(filesCache(user))).delete(fileKey(user, path, old.etag));
   await put(r);
-  if (!(await stillTheirs(r))) { console.log('DBG not theirs', await signedInHere()); return 'unreadable'; }
+  if (!(await stillTheirs(r))) return 'unreadable';
   await trim(user, l);
   return true;
 }

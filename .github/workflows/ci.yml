@@ -181,7 +181,7 @@ jobs:
             npx playwright test --project=chromium --project=webkit-media --project=webkit-offline --trace retain-on-failure --reporter=list,html || true
           # TEMPORARY (issue #29): the offline tests many times, to check the fix.
           STRATA_E2E_PASSWORD=$(cat "$RUNNER_TEMP/e2e-password") \
-            npx playwright test --project=chromium --project=webkit-offline -g "the app opens|sign-out removes" --repeat-each=25 --workers=2 --trace off --reporter=list 2>&1 | grep -E "DBG (store|not)|✘|passed|failed|Received" | head -100
+            npx playwright test --project=chromium --project=webkit-offline -g "the app opens|sign-out removes" --repeat-each=25 --workers=2 --trace off --reporter=list 2>&1 | grep -E "✘|passed|failed|Received|Error:" | head -100
       - name: Server log
         if: failure()
         run: cat "$RUNNER_TEMP/strata.log"

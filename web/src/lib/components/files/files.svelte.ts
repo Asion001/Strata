@@ -148,7 +148,7 @@ export class FilesController {
       const it = this.viewerIndex >= 0 ? this.viewerItems[this.viewerIndex] : undefined;
       if (!it || !session.user || this.offlineAt) return;
       const user = session.user.id;
-      void userRecorded(user).then(Recent).then((r) => r.remember(user, it.path, it.etag, contentUrl(it.path), it.size)).catch(() => {});
+      void userRecorded().then(Recent).then((r) => r.remember(user, it.path, it.etag, contentUrl(it.path), it.size)).catch(() => {});
     });
     // Back online: the folder again (and no "offline" banner).
     $effect(() => {

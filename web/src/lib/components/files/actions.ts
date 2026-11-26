@@ -67,8 +67,7 @@ export async function togglePin(c: FilesController, e: Entry) {
   const p = join(c.listedPath, e.name);
   const on = !c.pinned.has(p);
   // (Right after the page loads, who is signed in may not be recorded yet.)
-  if (!session.user) return;
-  await userRecorded(session.user.id);
+  await userRecorded();
   if (!session.user) return;
   const r = await (await import('$lib/offline/recent')).pin(session.user.id, p, e.etag, contentUrl(p), on, e.size).catch(() => 'failed' as const);
   const why = { 'no-version': 'it has no version to keep', unreadable: "it couldn't be read", 'too-big': 'it is too big, or offline storage is full', failed: 'offline storage is not available' };
