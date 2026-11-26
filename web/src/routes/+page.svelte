@@ -2,7 +2,7 @@
   import { page } from '$app/state';
   import { goto } from '$app/navigation';
   import { untrack } from 'svelte';
-  import { api, ApiError, contentUrl, previewUrl, thumbUrl, type Entry } from '$lib/api';
+  import { api, ApiError, contentUrl, previewUrl, thumbUrl, type Entry, type Schemas } from '$lib/api';
   import { bytes, when, join, parent, isImage, isBrowserImage, isTextName } from '$lib/format';
   import { cn } from '$lib/utils';
   import FileIcon from '$lib/components/files/FileIcon.svelte';
@@ -34,7 +34,8 @@
   import { staleApp } from '$lib/lazy';
   import { session } from '$lib/session.svelte';
   import { alertDialog, confirmDialog, formDialog, promptDialog } from '$lib/dialogs.svelte';
-  import { toast, toastError } from '$lib/toast.svelte';
+  import { toast, toastError, type ToastAction } from '$lib/toast.svelte';
+  import { trashInfo } from '$lib/trash-info.svelte';
 
   let path = $derived(page.url.searchParams.get('p') ?? '');
   let entries = $state<Entry[]>([]);
@@ -183,9 +184,10 @@
       selection.toggleAll(order);
     } else if (ev.key === 'Escape' && selection.size) selection.clear();
     // Delete, or Cmd+Backspace on a Mac (its delete key is Backspace).
+    // (With Shift: for good, past the trash.)
     else if ((ev.key === 'Delete' || (ev.key === 'Backspace' && ev.metaKey)) && selection.size && !busy) {
       ev.preventDefault();
-      void removePicked();
+      void removeItems(picked, true, ev.shiftKey);
     }
   }
 
@@ -300,9 +302,9 @@
     });
     if (to && to !== from) act(() => api('POST', copy ? '/api/files/copy' : '/api/files/move', { from, to }));
   };
-  const remove = (e: Entry) => {
+  const remove = (e: Entry, permanent = false) => {
     menu = null;
-    void removeItems([e], false);
+    void removeItems([e], false, permanent);
   };
   const share = async (e: Entry) => {
     menu = null;
@@ -337,7 +339,7 @@
   /** Runs `fn` for each item in turn; one failure doesn't stop the rest.
    *  Says what failed, then refreshes. */
   const SKIPPED = Symbol('skipped');
-  async function each(items: Entry[], verb: string, fn: (e: Entry) => Promise<unknown>, fromSelection = true) {
+  async function each(items: Entry[], verb: string, fn: (e: Entry) => Promise<unknown>, fromSelection = true, action?: () => ToastAction | undefined) {
     const dir = listedPath;
     const failed: string[] = [];
     const done: Entry[] = [];
@@ -355,9 +357,12 @@
     } finally {
       busy = false;
     }
-    if (failed.length === 1) toast(`Couldn't ${verb} “${failed[0]}”: ${lastError}`, 'error');
-    else if (failed.length) toast(`Couldn't ${verb} ${failed.length} items (${failed.slice(0, 3).join(', ')}${failed.length > 3 ? ', …' : ''}). ${lastError}`, 'error');
-    else if (done.length) toast(`${names(done)} ${verb === 'delete' ? 'deleted' : verb === 'move' ? 'moved' : 'copied'}.`, 'success');
+    // (An action, such as Undo, goes on whichever toast shows.)
+    const act = done.length ? action?.() : undefined;
+    const ms = act ? 10_000 : undefined;
+    if (failed.length === 1) toast(`Couldn't ${verb} “${failed[0]}”: ${lastError}`, 'error', ms, act);
+    else if (failed.length) toast(`Couldn't ${verb} ${failed.length} items (${failed.slice(0, 3).join(', ')}${failed.length > 3 ? ', …' : ''}). ${lastError}`, 'error', ms, act);
+    else if (done.length) toast(`${names(done)} ${verb === 'delete' ? (act ? 'moved to Deleted files' : 'deleted') : verb === 'move' ? 'moved' : 'copied'}.`, 'success', ms, act);
     await load();
     reloadMounts();
     // What failed stays selected for a retry, if the user is still here.
@@ -401,8 +406,9 @@
 
   const waitForBusy = () => toast('Wait for the current action to finish.', 'info');
 
-  /** The names that failed; null when nothing was tried (busy, cancelled). */
-  async function removeItems(all: Entry[], fromSelection = true): Promise<string[] | null> {
+  /** The names that failed; null when nothing was tried (busy, cancelled).
+   *  `permanent` skips the trash (Shift+Delete, "Delete permanently"). */
+  async function removeItems(all: Entry[], fromSelection = true, permanent = false): Promise<string[] | null> {
     if (busy) {
       waitForBusy();
       return null;
@@ -411,39 +417,67 @@
     if (!items.length) return null;
     const dir = listedPath;
     // Where the server keeps a trash for this folder, deletes go there.
-    const toTrash = !!mount?.trash;
-    const ok = await confirmDialog({
-      title: `Delete ${names(items)}?`,
-      body: (items.length === 1
-        ? (items[0].is_dir ? 'The folder and everything in it will be deleted.' : 'The file will be deleted.')
-        : `${items.slice(0, 5).map((e) => e.name).join(', ')}${items.length > 5 ? `, and ${items.length - 5} more` : ''}. Folders are deleted with everything in them.`)
-        + (toTrash ? (items.length === 1 ? ' It stays in the trash for a while and can be restored.' : ' They stay in the trash for a while and can be restored.') : ''),
-      confirm: 'Delete',
-      danger: true
-    });
+    const toTrash = !permanent && !!mount?.trash;
+    const one = items.length === 1;
+    const listed = `${items.slice(0, 5).map((e) => e.name).join(', ')}${items.length > 5 ? `, and ${items.length - 5} more` : ''}.`;
+    const days = ` You can restore ${one ? 'it' : 'them'} there ${trashInfo.days ? `for ${trashInfo.days} days` : 'for a while'}.`;
+    const ok = await confirmDialog(
+      toTrash
+        ? {
+            title: `Delete ${names(items)}?`,
+            body: (one ? (items[0].is_dir ? 'The folder and everything in it move to Deleted files.' : 'The file moves to Deleted files.') : `${listed} They move to Deleted files, folders with everything in them.`) + days,
+            confirm: 'Delete',
+            danger: true
+          }
+        : {
+            title: permanent ? `Delete ${names(items)} permanently?` : `Delete ${names(items)}?`,
+            body: (one
+              ? (items[0].is_dir ? 'The folder and everything in it will be deleted.' : 'The file will be deleted.')
+              : `${listed} Folders are deleted with everything in them.`) + ' This can’t be undone.',
+            confirm: permanent ? 'Delete permanently' : 'Delete',
+            danger: true
+          }
+    );
     if (!ok) return null;
     if (busy) {
       waitForBusy();
       return null;
     }
-    return each(items, 'delete', (e) => deleteOne(join(dir, e.name), e.name), fromSelection);
+    // What went to the trash, for Undo.
+    const trashed: { id: number; path: string }[] = [];
+    return each(
+      items,
+      'delete',
+      async (e) => {
+        const p = join(dir, e.name);
+        const r = await deleteOne(p, e.name, permanent);
+        if (typeof r === 'number') trashed.push({ id: r, path: p });
+        return r;
+      },
+      fromSelection,
+      // (Undo's code loads when it is pressed.)
+      () => (trashed.length ? { label: 'Undo', run: () => void import('$lib/trash.svelte').then((m) => m.undoAction(trashed, () => void load()).run()) } : undefined)
+    );
   }
 
-  /** Delete one path, to the trash where there is one. An item the trash
-   *  can't take (on another disk) is deleted for good only if confirmed. */
-  async function deleteOne(path: string, name: string) {
+  /** Delete one path, to the trash where there is one (its trash id, if it
+   *  went there). An item the trash can't take (on another disk) is
+   *  deleted for good only if confirmed. */
+  async function deleteOne(path: string, name: string, permanent = false): Promise<number | null | typeof SKIPPED> {
     try {
-      await api('POST', '/api/files/delete', { paths: [path] });
+      const r = await api<Schemas['DeletedBody']>('POST', '/api/files/delete', { paths: [path], permanent });
+      return r.trash_ids[0] ?? null;
     } catch (e) {
-      if (!(e instanceof ApiError && e.status === 409 && e.message.includes('delete it permanently'))) throw e;
+      if (permanent || !(e instanceof ApiError && e.status === 409 && e.message.includes('delete it permanently'))) throw e;
       const ok = await confirmDialog({
         title: `Delete “${name}” for good?`,
-        body: 'It can’t be moved to the trash here, so it will be deleted permanently.',
+        body: 'It can’t be moved to Deleted files here, so it will be deleted permanently.',
         confirm: 'Delete permanently',
         danger: true
       });
       if (!ok) return SKIPPED;
       await api('POST', '/api/files/delete', { paths: [path], permanent: true });
+      return null;
     }
   }
 
@@ -772,6 +806,9 @@
         <a role="menuitem" class="item" href="/mounts">Manage mount…</a>
       {:else}
         <button role="menuitem" class="item danger" onclick={() => remove(e)}>Delete</button>
+        {#if mount?.trash}
+          <button role="menuitem" class="item danger" onclick={() => remove(e, true)}>Delete permanently</button>
+        {/if}
       {/if}
     </div>
   </div>

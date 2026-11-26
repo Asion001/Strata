@@ -3,7 +3,7 @@
   // tab bar on phones. Screen readers hear them through the live regions.
   import { onMount } from 'svelte';
   import { fly } from 'svelte/transition';
-  import { toasts, dismissToast } from '$lib/toast.svelte';
+  import { toasts, dismissToast, runToastAction } from '$lib/toast.svelte';
   import XIcon from '@lucide/svelte/icons/x';
   import InfoIcon from '@lucide/svelte/icons/info';
   import CircleCheckIcon from '@lucide/svelte/icons/circle-check';
@@ -33,6 +33,14 @@
       >
         <Icon class="mt-0.5 size-4 shrink-0 {tone[t.kind]}" aria-hidden="true" />
         <p class="min-w-0 flex-1 break-words">{t.text}</p>
+        {#if t.action}
+          <!-- (Its text is read with the message: "… deleted. Undo".) -->
+          <button
+            type="button"
+            class="-my-1 shrink-0 rounded-md px-2 py-1 font-medium text-primary hover:bg-accent focus-visible:outline-2 focus-visible:outline-ring"
+            onclick={() => runToastAction(t.id)}
+          >{t.action.label}</button>
+        {/if}
         <button
           type="button"
           class="-my-1 rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring"

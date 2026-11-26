@@ -1119,3 +1119,36 @@ async fn trash_pages_say_when_there_is_more() {
     let v = t.ok("POST", "/api/trash/empty", json!({})).await;
     assert_eq!(v, json!({"purged": 3, "failed": 0}));
 }
+
+#[tokio::test]
+async fn a_delete_answers_the_trash_ids_for_an_undo() {
+    let Some(t) = app().await else { return };
+    t.upload("U/a.txt", b"a").await;
+    t.upload("U/b.txt", b"b").await;
+    let v = delete(&t, &["U/a.txt", "U/b.txt"]).await;
+    assert_eq!(v["trashed"], 2, "{v}");
+    let ids: Vec<i64> = v["trash_ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i.as_i64().unwrap())
+        .collect();
+    let all = items(&t).await;
+    assert_eq!(ids, vec![id_of(&all, "U/a.txt"), id_of(&all, "U/b.txt")]);
+    // Undo: each comes back where it was.
+    for id in ids {
+        restore(&t, id).await;
+    }
+    assert_eq!(t.download("U/a.txt").await, b"a");
+    assert_eq!(t.download("U/b.txt").await, b"b");
+
+    // A permanent delete has none.
+    let v = t
+        .ok(
+            "POST",
+            "/api/files/delete",
+            json!({"paths": ["U/a.txt"], "permanent": true}),
+        )
+        .await;
+    assert_eq!(v["trash_ids"], json!([]), "{v}");
+}

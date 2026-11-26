@@ -6,7 +6,8 @@
   import { alertDialog } from '$lib/dialogs.svelte';
   import Button from '$lib/components/ui/button/button.svelte';
   import Input from '$lib/components/ui/input/input.svelte';
-  import { manageNav } from '$lib/components/shell/nav';
+  import { manageNav, trashNav, visibleNav } from '$lib/components/shell/nav';
+  import { trashInfo } from '$lib/trash-info.svelte';
   import { cardClass, h1Class, h2Class, labelClass, listClass, mutedClass, pageClass } from '$lib/components/ui/styles';
   import ChevronRightIcon from '@lucide/svelte/icons/chevron-right';
   import LogOutIcon from '@lucide/svelte/icons/log-out';
@@ -71,7 +72,7 @@
   <nav aria-label="Manage" class="md:hidden">
     <h2 class={h2Class}>Manage</h2>
     <ul class={listClass}>
-      {#each manageNav.filter((l) => !l.adminOnly || session.user?.is_admin) as l (l.href)}
+      {#each visibleNav([trashNav, ...manageNav], { admin: !!session.user?.is_admin, trash: (trashInfo.days ?? 0) > 0 }) as l (l.href)}
         <li><a href={l.href} class="flex items-center gap-3 px-4 py-3"><l.icon class="size-4 text-muted-foreground" /><span class="flex-1">{l.label}</span><ChevronRightIcon class="size-4 text-muted-foreground" /></a></li>
       {/each}
     </ul>

@@ -830,6 +830,8 @@ export interface components {
         DeletedBody: {
             /** Format: int64 */
             deleted: number;
+            /** @description Their trash ids (for an undo), in the order of `paths`. */
+            trash_ids: number[];
             /**
              * Format: int64
              * @description How many of them went to the trash.
@@ -875,19 +877,6 @@ export interface components {
         HealthBody: {
             ok: boolean;
             version?: string | null;
-        };
-        Item: {
-            /** Format: date-time */
-            deleted_at: string;
-            /** Format: int64 */
-            id: number;
-            is_dir: boolean;
-            name: string;
-            original_path: string;
-            /** Format: date-time */
-            purge_after: string;
-            /** Format: int64 */
-            size: number;
         };
         ListingBody: {
             entries: components["schemas"]["Entry"][];
@@ -1050,9 +1039,22 @@ export interface components {
             /** Format: int64 */
             size: number;
         };
+        TrashItem: {
+            /** Format: date-time */
+            deleted_at: string;
+            /** Format: int64 */
+            id: number;
+            is_dir: boolean;
+            name: string;
+            original_path: string;
+            /** Format: date-time */
+            purge_after: string;
+            /** Format: int64 */
+            size: number;
+        };
         TrashListBody: {
             /** @description Newest first. */
-            items: components["schemas"]["Item"][];
+            items: components["schemas"]["TrashItem"][];
             /** @description More items are older than the last one (ask with `before`). */
             more: boolean;
             /**

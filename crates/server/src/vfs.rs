@@ -1385,7 +1385,14 @@ pub async fn write_stream_if(
 /// Delete `path` from the user's tree: to the trash when `to_trash` and the
 /// mount supports it (see `trash`), otherwise for good. Returns whether it
 /// went to the trash.
-pub async fn delete(st: &AppState, user_id: i64, path: &str, to_trash: bool) -> ApiResult<bool> {
+/// Delete a path, to the trash where there is one. Returns its trash id
+/// when it went there.
+pub async fn delete(
+    st: &AppState,
+    user_id: i64,
+    path: &str,
+    to_trash: bool,
+) -> ApiResult<Option<i64>> {
     if path.is_empty() {
         return Err(bad("cannot delete the root folder"));
     }
@@ -1403,11 +1410,12 @@ pub async fn delete(st: &AppState, user_id: i64, path: &str, to_trash: bool) -> 
     }
     let (m, rel) = mounts::resolve(st, user_id, path).await?;
     if to_trash && crate::trash::enabled(st) && crate::trash::supports_trash(&m) {
-        crate::trash::trash(st, user_id, path, &m, &rel).await?;
-        return Ok(true);
+        return crate::trash::trash(st, user_id, path, &m, &rel)
+            .await
+            .map(Some);
     }
     delete_in(st, &m, &rel).await?;
-    Ok(false)
+    Ok(None)
 }
 
 pub async fn delete_in(st: &AppState, m: &Mount, rel: &str) -> ApiResult<()> {

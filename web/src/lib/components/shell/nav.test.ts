@@ -47,3 +47,14 @@ describe('fileHref', () => {
     expect(fileHref('top.md')).toBe('/?p=&f=top.md');
   });
 });
+
+describe('visibleNav', () => {
+  it('shows Deleted files only while there is a trash, and admin pages only to admins', async () => {
+    const { mainNav, manageNav, visibleNav } = await import('./nav');
+    const labels = (items: { label: string }[]) => items.map((i) => i.label);
+    expect(labels(visibleNav(mainNav, { admin: false, trash: true }))).toContain('Deleted files');
+    expect(labels(visibleNav(mainNav, { admin: false, trash: false }))).not.toContain('Deleted files');
+    expect(labels(visibleNav(manageNav, { admin: false, trash: true }))).not.toContain('Users');
+    expect(labels(visibleNav(manageNav, { admin: true, trash: false }))).toContain('Users');
+  });
+});

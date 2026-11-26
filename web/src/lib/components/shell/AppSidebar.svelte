@@ -7,9 +7,11 @@
   import SettingsIcon from '@lucide/svelte/icons/settings';
   import SearchIcon from '@lucide/svelte/icons/search';
   import { openPalette } from '$lib/palette.svelte';
-  import { activeMount, folderHref, isActive, kindIcon, mainNav, manageNav, sidebarMounts } from './nav';
+  import { activeMount, folderHref, isActive, kindIcon, mainNav, manageNav, sidebarMounts, visibleNav } from './nav';
+  import { trashInfo } from '$lib/trash-info.svelte';
 
   let { class: className = '' }: { class?: string } = $props();
+  const who = $derived({ admin: !!session.user?.is_admin, trash: (trashInfo.days ?? 0) > 0 });
 
   const current = $derived(page.url.pathname === '/' ? (page.url.searchParams.get('p') ?? '') : null);
   const shown = $derived(sidebarMounts(mounts.list));
@@ -39,7 +41,7 @@
   </button>
 
   <nav aria-label="Files" class="flex flex-col gap-0.5">
-    {#each mainNav as l (l.href)}
+    {#each visibleNav(mainNav, who) as l (l.href)}
       <a href={l.href} class={cn(item, active(l.href) && on)} aria-current={active(l.href) ? 'page' : undefined}>
         <l.icon class="size-4 shrink-0" />{l.label}
       </a>
@@ -63,7 +65,7 @@
 
   <div class="mt-auto flex flex-col gap-0.5 pt-4">
     <div class="px-2.5 pb-1 text-xs font-medium text-muted-foreground">Manage</div>
-    {#each manageNav.filter((l) => !l.adminOnly || session.user?.is_admin) as l (l.href)}
+    {#each visibleNav(manageNav, who) as l (l.href)}
       <a href={l.href} class={cn(item, active(l.href) && on)} aria-current={active(l.href) ? 'page' : undefined}>
         <l.icon class="size-4 shrink-0" />{l.label}
       </a>

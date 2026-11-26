@@ -44,6 +44,7 @@ pub fn enabled(st: &AppState) -> bool {
 }
 
 #[derive(Clone, Debug, Serialize, sqlx::FromRow, utoipa::ToSchema)]
+#[schema(as = TrashItem)]
 pub struct Item {
     pub id: i64,
     pub name: String,

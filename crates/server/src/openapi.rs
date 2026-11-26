@@ -142,6 +142,8 @@ pub struct DeletedBody {
     pub deleted: i64,
     /// How many of them went to the trash.
     pub trashed: i64,
+    /// Their trash ids (for an undo), in the order of `paths`.
+    pub trash_ids: Vec<i64>,
 }
 
 #[derive(Serialize, ToSchema)]
