@@ -73,7 +73,7 @@ pub async fn app_with(tweak: impl FnOnce(&mut Config)) -> Option<TestApp> {
         None => unreachable!(),
     };
     let dir = tempfile::tempdir().unwrap();
-    let cfg = Config {
+    let mut cfg = Config {
         database_url: url.clone(),
         bind: "127.0.0.1:0".into(),
         data_dir: dir.path().join("state"),
@@ -88,10 +88,10 @@ pub async fn app_with(tweak: impl FnOnce(&mut Config)) -> Option<TestApp> {
         session_days: 1,
         gc_grace_hours: 24,
         raw_ttl_secs: 0,
+        raw_background_rescan: false,
         probe_secs: 60,
         trash_days: 30,
     };
-    let mut cfg = cfg;
     tweak(&mut cfg);
     let pool = sqlx::PgPool::connect(&url).await.unwrap();
     let st = AppState::with_pool(cfg, pool).await.unwrap();

@@ -295,21 +295,59 @@ pub async fn list(st: &AppState, user_id: i64, path: &str) -> ApiResult<(Mount, 
     Ok((m, entries))
 }
 
-/// Rescan a raw folder if its cached listing is older than the TTL.
+/// Rescan a raw folder if its cached listing is older than the TTL. A folder
+/// scanned before is answered from the cache while it is rescanned in the
+/// background (see `Config::raw_background_rescan`).
 pub async fn maybe_scan(st: &AppState, m: &Mount, rel: &str) -> ApiResult<()> {
-    let fresh: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM raw_scans WHERE volume_id = $1 AND dir = $2
-                        AND scanned_at > now() - make_interval(secs => $3))",
+    // None: never scanned; Some(fresh).
+    let fresh: Option<bool> = sqlx::query_scalar(
+        "SELECT scanned_at > now() - make_interval(secs => $3)
+         FROM raw_scans WHERE volume_id = $1 AND dir = $2",
     )
     .bind(m.volume_id)
     .bind(rel)
     .bind(st.cfg.raw_ttl_secs as f64)
-    .fetch_one(&st.db)
+    .fetch_optional(&st.db)
     .await?;
-    if !fresh {
-        scan_dir_inner(st, m, rel, true).await?;
+    match fresh {
+        Some(true) => {}
+        Some(false) if st.cfg.raw_background_rescan => rescan_in_background(st, m, rel),
+        _ => {
+            scan_dir_inner(st, m, rel, true).await?;
+        }
     }
     Ok(())
+}
+
+/// Start a rescan of a raw folder unless one is already running. At most
+/// `RESCAN_SLOTS` run at a time, so many stale opens can't queue up in front
+/// of writes on the volume lock; an open that finds no free slot is answered
+/// from the cache and the next open tries again.
+fn rescan_in_background(st: &AppState, m: &Mount, rel: &str) {
+    let Ok(slot) = st.rescan_slots.clone().try_acquire_owned() else {
+        return;
+    };
+    let key = (m.volume_id, rel.to_string());
+    if st.rescans.insert(key.clone(), ()).is_some() {
+        return;
+    }
+    /// Clears the running mark however the task ends.
+    struct Done(AppState, (i64, String));
+    impl Drop for Done {
+        fn drop(&mut self) {
+            self.0.rescans.remove(&self.1);
+        }
+    }
+    let done = Done(st.clone(), key);
+    let (st, m, rel) = (st.clone(), m.clone(), rel.to_string());
+    tokio::spawn(async move {
+        let (_done, _slot) = (done, slot);
+        if let Err(e) = scan_dir_inner(&st, &m, &rel, true).await {
+            // The scan mark stays stale, so the next open tries again; it
+            // stays (rather than being dropped) so that scan still journals.
+            tracing::warn!("background rescan of volume {} {rel:?}: {e}", m.volume_id);
+        }
+    });
 }
 
 /// List a raw folder from the backend and reconcile the cache. Returns the
@@ -317,6 +355,9 @@ pub async fn maybe_scan(st: &AppState, m: &Mount, rel: &str) -> ApiResult<()> {
 pub async fn scan_dir(st: &AppState, m: &Mount, rel: &str) -> ApiResult<Vec<String>> {
     scan_dir_inner(st, m, rel, false).await
 }
+
+/// A cached raw entry: name, is_dir, size, mtime, etag.
+type CachedRow = (String, bool, i64, DateTime<Utc>, Option<String>);
 
 async fn scan_dir_inner(
     st: &AppState,
@@ -442,16 +483,35 @@ async fn scan_dir_inner(
     .bind(rel)
     .fetch_one(&st.db)
     .await?;
-    let old: Vec<(String, bool, Option<String>)> =
-        sqlx::query_as("SELECT name, is_dir, etag FROM nodes WHERE volume_id = $1 AND parent = $2")
-            .bind(m.volume_id)
-            .bind(rel)
-            .fetch_all(&st.db)
-            .await?;
+    let old: Vec<CachedRow> = sqlx::query_as(
+        "SELECT name, is_dir, size, mtime, etag FROM nodes WHERE volume_id = $1 AND parent = $2",
+    )
+    .bind(m.volume_id)
+    .bind(rel)
+    .fetch_all(&st.db)
+    .await?;
     let old_map: std::collections::HashMap<&str, (bool, Option<&str>)> = old
         .iter()
-        .map(|(n, d, e)| (n.as_str(), (*d, e.as_deref())))
+        .map(|(n, d, _, _, e)| (n.as_str(), (*d, e.as_deref())))
         .collect();
+    // Rows the cache already holds exactly (mtime at the database's
+    // microsecond precision) are not written again.
+    let same: std::collections::HashSet<&str> = {
+        let by_name: std::collections::HashMap<&str, _> =
+            old.iter().map(|o| (o.0.as_str(), o)).collect();
+        nodes
+            .iter()
+            .filter(|n| {
+                by_name.get(n.name.as_str()).is_some_and(|o| {
+                    o.1 == n.is_dir
+                        && o.2 == n.size
+                        && o.3.timestamp_micros() == n.mtime.timestamp_micros()
+                        && o.4 == n.etag
+                })
+            })
+            .map(|n| n.name.as_str())
+            .collect()
+    };
     let mut changes = Vec::new();
     for n in &nodes {
         let p = paths::join(rel, &n.name);
@@ -465,11 +525,11 @@ async fn scan_dir_inner(
             _ => {}
         }
     }
-    let gone: Vec<&(String, bool, Option<String>)> = old
+    let gone: Vec<&CachedRow> = old
         .iter()
-        .filter(|(n, _, _)| !listed_names.contains(n.as_str()))
+        .filter(|o| !listed_names.contains(o.0.as_str()))
         .collect();
-    for (name, is_dir, _) in &gone {
+    for (name, is_dir, ..) in &gone {
         let p = paths::join(rel, name);
         delete_subtree_rows(st, m.volume_id, &p).await?;
         changes.push(Change::delete(&p, *is_dir));
@@ -483,7 +543,12 @@ async fn scan_dir_inner(
             delete_subtree_rows(st, m.volume_id, &paths::join(rel, &n.name)).await?;
         }
     }
-    upsert_raw_nodes(st, m.volume_id, rel, &nodes).await?;
+    let changed: Vec<Node> = nodes
+        .iter()
+        .filter(|n| !same.contains(n.name.as_str()))
+        .cloned()
+        .collect();
+    upsert_raw_nodes(st, m.volume_id, rel, &changed).await?;
     sqlx::query(
         "INSERT INTO raw_scans (volume_id, dir, scanned_at) VALUES ($1, $2, now())
          ON CONFLICT (volume_id, dir) DO UPDATE SET scanned_at = now()",

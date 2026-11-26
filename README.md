@@ -75,6 +75,7 @@ Set these in `deploy/strata.env` (or the environment):
 | `STRATA_SESSION_DAYS` | `30` | Sign-in session lifetime |
 | `STRATA_GC_GRACE_HOURS` | `24` | How long unreferenced blobs wait before garbage collection |
 | `STRATA_RAW_TTL_SECS` | `30` | Seconds before a raw mount is rescanned on access |
+| `STRATA_RAW_BACKGROUND_RESCAN` | `true` | Answer a stale raw folder from the cache and rescan it in the background (`false`: the request waits for the rescan) |
 | `STRATA_TRASH_DAYS` | `30` | Days deleted items stay in the trash; `0` makes new deletes permanent (items already in the trash keep their date) |
 
 The container image sets its own defaults for the paths; see

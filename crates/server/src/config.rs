@@ -27,6 +27,10 @@ pub struct Config {
     pub gc_grace_hours: i64,
     /// How long a raw folder listing is trusted before rescanning the backend.
     pub raw_ttl_secs: i64,
+    /// Answer a stale raw listing from the cache and rescan in the background
+    /// (changes reach clients through the journal), instead of making the
+    /// request wait for the rescan. A never-scanned folder always waits.
+    pub raw_background_rescan: bool,
     /// Seconds between health probes of each connection (jittered).
     pub probe_secs: u64,
     /// Days deleted items stay in the trash; 0 turns the trash off (deletes
@@ -66,6 +70,9 @@ impl Config {
             raw_ttl_secs: env("STRATA_RAW_TTL_SECS")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(30),
+            raw_background_rescan: env("STRATA_RAW_BACKGROUND_RESCAN")
+                .map(|v| v != "false" && v != "0")
+                .unwrap_or(true),
             probe_secs: env("STRATA_PROBE_SECS")
                 .and_then(|v| v.parse().ok())
                 .map(|s: u64| s.max(5))
