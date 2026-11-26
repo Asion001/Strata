@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 vi.mock('$lib/components/ui/DialogHost.svelte', () => ({ default: () => {} }));
 vi.mock('$lib/components/ui/Toaster.svelte', () => ({ default: () => {} }));
 
-const { dialogs, confirmDialog, promptDialog, formDialog, alertDialog, cancelAllDialogs } = await import('./dialogs.svelte');
+const { dialogs, confirmDialog, promptDialog, formDialog, alertDialog, pickFolder, cancelAllDialogs } = await import('./dialogs.svelte');
 const { toasts, toast, toastError, dismissToast } = await import('./toast.svelte');
 
 describe('dialogs', () => {
@@ -44,6 +44,15 @@ describe('dialogs', () => {
     ar.done();
     await expect(al).resolves.toBeUndefined();
   });
+  it('answers a folder pick with the chosen path', async () => {
+    const p = pickFolder({ title: 'Move', start: 'a', from: 'a' });
+    const r = dialogs.queue[0];
+    if (r.kind !== 'folder') throw new Error('expected folder');
+    expect(r.opts).toMatchObject({ start: 'a', from: 'a' });
+    r.done('b/c');
+    expect(await p).toBe('b/c');
+  });
+
   it('withdraws a dialog when its signal aborts', async () => {
     const ac = new AbortController();
     const c = confirmDialog({ title: 'C', signal: ac.signal });
@@ -56,9 +65,9 @@ describe('dialogs', () => {
   });
 
   it('cancels everything queued', async () => {
-    const all = [confirmDialog({ title: 'a' }), formDialog({ title: 'b', fields: [] }), alertDialog({ title: 'c' })];
+    const all = [confirmDialog({ title: 'a' }), formDialog({ title: 'b', fields: [] }), alertDialog({ title: 'c' }), pickFolder({ title: 'd', start: '' })];
     cancelAllDialogs();
-    expect(await Promise.all(all)).toEqual([false, null, undefined]);
+    expect(await Promise.all(all)).toEqual([false, null, undefined, null]);
     expect(dialogs.queue).toHaveLength(0);
   });
 });

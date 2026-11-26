@@ -5,7 +5,7 @@ import { api, contentUrl, type Entry } from '$lib/api';
 import { join } from '$lib/format';
 import { userRecorded } from '$lib/offline/app.svelte';
 import { session } from '$lib/session.svelte';
-import { alertDialog, formDialog, promptDialog } from '$lib/dialogs.svelte';
+import { alertDialog, formDialog, pickFolder, promptDialog } from '$lib/dialogs.svelte';
 import { toast, toastError } from '$lib/toast.svelte';
 import type { FilesController } from './files.svelte';
 
@@ -24,9 +24,17 @@ export async function rename(c: FilesController, e: Entry) {
 
 export async function moveTo(c: FilesController, e: Entry, copy = false) {
   c.menu = null;
-  const from = join(c.listedPath, e.name);
-  const to = await promptDialog({ title: `${copy ? 'Copy' : 'Move'} “${e.name}”`, label: 'To (full path)', value: from, confirm: copy ? 'Copy' : 'Move' });
-  if (to && to !== from) void c.act(() => api('POST', copy ? '/api/files/copy' : '/api/files/move', { from, to }));
+  const dir = c.listedPath;
+  const from = join(dir, e.name);
+  const dest = await pickFolder({
+    title: `${copy ? 'Copy' : 'Move'} “${e.name}”`,
+    confirm: copy ? 'Copy here' : 'Move here',
+    start: dir,
+    from: dir,
+    // A folder can't go inside itself (a copy neither).
+    exclude: e.is_dir ? [from] : []
+  });
+  if (dest !== null) void c.act(() => api('POST', copy ? '/api/files/copy' : '/api/files/move', { from, to: join(dest, e.name) }));
 }
 
 export async function share(c: FilesController, e: Entry) {

@@ -2,6 +2,7 @@
 // promise; requests queue up and DialogHost (in the root layout) shows them
 // one at a time.
 import type { Component } from 'svelte';
+import type { PickRules } from '$lib/components/files/folder-picker';
 
 export type Field = {
   name: string;
@@ -26,11 +27,13 @@ type Common = {
 export type ConfirmOpts = Common & { confirm?: string; cancel?: string; danger?: boolean };
 export type FormOpts = Common & { fields: Field[]; confirm?: string; cancel?: string };
 export type AlertOpts = Common & { ok?: string; /** Shown read-only with a Copy button. */ copy?: string };
+export type FolderOpts = Common & PickRules & { confirm?: string; /** The folder it opens at. */ start: string };
 
 export type Request = { id: number } & (
   | { kind: 'confirm'; opts: ConfirmOpts; done: (v: boolean) => void }
   | { kind: 'form'; opts: FormOpts; done: (v: Record<string, string> | null) => void }
   | { kind: 'alert'; opts: AlertOpts; done: () => void }
+  | { kind: 'folder'; opts: FolderOpts; done: (v: string | null) => void }
 );
 
 export const dialogs = $state<{ queue: Request[] }>({ queue: [] });
@@ -56,7 +59,12 @@ function loadHost() {
 function native(r: Request) {
   const text = r.opts.body ? `${r.opts.title}\n\n${r.opts.body}` : r.opts.title;
   if (r.kind === 'confirm') r.done(window.confirm(text));
-  else if (r.kind === 'alert') {
+  else if (r.kind === 'folder') {
+    // (The rules stay with the picker, out of the startup bundle: the
+    // server refuses a move into itself, and the same folder does nothing.)
+    const v = window.prompt(`${text}\n\nTo folder (full path, empty for Home)`, r.opts.start);
+    r.done(v === null ? null : v.trim().replace(/^\/+|\/+$/g, ''));
+  } else if (r.kind === 'alert') {
     window.alert(r.opts.copy ? `${text}\n\n${r.opts.copy}` : text);
     r.done();
   } else {
@@ -94,7 +102,7 @@ function native(r: Request) {
 /** Answers a request the way Cancel does. */
 export function cancelRequest(r: Request | undefined) {
   if (r?.kind === 'confirm') r.done(false);
-  else if (r?.kind === 'form') r.done(null);
+  else if (r?.kind === 'form' || r?.kind === 'folder') r.done(null);
   else r?.done();
 }
 
@@ -152,6 +160,11 @@ export async function promptDialog(
     fields: [{ name: 'v', label: opts.label, value: opts.value, type: opts.type, autocomplete: opts.autocomplete, required: opts.required ?? true }]
   });
   return r ? r.v : null;
+}
+
+/** A folder chosen in a folder browser ("" is Home); null when cancelled. */
+export function pickFolder(opts: FolderOpts): Promise<string | null> {
+  return push((done) => ({ kind: 'folder', opts, done }));
 }
 
 export function alertDialog(opts: AlertOpts): Promise<void> {
