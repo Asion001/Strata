@@ -1190,3 +1190,39 @@ async fn a_raw_item_whose_move_is_unfinished_offers_no_undo_id() {
     assert_eq!(restore(&t, id_of(&all, "Disk/a.txt")).await, "Disk/a.txt");
     assert_eq!(t.download("Disk/a.txt").await, b"a");
 }
+
+#[tokio::test]
+async fn keep_going_reports_each_path_of_a_batch_delete() {
+    let Some(t) = app().await else { return };
+    t.upload("B/a.txt", b"a").await;
+    t.upload("B/c.txt", b"c").await;
+    let v = t
+        .ok(
+            "POST",
+            "/api/files/delete",
+            json!({"paths": ["B/a.txt", "B/missing.txt", "B/c.txt"], "keep_going": true}),
+        )
+        .await;
+    assert_eq!(v["deleted"], 2, "{v}");
+    assert_eq!(v["trashed"], 2, "{v}");
+    let r = v["results"].as_array().unwrap();
+    assert_eq!(r.len(), 3);
+    assert_eq!(r[0]["path"], "B/a.txt");
+    assert_eq!(r[0]["trashed"], true);
+    assert!(r[0]["trash_id"].is_i64());
+    assert_eq!(r[1]["status"], 404, "{v}");
+    assert!(r[1]["error"].is_string());
+    assert_eq!(r[1]["trashed"], false);
+    assert_eq!(r[2]["trash_id"], v["trash_ids"][1]);
+    // Without it, the first failure is the answer.
+    t.upload("B/d.txt", b"d").await;
+    let (status, _) = t
+        .json(
+            "POST",
+            "/api/files/delete",
+            json!({"paths": ["B/missing.txt", "B/d.txt"]}),
+        )
+        .await;
+    assert_eq!(status, 404);
+    assert_eq!(t.download("B/d.txt").await, b"d");
+}
