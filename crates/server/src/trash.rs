@@ -452,6 +452,8 @@ async fn rename_no_replace(src: &Path, dst: &Path) -> std::io::Result<()> {
 /// the user's tree.
 pub async fn restore(st: &AppState, user_id: i64, id: i64) -> ApiResult<String> {
     let row = owned_row(st, user_id, id).await?;
+    // From here on the stored id names files on disk, not the request's.
+    let id = row.id;
     let all = mounts::user_mounts(st, user_id).await?;
     let m = all
         .iter()
