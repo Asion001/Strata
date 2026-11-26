@@ -131,9 +131,8 @@ pub struct PathResultBody {
 /// A deleted connection.
 #[derive(Serialize, ToSchema)]
 pub struct ConnectionDeletedBody {
-    /// Trashed items from it that couldn't be removed from its storage (it
-    /// couldn't be reached); they stay there (a local folder keeps them in
-    /// `.strata-trash`).
+    /// Trashed items from its local folder that couldn't be removed (the
+    /// folder couldn't be reached); they stay in its `.strata-trash` folder.
     pub left_on_storage: usize,
 }
 

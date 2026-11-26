@@ -116,7 +116,7 @@
       try { r = await api('DELETE', `/api/connections/${c.id}?purge_trash=true`); } catch (e2) { return toastError(e2); }
       // (Its storage couldn't be reached: those files are still on it.)
       const left = r?.left_on_storage ?? 0;
-      if (left > 0) toast(`“${c.name}” is deleted, but ${left} deleted item(s) couldn’t be removed from its storage because it can’t be reached. They stay on that storage (a local folder keeps them in .strata-trash); remove them by hand when the storage is back.`, 'error', 15000);
+      if (left > 0) toast(`“${c.name}” is deleted, but ${left} deleted item(s) couldn’t be removed from its storage because it can’t be reached. They stay in its .strata-trash folder; remove that folder by hand when the storage is back.`, 'error', 15000);
     }
     await load();
   }

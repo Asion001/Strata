@@ -21,8 +21,9 @@ let firstRecorded: () => void = () => {};
 let recorded: Promise<void> = new Promise((r) => (firstRecorded = r));
 /** Settles once the signed-in user is recorded for offline use: files are
  *  only kept for whoever is recorded, so a "Keep offline" right after the
- *  page loads waits for it. */
-export const userRecorded = () => recorded;
+ *  page loads waits for it (at most 3 s: storage that never answers must
+ *  not swallow the click). */
+export const userRecorded = () => Promise.race([recorded, new Promise<void>((r) => setTimeout(r, 3000))]);
 
 /** Someone is signed in: tell the service worker (it keys cached files by
  *  user), drop what other users left here, remember them for offline. */

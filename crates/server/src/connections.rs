@@ -518,8 +518,6 @@ pub async fn delete(
     // Trashed items that couldn't be removed from the storage (it can't be
     // reached): the connection still goes, and the answer says so.
     let mut left_on_storage = 0usize;
-    // Raw trash items whose rows are gone: their files are removed below.
-    let mut raw_left: Vec<i64> = Vec::new();
     // (Without purge_trash, trashed items refuse the delete: checked in the
     // transaction below, so one trashed meanwhile counts too.)
     if trashed > 0 && q.purge_trash {
@@ -533,23 +531,11 @@ pub async fn delete(
             match crate::trash::purge(&st, t).await {
                 Ok(()) | Err(ApiError::NotFound) => {}
                 // Storage gone, offline or failing: the connection goes
-                // anyway (asked for), so the row goes; a raw item's files
-                // are removed below if the folder is there, and what stays
-                // on the storage is reported.
+                // anyway (asked for). Its row goes with the others below, a
+                // raw item's files are removed there if the folder is there,
+                // and what stays on the storage is reported.
                 Err(e) => {
-                    tracing::warn!("purging trash item {t} for a connection delete failed: {e}");
-                    let mode: Option<String> = sqlx::query_scalar(
-                        "DELETE FROM trash t USING volumes v WHERE v.id = t.volume_id AND t.id = $1
-                         RETURNING v.mode",
-                    )
-                    .bind(t)
-                    .fetch_optional(&st.db)
-                    .await?;
-                    match mode.as_deref() {
-                        Some("raw") => raw_left.push(t),
-                        Some(_) => left_on_storage += 1,
-                        None => {}
-                    }
+                    tracing::warn!("purging trash item {t} for a connection delete failed: {e}")
                 }
             }
         }
@@ -578,7 +564,7 @@ pub async fn delete(
     let lock = lock_connection_volumes(&st, id, false).await?;
     let mut tx = st.db.begin().await?;
     // Trashed items: without purge_trash they aren't removed unasked; with
-    // it, any trashed since the purge above go too.
+    // it, any left by the purge above (or trashed since) go too.
     if !q.purge_trash {
         let n: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM trash t JOIN volumes v ON v.id = t.volume_id WHERE v.connection_id = $1",
@@ -593,7 +579,8 @@ pub async fn delete(
             )));
         }
     }
-    let late: Vec<i64> = sqlx::query_scalar(
+    // (Hashed rows go with their volumes; raw ones say which files go.)
+    let raw_left: Vec<i64> = sqlx::query_scalar(
         "DELETE FROM trash t USING volumes v
          WHERE v.id = t.volume_id AND v.connection_id = $1 AND v.mode = 'raw'
          RETURNING t.id",
@@ -601,7 +588,6 @@ pub async fn delete(
     .bind(id)
     .fetch_all(&mut *tx)
     .await?;
-    raw_left.extend(late);
     sqlx::query("DELETE FROM volumes WHERE connection_id = $1")
         .bind(id)
         .execute(&mut *tx)
