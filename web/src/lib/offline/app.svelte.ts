@@ -28,11 +28,13 @@ export async function userRecorded(user: number): Promise<void> {
   // WebKit can come back without the record right after a few quick
   // reloads, though each load wrote it (issue #29). This tab still knows
   // who it signed in as (written at once at sign-in, removed first at
-  // sign-out): if that is `user`, write the record again. A sign-out or
-  // another user's sign-in elsewhere still wins.
+  // sign-out): if that is `user` and there is no record, write it again.
+  // A sign-out or another user's sign-in elsewhere still wins.
   if (typeof caches === 'undefined' || lastUser()?.id !== user) return;
   try {
-    if ((await (await Recent()).signedInHere()) === user) return;
+    // Only a missing record: one naming someone else stays (their sign-in
+    // may be the newer one, and the session cookie theirs).
+    if ((await (await Recent()).signedInHere()) !== null) return;
     await record(user);
     // (Signed out meanwhile, after its delete: take it back.)
     if (lastUser()?.id !== user) await caches.delete(META);

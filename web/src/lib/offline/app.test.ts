@@ -45,6 +45,16 @@ describe('userRecorded', () => {
     expect(await recorded()).toBe(null);
   });
 
+  it('never replaces a record naming another user', async () => {
+    const app = await import('./app.svelte');
+    await app.signedIn(user);
+    // (Two tabs signing in at once can leave this tab's last user 1 while
+    // the record, and the session cookie, are user 2's.)
+    await (await caches.open(META)).put(USER_KEY, new Response('2'));
+    await app.userRecorded(1);
+    expect(await recorded()).toBe(2);
+  });
+
   it('leaves another user who signed in since alone', async () => {
     const app = await import('./app.svelte');
     await app.signedIn(user);
