@@ -26,6 +26,7 @@ use crate::files::{DeleteBody, FromTo, PathBody};
 use crate::journal::FeedEntry;
 use crate::mounts::{CreateReq as MountInput, Mount};
 use crate::shares::{CreateReq as ShareInput, Share, UnlockReq};
+use crate::trash::Item as TrashItem;
 use crate::uploads::{ChunkSpec, CreateReq as UploadInput};
 use crate::vfs::{Entry, SearchHit};
 
@@ -97,6 +98,8 @@ pub struct ListingMount {
     pub connection_name: String,
     pub connection_kind: String,
     pub offline: bool,
+    /// Deletes here go to the trash (else they are permanent).
+    pub trash: bool,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -125,9 +128,38 @@ pub struct PathResultBody {
     pub path: String,
 }
 
+/// A deleted connection.
+#[derive(Serialize, ToSchema)]
+pub struct ConnectionDeletedBody {
+    /// Trashed items from its local folder that couldn't be removed (the
+    /// folder couldn't be reached, or removing failed); they stay in its
+    /// `.strata-trash` folder.
+    pub left_on_storage: usize,
+}
+
 #[derive(Serialize, ToSchema)]
 pub struct DeletedBody {
     pub deleted: i64,
+    /// How many of them went to the trash.
+    pub trashed: i64,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct TrashListBody {
+    /// Days an item stays before it is purged (0: the trash is off).
+    pub retention_days: i64,
+    /// Newest first.
+    pub items: Vec<TrashItem>,
+    /// More items are older than the last one (ask with `before`).
+    pub more: bool,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct PurgedBody {
+    pub purged: i64,
+    /// Items that could not be removed now (their storage is offline);
+    /// they stay in the trash.
+    pub failed: i64,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -260,8 +292,9 @@ fn get_connection() {}
 #[utoipa::path(put, path = "/api/connections/{id}", tag = "connections", params(("id" = i64, Path)),
     request_body = UpsertReq, responses((status = 200, body = ConnectionView), (status = 409, body = ErrorBody)))]
 fn update_connection() {}
-#[utoipa::path(delete, path = "/api/connections/{id}", tag = "connections", params(("id" = i64, Path)), responses(
-    (status = 200, body = EmptyBody), (status = 409, description = "Still in use", body = ErrorBody)))]
+#[utoipa::path(delete, path = "/api/connections/{id}", tag = "connections", params(("id" = i64, Path),
+    ("purge_trash" = Option<bool>, Query, description = "Also purge the trashed items that came from it")), responses(
+    (status = 200, body = ConnectionDeletedBody), (status = 409, description = "Still in use", body = ErrorBody)))]
 fn delete_connection() {}
 #[utoipa::path(post, path = "/api/connections/{id}/probe", tag = "connections", params(("id" = i64, Path)), responses(
     (status = 200, body = ConnectionView)))]
@@ -332,6 +365,21 @@ fn copy_file() {}
 #[utoipa::path(post, path = "/api/files/delete", tag = "files", request_body = DeleteBody, responses((status = 409, description = "A folder holds mount points, or the folder is busy", body = ErrorBody), 
     (status = 200, body = DeletedBody), (status = 503, body = ErrorBody)))]
 fn delete_files() {}
+#[utoipa::path(get, path = "/api/trash", tag = "trash",
+    params(("limit" = Option<i64>, Query), ("before" = Option<i64>, Query, description = "Items older than this id")),
+    responses((status = 200, body = TrashListBody)))]
+fn list_trash() {}
+#[utoipa::path(post, path = "/api/trash/{id}/restore", tag = "trash", params(("id" = i64, Path)), responses(
+    (status = 200, description = "Where it came back", body = PathResultBody), (status = 404, body = ErrorBody),
+    (status = 409, description = "Not mounted any more, covered by a mount, or the name can't be used", body = ErrorBody),
+    (status = 503, body = ErrorBody)))]
+fn restore_trash_item() {}
+#[utoipa::path(delete, path = "/api/trash/{id}", tag = "trash", params(("id" = i64, Path)), responses(
+    (status = 200, body = EmptyBody), (status = 404, body = ErrorBody), (status = 503, body = ErrorBody)))]
+fn purge_trash_item() {}
+#[utoipa::path(post, path = "/api/trash/empty", tag = "trash", responses(
+    (status = 200, body = PurgedBody), (status = 409, body = ErrorBody)))]
+fn empty_trash() {}
 #[utoipa::path(get, path = "/api/search", tag = "files",
     params(("q" = String, Query), ("limit" = Option<i64>, Query)), responses((status = 200, body = SearchBody)))]
 fn search() {}
@@ -547,6 +595,7 @@ fn links(id: &str, op: &mut Operation) {
         list_connections, create_connection, test_connection, get_connection, update_connection, delete_connection, probe_connection,
         list_mounts, create_mount, delete_mount, scan_mount,
         list_files, stat_file, get_content, put_content, thumbnail, get_image, mkdir, move_file, copy_file, delete_files, search,
+        list_trash, restore_trash_item, purge_trash_item, empty_trash,
         create_upload, upload_status, cancel_upload, put_chunk, commit_upload,
         changes, websocket,
         list_shares, create_share, delete_share,
@@ -557,6 +606,7 @@ fn links(id: &str, op: &mut Operation) {
     tags(
         (name = "health"), (name = "auth"), (name = "admin", description = "Administrators only"),
         (name = "connections", description = "Storage connections"), (name = "mounts"), (name = "files"),
+        (name = "trash", description = "Deleted items, kept for a while"),
         (name = "uploads", description = "Resumable, chunked uploads"), (name = "changes"), (name = "shares"),
         (name = "public", description = "Share links (no session)"),
     )

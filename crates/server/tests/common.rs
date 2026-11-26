@@ -18,6 +18,11 @@ pub struct TestApp {
 }
 
 pub async fn app() -> Option<TestApp> {
+    app_with(|_| {}).await
+}
+
+/// `app()` with a changed configuration.
+pub async fn app_with(tweak: impl FnOnce(&mut Config)) -> Option<TestApp> {
     let Ok(base) = std::env::var("STRATA_TEST_DATABASE_URL") else {
         eprintln!("skipping: STRATA_TEST_DATABASE_URL not set");
         return None;
@@ -84,7 +89,10 @@ pub async fn app() -> Option<TestApp> {
         gc_grace_hours: 24,
         raw_ttl_secs: 0,
         probe_secs: 60,
+        trash_days: 30,
     };
+    let mut cfg = cfg;
+    tweak(&mut cfg);
     let pool = sqlx::PgPool::connect(&url).await.unwrap();
     let st = AppState::with_pool(cfg, pool).await.unwrap();
     auth::bootstrap_admin(&st).await.unwrap();

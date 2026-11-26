@@ -15,6 +15,16 @@ pub fn spawn(st: AppState) {
         let mut t = tokio::time::interval(Duration::from_secs(3600));
         loop {
             t.tick().await;
+            // Settle trash moves a crash interrupted, then purge expired items
+            // (before GC, so their blobs can go in this run).
+            if let Err(e) = crate::trash::reconcile(&st).await {
+                tracing::warn!("trash reconcile failed: {e}");
+            }
+            match crate::trash::purge_expired(&st).await {
+                Ok(n) if n > 0 => tracing::info!("trash purged {n} expired items"),
+                Ok(_) => {}
+                Err(e) => tracing::warn!("trash purge failed: {e}"),
+            }
             if let Err(e) = crate::journal::prune(&st).await {
                 tracing::warn!("journal prune failed: {e}");
             }
@@ -84,7 +94,8 @@ async fn gc_volume(
 ) -> anyhow::Result<usize> {
     const UNREFERENCED: &str = "b.volume_id = $1 AND b.created_at < now() - make_interval(hours => $2)
            AND NOT EXISTS (SELECT 1 FROM nodes n WHERE n.volume_id = $1 AND n.chunks @> ARRAY[b.hash])
-           AND NOT EXISTS (SELECT 1 FROM uploads u WHERE u.volume_id = $1 AND u.chunks @> ARRAY[b.hash])";
+           AND NOT EXISTS (SELECT 1 FROM uploads u WHERE u.volume_id = $1 AND u.chunks @> ARRAY[b.hash])
+           AND NOT EXISTS (SELECT 1 FROM trash_nodes t WHERE t.volume_id = $1 AND t.chunks @> ARRAY[b.hash])";
     let marked: Vec<Vec<u8>> = sqlx::query_scalar(&format!(
         "UPDATE blobs b SET deleting = TRUE
          WHERE (b.volume_id, b.hash) IN (SELECT b.volume_id, b.hash FROM blobs b WHERE {UNREFERENCED} LIMIT 10000)

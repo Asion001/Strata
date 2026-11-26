@@ -15,6 +15,16 @@ const Recent = () => import('./recent');
 
 const LAST_USER = 'strata-last-user';
 
+// (Pending until the first sign-in is recorded: the page can ask before
+// the layout has said who is signed in.)
+let firstRecorded: () => void = () => {};
+let recorded: Promise<void> = new Promise((r) => (firstRecorded = r));
+/** Settles once the signed-in user is recorded for offline use: files are
+ *  only kept for whoever is recorded, so a "Keep offline" right after the
+ *  page loads waits for it (at most 3 s: storage that never answers must
+ *  not swallow the click). */
+export const userRecorded = () => Promise.race([recorded, new Promise<void>((r) => setTimeout(r, 3000))]);
+
 /** Someone is signed in: tell the service worker (it keys cached files by
  *  user), drop what other users left here, remember them for offline. */
 export async function signedIn(u: User) {
@@ -22,9 +32,14 @@ export async function signedIn(u: User) {
     localStorage.setItem(LAST_USER, JSON.stringify({ id: u.id, username: u.username, is_admin: u.is_admin }));
   } catch {}
   // (Apart: with no Cache Storage, other users' queued uploads still go.)
-  try {
-    if (typeof caches !== 'undefined') await (await caches.open(META)).put(USER_KEY, new Response(String(u.id)));
-  } catch {}
+  const done = (async () => {
+    try {
+      if (typeof caches !== 'undefined') await (await caches.open(META)).put(USER_KEY, new Response(String(u.id)));
+    } catch {}
+  })();
+  recorded = done;
+  await done;
+  firstRecorded();
   try {
     await (await Recent()).keepOnlyUser(u.id);
   } catch {}
