@@ -941,3 +941,27 @@ fn gc_leaves_no_unreferenced_blobs() {
         }
     });
 }
+
+/// S3 has no folders: a raw S3 mount must still refuse a file or folder
+/// below a file (found by the state machine).
+#[test]
+fn nothing_below_a_file_on_raw_s3() {
+    let Some(mut s) = Sut::init_test(&Model::new()) else {
+        return;
+    };
+    rt().block_on(async {
+        assert!(s.apply(&Op::Mount("s3".into(), Store::S3Raw)).await);
+        assert!(s.upload("s3/a", b"").await);
+        assert!(!s.upload("s3/a/a", b"").await, "a file below a file");
+        assert!(
+            !s.upload("s3/a/b/c", b"x").await,
+            "a file further below a file"
+        );
+        let (ok, v) = s
+            .status("POST", "/api/files/mkdir", json!({"path": "s3/a/d"}))
+            .await;
+        assert!(!ok, "a folder below a file: {v}");
+        let listing = s.listing().await;
+        assert_eq!(listing.keys().cloned().collect::<Vec<_>>(), ["s3", "s3/a"]);
+    });
+}

@@ -55,9 +55,11 @@ api POST /api/mounts "{\"path\":\"bucket\",\"connection_id\":$CONN,\"base_path\"
 put bucket%2Fdata.bin 'raw bytes'
 api POST /api/shares '{"path":"docs"}' >/dev/null
 
-# Logout would end the session the run uses; /api/ws is a WebSocket.
+# Logout would end the session the run uses; /api/ws is a WebSocket. A
+# connection probe may wait up to 25 s for an unreachable endpoint (the
+# fuzzer makes those), so requests get 30 s.
 uvx --from 'schemathesis==4.34.2' schemathesis run "$B/api/v1/openapi.json" --url "$B" \
   -H "Authorization: Bearer $TOKEN" \
   --checks not_a_server_error,status_code_conformance,content_type_conformance,response_schema_conformance,response_headers_conformance \
   --exclude-path /api/auth/logout --exclude-path /api/ws \
-  --max-examples "${EXAMPLES:-50}" --no-color
+  --max-examples "${EXAMPLES:-50}" --request-timeout 30 --no-color

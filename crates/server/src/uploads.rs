@@ -153,6 +153,7 @@ pub async fn create(
     {
         return Err(conflict("a folder with that name already exists"));
     }
+    vfs::check_raw_place(&st, &m, &rel).await?;
     let id = random_token(16);
     sqlx::query(
         "INSERT INTO uploads (id, user_id, path, volume_id, size, chunks, chunk_sizes, mtime)
