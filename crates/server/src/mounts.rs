@@ -128,6 +128,28 @@ pub struct CreateReq {
     pub mode: String,
 }
 
+/// Refuse a mount over other mounts of the user: they would be cut off
+/// (the new volume doesn't have the folders that lead to them).
+async fn mounts_inside<'e>(
+    db: impl sqlx::PgExecutor<'e>,
+    user_id: i64,
+    path: &str,
+) -> ApiResult<()> {
+    let inside: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM mounts WHERE owner_id = $1 AND left(path, length($2) + 1) = $2 || '/')",
+    )
+    .bind(user_id)
+    .bind(path)
+    .fetch_one(db)
+    .await?;
+    if inside {
+        return Err(conflict(
+            "other mounts live inside this folder; remove them first",
+        ));
+    }
+    Ok(())
+}
+
 pub async fn create(
     State(st): State<AppState>,
     AuthUser(u): AuthUser,
@@ -177,6 +199,7 @@ pub async fn create(
     // Refuse an overlap before making any folder; the parent folder is made
     // outside the layout lock (it may be slow remote storage).
     check_storage_overlap(&st, req.connection_id, &base, &req.mode).await?;
+    mounts_inside(&st.db, u.id, &path).await?;
     let (parent, name) = paths::split(&path).unwrap();
     // The mount point's parent must be a folder (create it if missing).
     vfs::mkdir_p(&st, u.id, parent).await?;
@@ -184,6 +207,7 @@ pub async fn create(
     // volume or connection edit can't slip an overlap in between.
     let (mut tx, _layout) = lock_layout(&st).await?;
     check_storage_overlap(&st, req.connection_id, &base, &req.mode).await?;
+    mounts_inside(&mut *tx, u.id, &path).await?;
     let volume_id: i64 = sqlx::query_scalar(
         "INSERT INTO volumes (connection_id, base_path, mode) VALUES ($1, $2, $3)
          ON CONFLICT (connection_id, base_path, mode) DO UPDATE SET mode = EXCLUDED.mode RETURNING id",

@@ -1,7 +1,8 @@
 name: Nightly
 
 # Slower checks that don't need to block every pull request: fresh advisory
-# scans (new advisories appear without code changes) and a coverage report.
+# scans (new advisories appear without code changes), a coverage report and
+# the property tests at 10,000 cases.
 
 on:
   schedule:
@@ -72,3 +73,45 @@ jobs:
           name: rust-lcov
           path: lcov.info
           retention-days: 14
+
+  # The property tests at length: 10,000 cases of the file-tree state
+  # machine against the real server (Postgres, MinIO), and of the others.
+  properties:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: strata
+          POSTGRES_PASSWORD: strata
+          POSTGRES_DB: strata
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U strata" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      STRATA_TEST_DATABASE_URL: postgres://strata:strata@localhost:5432/strata
+      CARGO_TERM_COLOR: always
+      PROPTEST_CASES: "10000"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: Property tests (10,000 cases)
+        run: |
+          cargo test --release -p strata-server --test state_machine
+          cargo test --release -p strata-storage --test properties
+          cargo test --release -p strata-server --lib range
+      # A failing case is saved in proptest-regressions/: keep it.
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: proptest-regressions
+          path: crates/*/proptest-regressions
+          retention-days: 30
+

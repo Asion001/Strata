@@ -1388,3 +1388,77 @@ async fn nul_characters_are_bad_requests() {
         .await;
     assert!(s.is_client_error(), "{s} {v}");
 }
+
+/// A mount over a folder that holds other mounts is refused: they would be
+/// cut off (found by the state-machine test).
+#[tokio::test]
+async fn no_mount_over_other_mounts() {
+    let Some(t) = app().await else { return };
+    let c = t
+        .ok(
+            "POST",
+            "/api/connections",
+            json!({"name": "disk", "config": {"kind": "local", "path": "d"}}),
+        )
+        .await;
+    t.ok(
+        "POST",
+        "/api/mounts",
+        json!({"path": "a/a/a", "connection_id": c["id"], "base_path": "one", "mode": "raw"}),
+    )
+    .await;
+    let (s, v) = t
+        .json(
+            "POST",
+            "/api/mounts",
+            json!({"path": "a", "connection_id": c["id"], "base_path": "two", "mode": "raw"}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    // Beside it is fine.
+    t.ok(
+        "POST",
+        "/api/mounts",
+        json!({"path": "b", "connection_id": c["id"], "base_path": "three", "mode": "raw"}),
+    )
+    .await;
+}
+
+/// A path below a file is simply not there (on a raw local folder too, where
+/// the filesystem says "not a directory"): 404, not a server error (found
+/// by the state-machine test).
+#[tokio::test]
+async fn paths_below_a_file_are_not_found() {
+    let Some(t) = app().await else { return };
+    let c = t
+        .ok(
+            "POST",
+            "/api/connections",
+            json!({"name": "disk", "config": {"kind": "local", "path": "d"}}),
+        )
+        .await;
+    t.ok(
+        "POST",
+        "/api/mounts",
+        json!({"path": "raw", "connection_id": c["id"], "base_path": "", "mode": "raw"}),
+    )
+    .await;
+    t.upload("raw/f", b"").await;
+    t.upload("home-f", b"x").await;
+    for p in ["raw/f/x", "home-f/x"] {
+        let (s, v) = t
+            .json(
+                "POST",
+                "/api/files/move",
+                json!({"from": p, "to": "elsewhere"}),
+            )
+            .await;
+        assert_eq!(s, StatusCode::NOT_FOUND, "move {p}: {v}");
+        let (s, v) = t.get(&format!("/api/files/stat?path={}", enc(p))).await;
+        assert_eq!(s, StatusCode::NOT_FOUND, "stat {p}: {v}");
+        let (s, v) = t
+            .json("POST", "/api/files/delete", json!({"paths": [p]}))
+            .await;
+        assert_eq!(s, StatusCode::NOT_FOUND, "delete {p}: {v}");
+    }
+}
