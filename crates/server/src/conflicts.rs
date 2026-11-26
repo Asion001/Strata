@@ -129,6 +129,13 @@ pub async fn place(
         };
         match mode {
             OnConflict::Rename => continue,
+            OnConflict::Replace if node.is_dir != is_dir => {
+                return Err(conflict(if node.is_dir {
+                    "a file can't replace a folder; keep both instead"
+                } else {
+                    "a folder can't replace a file; keep both instead"
+                }));
+            }
             OnConflict::Replace => {
                 return Ok(Target {
                     path: candidate,
@@ -199,7 +206,8 @@ where
     let staged = place(
         st,
         user_id,
-        &paths::join(parent, &format!(".{name}.strata-{}", random_token(6))),
+        // (Short, so a long name still fits.)
+        &paths::join(parent, &format!(".strata-{}", random_token(9))),
         is_dir,
         OnConflict::Fail,
     )
@@ -220,6 +228,18 @@ where
         }
         return Err(e);
     }
+    // Share links of the old item move to the new one (a replaced file is
+    // still "the" file); a restore from the trash leaves them there.
+    let (m, rel) = mounts::resolve(st, user_id, &target.path).await?;
+    let shares: Vec<i64> = match vfs::node_id(st, m.volume_id, &rel).await? {
+        Some(id) => {
+            sqlx::query_scalar("SELECT id FROM shares WHERE node_id = $1")
+                .bind(id)
+                .fetch_all(&st.db)
+                .await?
+        }
+        None => Vec::new(),
+    };
     // Only now does the old one go (to the trash where there is one).
     if let Err(e) = vfs::delete(st, user_id, &target.path, true).await {
         // The old one stays; so does the source of a move, which is now
@@ -249,6 +269,16 @@ where
             e.public_message(),
             keep_visible(st, user_id, &staged.path, &target.path, is_dir).await
         )));
+    }
+    if !shares.is_empty()
+        && let Some(id) = vfs::node_id(st, m.volume_id, &rel).await?
+    {
+        sqlx::query("UPDATE shares SET node_id = $1, is_dir = $2 WHERE id = ANY($3)")
+            .bind(id)
+            .bind(is_dir)
+            .bind(&shares)
+            .execute(&st.db)
+            .await?;
     }
     Ok(target.path)
 }

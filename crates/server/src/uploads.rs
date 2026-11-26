@@ -283,7 +283,8 @@ pub async fn commit(
     body: Bytes,
 ) -> ApiResult<Json<serde_json::Value>> {
     // (No body, or `{}`: fail when the name is taken.)
-    let req: CommitReq = if body.is_empty() {
+    let text = std::str::from_utf8(&body).unwrap_or("").trim();
+    let req: CommitReq = if text.is_empty() || text == "null" {
         CommitReq::default()
     } else {
         serde_json::from_slice(&body).map_err(|e| bad(format!("bad request body: {e}")))?
@@ -359,7 +360,13 @@ pub async fn commit(
                             let f = dir.join(h.hex());
                             async move { tokio::fs::read(f).await.map(Bytes::from) }
                         }));
-                    vfs::write_stream(&st, &m, &rel, stream).await.map(|_| ())
+                    // (Only where nothing is, checked under the volume lock.)
+                    match vfs::write_stream_if(&st, &m, &rel, stream, &vfs::Expect::Absent).await {
+                        Err(ApiError::PreconditionFailed(_)) => {
+                            Err(conflict("something was saved there meanwhile; try again"))
+                        }
+                        r => r.map(|_| ()),
+                    }
                 }
             }
         },

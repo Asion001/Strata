@@ -368,3 +368,57 @@ async fn names_in_flight_are_never_reused() {
     assert_eq!(s, StatusCode::CONFLICT, "{v}");
     assert!(v["error"].as_str().unwrap().contains("too long"), "{v}");
 }
+
+#[tokio::test]
+async fn replace_keeps_share_links_and_kinds() {
+    let Some(t) = app().await else { return };
+    t.upload("a/f.txt", b"new").await;
+    t.upload("b/f.txt", b"old").await;
+    let s = t
+        .ok("POST", "/api/shares", json!({"path": "b/f.txt"}))
+        .await;
+    let link = s["token"].as_str().unwrap().to_string();
+    t.upload_replacing("b/f.txt", b"newer").await;
+    let (s, v) = op(&t, "move", "a/f.txt", "b/f.txt", "replace").await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    // The link still opens the file at that name: the newest one.
+    let share_node: Option<i64> = sqlx::query_scalar("SELECT node_id FROM shares WHERE token = $1")
+        .bind(&link)
+        .fetch_one(&t.st.db)
+        .await
+        .unwrap();
+    let node: i64 =
+        sqlx::query_scalar("SELECT id FROM nodes WHERE parent = 'b' AND name = 'f.txt'")
+            .fetch_one(&t.st.db)
+            .await
+            .unwrap();
+    assert_eq!(share_node, Some(node));
+    assert_eq!(t.download("b/f.txt").await, b"new");
+    // A restore of an old version from the trash doesn't take the link back.
+    let (_, items) = t.get("/api/trash").await;
+    let id = items["items"][0]["id"].as_i64().unwrap();
+    t.ok("POST", &format!("/api/trash/{id}/restore"), json!({}))
+        .await;
+    let after: Option<i64> = sqlx::query_scalar("SELECT node_id FROM shares WHERE token = $1")
+        .bind(&link)
+        .fetch_one(&t.st.db)
+        .await
+        .unwrap();
+    assert_eq!(after, Some(node));
+
+    // A file never replaces a folder, nor a folder a file.
+    t.upload("c/x/inner.txt", b"i").await;
+    t.upload("c/y", b"y").await;
+    let (s, _) = op(&t, "copy", "c/y", "c/x", "replace").await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    let (s, _) = op(&t, "copy", "c/x", "c/y", "replace").await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    assert_eq!(t.names("c/x").await, vec!["inner.txt"]);
+    assert_eq!(t.download("c/y").await, b"y");
+
+    // An item onto itself: only a copy keeping both.
+    let (s, _) = op(&t, "copy", "c/y", "c/y", "fail").await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (s, _) = op(&t, "move", "gone", "gone", "rename").await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+}

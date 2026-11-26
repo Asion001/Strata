@@ -336,11 +336,20 @@ async fn is_folder(st: &AppState, user_id: i64, path: &str) -> ApiResult<bool> {
 }
 
 /// The paths of a move or copy, checked before anything is placed.
-async fn from_to(st: &AppState, user_id: i64, b: &FromTo) -> ApiResult<(String, String, bool)> {
+async fn from_to(
+    st: &AppState,
+    user_id: i64,
+    b: &FromTo,
+    copy: bool,
+) -> ApiResult<(String, String, bool)> {
     let from = paths::normalize(&b.from)?;
     let to = paths::normalize(&b.to)?;
     if from.is_empty() || to.is_empty() {
         return Err(bad("cannot move or copy the root folder"));
+    }
+    // Onto itself only as a duplicate (a copy keeping both).
+    if from == to && !(copy && b.on_conflict == OnConflict::Rename) {
+        return Err(bad("source and destination are the same"));
     }
     let is_dir = is_folder(st, user_id, &from).await?;
     Ok((from, to, is_dir))
@@ -351,10 +360,7 @@ pub async fn move_(
     AuthUser(u): AuthUser,
     Json(b): Json<FromTo>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let (from, to, is_dir) = from_to(&st, u.id, &b).await?;
-    if from == to {
-        return Err(bad("source and destination are the same"));
-    }
+    let (from, to, is_dir) = from_to(&st, u.id, &b, false).await?;
     let path = conflicts::write_at(
         &st,
         u.id,
@@ -376,10 +382,7 @@ pub async fn copy(
     AuthUser(u): AuthUser,
     Json(b): Json<FromTo>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let (from, to, is_dir) = from_to(&st, u.id, &b).await?;
-    if from == to && b.on_conflict == OnConflict::Replace {
-        return Err(bad("an item can't replace itself"));
-    }
+    let (from, to, is_dir) = from_to(&st, u.id, &b, true).await?;
     let path = conflicts::write_at(
         &st,
         u.id,
