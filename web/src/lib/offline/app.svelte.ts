@@ -34,8 +34,11 @@ export async function userRecorded(user: number): Promise<void> {
   try {
     // Only a missing record: one naming someone else stays (their sign-in
     // may be the newer one, and the session cookie theirs).
-    if ((await (await Recent()).signedInHere()) !== null) return;
+    const h = await (await Recent()).signedInHere();
+    console.log('DBG userRecorded', user, 'here', h);
+    if (h !== null) return;
     await record(user);
+    console.log('DBG rewritten', await (await Recent()).signedInHere());
     // (Signed out meanwhile, after its delete: take it back.)
     if (lastUser()?.id !== user) await caches.delete(META);
   } catch {}

@@ -34,6 +34,7 @@ async function setOffline(ctx: BrowserContext, page: Page, off: boolean) {
 
 test('offline: the app opens, the last-seen folder lists with a banner, pinned files open', async ({ browser }) => {
   const { ctx, page } = await newSession(browser);
+  page.on('console', (m) => { if (m.text().startsWith('DBG')) console.log('A', m.text()); });
   const dir = `off-${Date.now()}`;
   await putBytes(page, `${dir}/pic.png`, new Uint8Array(PNG));
   await putFile(page, `${dir}/notes.txt`, 'hello offline');
@@ -118,6 +119,7 @@ test('an interrupted large upload resumes without re-sending finished chunks', a
 
 test('sign-out removes cached files, listings and queued uploads', async ({ browser }) => {
   const { ctx, page } = await newSession(browser);
+  page.on('console', (m) => { if (m.text().startsWith('DBG')) console.log('B', m.text()); });
   const dir = `out-${Date.now()}`;
   await putBytes(page, `${dir}/pic.png`, new Uint8Array(PNG));
   await page.goto(`/?p=${encodeURIComponent(dir)}`);
