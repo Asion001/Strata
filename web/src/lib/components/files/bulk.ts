@@ -3,7 +3,7 @@
 import { api, ApiError, type Entry, type Schemas } from '$lib/api';
 import { join } from '$lib/format';
 import { reloadMounts } from '$lib/mounts.svelte';
-import { confirmDialog, promptDialog } from '$lib/dialogs.svelte';
+import { confirmDialog, pickFolder } from '$lib/dialogs.svelte';
 import { toast, type ToastAction } from '$lib/toast.svelte';
 import { trashInfo } from '$lib/trash-info.svelte';
 import { names, type FilesController } from './files.svelte';
@@ -187,18 +187,15 @@ export async function transferPicked(c: FilesController, copy: boolean) {
   const items = copy ? c.picked : withoutMounts(c.picked, 'move');
   if (!items.length) return;
   const dir = c.listedPath;
-  const dest = await promptDialog({
+  const to = await pickFolder({
     title: `${copy ? 'Copy' : 'Move'} ${names(items)}`,
-    label: 'To folder (full path, empty for Home)',
-    value: dir,
-    required: false,
-    confirm: copy ? 'Copy' : 'Move'
+    confirm: copy ? 'Copy here' : 'Move here',
+    start: dir,
+    // Same folder: a move does nothing and a copy would collide with itself.
+    from: dir,
+    exclude: items.filter((e) => e.is_dir).map((e) => join(dir, e.name))
   });
-  if (dest === null) return;
-  // Outer spaces and slashes are never meant: ' docs/ ' is docs.
-  const to = dest.trim().replace(/^\/+|\/+$/g, '');
-  // Same folder: a move does nothing and a copy would collide with itself.
-  if (to === dir) return void toast('Pick a different folder.', 'info');
+  if (to === null) return;
   if (c.busy) return c.waitForBusy();
   await each(c, items, copy ? 'copy' : 'move', (e) => api('POST', copy ? '/api/files/copy' : '/api/files/move', { from: join(dir, e.name), to: join(to, e.name) }));
 }

@@ -3,7 +3,7 @@
   // <dialog> opened with showModal(): it sits above everything (viewer and
   // editor included), traps focus, makes the page behind inert, and gives
   // focus back to where it was when it closes.
-  import { cancelRequest, dialogs, type Request } from '$lib/dialogs.svelte';
+  import { cancelRequest, dialogs, native, type Request } from '$lib/dialogs.svelte';
   import Button from './button/button.svelte';
   import Input from './input/input.svelte';
   import CopyIcon from '@lucide/svelte/icons/copy';
@@ -19,6 +19,25 @@
   // Focused before the first of a run of dialogs; each reopen would
   // otherwise hand focus back to the previous dialog's button.
   let opener: HTMLElement | null = null;
+  // The folder browser loads on first use.
+  let Picker = $state<typeof import('$lib/components/files/FolderPicker.svelte').default>();
+  let pickerLoading = false;
+  $effect(() => {
+    const r = req;
+    if (r?.kind !== 'folder' || Picker || pickerLoading) return;
+    pickerLoading = true;
+    import('$lib/components/files/FolderPicker.svelte').then(
+      (m) => (Picker = m.default),
+      (err) => {
+        // Can't load (offline after an update): the browser's prompt asks
+        // instead.
+        console.error('could not load the folder picker', err);
+        pickerLoading = false;
+        // (The one showing; a later one tries again when its turn comes.)
+        if (dialogs.queue[0]?.kind === 'folder') native(dialogs.queue[0]);
+      }
+    );
+  });
 
   // Fresh field values before the new request renders.
   $effect.pre(() => {
@@ -59,7 +78,7 @@
     else if (r.kind === 'form') {
       if (!ready) return;
       r.done({ ...values });
-    } else r.done();
+    } else if (r.kind === 'alert') r.done();
   }
 
   let ready = $derived(
@@ -98,9 +117,23 @@
   onclose={() => { if (req && el && !el.open) el.showModal(); }}
   onpointerdown={(e) => (downOnBackdrop = e.target === el)}
   onclick={(e) => { if (e.target === el && downOnBackdrop) cancel(); }}
-  class="m-auto w-[calc(100%-2rem)] max-w-md rounded-xl border border-border bg-popover p-0 text-popover-foreground shadow-lg backdrop:bg-black/50"
+  class={[
+    'm-auto rounded-xl border border-border bg-popover p-0 text-popover-foreground shadow-lg backdrop:bg-black/50',
+    // The folder browser: a full-height sheet on phones.
+    req?.kind === 'folder'
+      ? 'h-[min(36rem,85vh)] w-[calc(100%-2rem)] max-w-lg max-sm:h-dvh max-sm:max-h-none max-sm:w-full max-sm:max-w-none max-sm:rounded-none max-sm:border-0 max-sm:pt-[env(safe-area-inset-top)] max-sm:pb-[env(safe-area-inset-bottom)]'
+      : 'w-[calc(100%-2rem)] max-w-md'
+  ]}
 >
-  {#if req}
+  {#if req?.kind === 'folder'}
+    {#key req.id}
+      {#if Picker}
+        <Picker opts={req.opts} done={req.done} {titleId} />
+      {:else}
+        <h2 id={titleId} class="p-6 text-lg leading-none font-semibold">{req.opts.title}</h2>
+      {/if}
+    {/key}
+  {:else if req}
     {#key req.id}
       <form class="grid gap-4 p-6" onsubmit={submit}>
         <div class="grid gap-2">
