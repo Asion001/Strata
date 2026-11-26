@@ -613,7 +613,8 @@ impl Server {
                 // database and from its backend.
                 let unreferenced = "SELECT b.volume_id, b.hash FROM blobs b WHERE
                       NOT EXISTS (SELECT 1 FROM nodes n WHERE n.volume_id = b.volume_id AND n.chunks @> ARRAY[b.hash])
-                  AND NOT EXISTS (SELECT 1 FROM uploads u WHERE u.volume_id = b.volume_id AND u.chunks @> ARRAY[b.hash])";
+                  AND NOT EXISTS (SELECT 1 FROM uploads u WHERE u.volume_id = b.volume_id AND u.chunks @> ARRAY[b.hash])
+                  AND NOT EXISTS (SELECT 1 FROM trash_nodes t WHERE t.volume_id = b.volume_id AND t.chunks @> ARRAY[b.hash])";
                 let before: Vec<(i64, Vec<u8>)> = sqlx::query_as(unreferenced)
                     .fetch_all(&self.t.st.db)
                     .await
@@ -748,7 +749,8 @@ async fn check(s: &Server, m: &Model) {
     let old: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM blobs b WHERE b.created_at < now() - interval '24 hours'
            AND NOT EXISTS (SELECT 1 FROM nodes n WHERE n.volume_id = b.volume_id AND n.chunks @> ARRAY[b.hash])
-           AND NOT EXISTS (SELECT 1 FROM uploads u WHERE u.volume_id = b.volume_id AND u.chunks @> ARRAY[b.hash])",
+           AND NOT EXISTS (SELECT 1 FROM uploads u WHERE u.volume_id = b.volume_id AND u.chunks @> ARRAY[b.hash])
+           AND NOT EXISTS (SELECT 1 FROM trash_nodes t WHERE t.volume_id = b.volume_id AND t.chunks @> ARRAY[b.hash])",
     )
     .fetch_one(&st.db)
     .await
@@ -918,7 +920,8 @@ fn gc_leaves_no_unreferenced_blobs() {
             .fetch_all(&t.st.db)
             .await
             .unwrap();
-        t.ok("POST", "/api/files/delete", json!({"paths": ["a.bin"]})).await;
+        // (For good: a trashed file's blobs stay until it is purged.)
+        t.ok("POST", "/api/files/delete", json!({"paths": ["a.bin"], "permanent": true})).await;
         background::gc(&t.st, 0).await.unwrap();
         let left: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM blobs b WHERE NOT EXISTS
