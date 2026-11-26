@@ -804,3 +804,55 @@ async fn a_folder_with_a_write_inside_stays_put_until_it_ends() {
     let (s, v) = op(&t, "move", "busy", "elsewhere", "fail").await;
     assert_eq!(s, StatusCode::OK, "{v}");
 }
+
+#[tokio::test]
+async fn a_folder_is_settled_before_it_moves() {
+    let Some(t) = app().await else { return };
+    let uid: i64 = sqlx::query_scalar("SELECT id FROM users WHERE username = 'admin'")
+        .fetch_one(&t.st.db)
+        .await
+        .unwrap();
+    let staged = |path: &str, stale: bool| {
+        sqlx::query(
+            "INSERT INTO staged_items (user_id, path, target, is_dir, is_move, alive_at)
+             VALUES ($1, $2, 'p/q/f.txt', FALSE, TRUE,
+                     CASE WHEN $3 THEN now() - interval '1 hour' ELSE now() END)",
+        )
+        .bind(uid)
+        .bind(path.to_string())
+        .bind(stale)
+        .execute(&t.st.db)
+    };
+    t.upload("p/q/f.txt", b"old").await;
+    t.upload("p/q/.strata-moved", b"moved").await;
+    // One another server is still writing: the folder is busy.
+    staged("p/q/.strata-moved", false).await.unwrap();
+    let (s, v) = op(&t, "move", "p", "p2", "fail").await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{v}");
+    // One a crash left: settled first (shown), then the folder moves.
+    sqlx::query("UPDATE staged_items SET alive_at = now() - interval '1 hour'")
+        .execute(&t.st.db)
+        .await
+        .unwrap();
+    let (s, v) = op(&t, "move", "p", "p2", "fail").await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(t.names("p2/q").await, vec!["f (2).txt", "f.txt"]);
+    assert_eq!(t.download("p2/q/f (2).txt").await, b"moved");
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM staged_items")
+        .fetch_one(&t.st.db)
+        .await
+        .unwrap();
+    assert_eq!(n, 0);
+    // The same before a delete.
+    t.upload("p2/q/.strata-again", b"again").await;
+    staged("p2/q/.strata-again", true).await.unwrap();
+    let (s, v) = t
+        .json("POST", "/api/files/delete", json!({"paths": ["p2"]}))
+        .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM staged_items")
+        .fetch_one(&t.st.db)
+        .await
+        .unwrap();
+    assert_eq!(n, 0);
+}

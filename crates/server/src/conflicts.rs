@@ -130,8 +130,43 @@ pub async fn check_not_busy_inside(st: &AppState, user_id: i64, path: &str) -> A
             "something inside is being written; try again".into(),
         ));
     }
+    settle_inside(st, user_id, path).await
+}
+
+/// Settle what crashed replaces left inside `path` now, before it moves or
+/// goes (a staged item carried off with it would lose its row and stay
+/// hidden). One another server is still writing makes it busy.
+async fn settle_inside(st: &AppState, user_id: i64, path: &str) -> ApiResult<()> {
+    let prefix = if path.is_empty() {
+        String::new()
+    } else {
+        format!("{path}/")
+    };
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT id, user_id, path, target, is_dir, is_move, written,
+                alive_at < now() - make_interval(secs => $3) AS stale
+         FROM staged_items
+         WHERE user_id = $1 AND left(path, length($2)) = $2 ORDER BY id",
+    )
+    .bind(user_id)
+    .bind(&prefix)
+    .bind(STALE_SECS as f64)
+    .fetch_all(&st.db)
+    .await?;
+    let busy = || ApiError::Unavailable("something inside is being written; try again".into());
+    if rows.iter().any(|r| !r.7) {
+        return Err(busy());
+    }
+    for row in rows {
+        if !settle(st, row).await? {
+            return Err(busy());
+        }
+    }
     Ok(())
 }
+
+/// A `staged_items` row, and whether it is stale.
+type Row = (i64, i64, String, String, bool, bool, bool, bool);
 
 /// Claim anything named by `key` (an upload being committed, say).
 pub fn claim_key(st: &AppState, key: String) -> Option<Claim> {
@@ -506,45 +541,53 @@ where
 /// went already); part of a copy goes. Items an operation (of any server)
 /// is still writing are left alone. Returns how many were settled.
 pub async fn reconcile(st: &AppState) -> ApiResult<usize> {
-    let rows: Vec<(i64, i64, String, String, bool, bool, bool)> = sqlx::query_as(
-        "SELECT id, user_id, path, target, is_dir, is_move, written FROM staged_items
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT id, user_id, path, target, is_dir, is_move, written, TRUE FROM staged_items
          WHERE alive_at < now() - make_interval(secs => $1) ORDER BY id",
     )
     .bind(STALE_SECS as f64)
     .fetch_all(&st.db)
     .await?;
     let mut settled = 0;
-    for (id, user_id, path, target, is_dir, is_move, written) in rows {
-        // (A path that no longer resolves, or storage that can't be read
-        // now: next time.)
-        let Ok((m, rel)) = mounts::resolve(st, user_id, &path).await else {
-            continue;
-        };
-        let Some(_c) = claim(st, &m, &rel) else {
-            continue;
-        };
-        let done = match vfs::stat(st, &m, &rel).await {
-            Err(ApiError::NotFound) => true,
-            Err(_) => false,
-            Ok(_) if is_move => keep_visible(st, user_id, &path, &target, is_dir).await != path,
-            // Part of a copy goes (its source is still there), unless it is
-            // whole and the old item went already (a crash just before the
-            // rename): then it is the only copy of what was there.
-            Ok(_) => match maybe_there(st, user_id, &target).await {
-                false if written => keep_visible(st, user_id, &path, &target, is_dir).await != path,
-                true if !is_there(st, user_id, &target).await => false,
-                _ => vfs::delete(st, user_id, &path, false).await.is_ok(),
-            },
-        };
-        if done {
-            sqlx::query("DELETE FROM staged_items WHERE id = $1")
-                .bind(id)
-                .execute(&st.db)
-                .await?;
+    for row in rows {
+        if settle(st, row).await? {
             settled += 1;
         }
     }
     Ok(settled)
+}
+
+/// Settle one stale row; whether it is done with.
+async fn settle(st: &AppState, row: Row) -> ApiResult<bool> {
+    let (id, user_id, path, target, is_dir, is_move, written, _) = row;
+    // (A path that no longer resolves, or storage that can't be read
+    // now: next time.)
+    let Ok((m, rel)) = mounts::resolve(st, user_id, &path).await else {
+        return Ok(false);
+    };
+    let Some(_c) = claim(st, &m, &rel) else {
+        return Ok(false);
+    };
+    let done = match vfs::stat(st, &m, &rel).await {
+        Err(ApiError::NotFound) => true,
+        Err(_) => false,
+        Ok(_) if is_move => keep_visible(st, user_id, &path, &target, is_dir).await != path,
+        // Part of a copy goes (its source is still there), unless it is
+        // whole and the old item went already (a crash just before the
+        // rename): then it is the only copy of what was there.
+        Ok(_) => match maybe_there(st, user_id, &target).await {
+            false if written => keep_visible(st, user_id, &path, &target, is_dir).await != path,
+            true if !is_there(st, user_id, &target).await => false,
+            _ => vfs::delete(st, user_id, &path, false).await.is_ok(),
+        },
+    };
+    if done {
+        sqlx::query("DELETE FROM staged_items WHERE id = $1")
+            .bind(id)
+            .execute(&st.db)
+            .await?;
+    }
+    Ok(done)
 }
 
 /// Stops a running replace's heartbeat when the replace ends (or unwinds).
