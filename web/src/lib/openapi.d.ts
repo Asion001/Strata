@@ -532,6 +532,70 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/trash": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_trash"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/trash/empty": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["empty_trash"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/trash/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: operations["purge_trash_item"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/trash/{id}/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["restore_trash_item"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/uploads": {
         parameters: {
             query?: never;
@@ -700,6 +764,15 @@ export interface components {
             root?: string | null;
             user?: string | null;
         };
+        /** @description A deleted connection. */
+        ConnectionDeletedBody: {
+            /**
+             * @description Trashed items from its local folder that couldn't be removed (the
+             *     folder couldn't be reached, or removing failed); they stay in its
+             *     `.strata-trash` folder.
+             */
+            left_on_storage: number;
+        };
         ConnectionInput: {
             config: components["schemas"]["ConnectionConfig"];
             name: string;
@@ -751,10 +824,17 @@ export interface components {
         };
         DeleteBody: {
             paths: string[];
+            /** @description Skip the trash and delete for good. */
+            permanent?: boolean;
         };
         DeletedBody: {
             /** Format: int64 */
             deleted: number;
+            /**
+             * Format: int64
+             * @description How many of them went to the trash.
+             */
+            trashed: number;
         };
         /** @description An answer with nothing to say. */
         EmptyBody: Record<string, never>;
@@ -796,6 +876,19 @@ export interface components {
             ok: boolean;
             version?: string | null;
         };
+        Item: {
+            /** Format: date-time */
+            deleted_at: string;
+            /** Format: int64 */
+            id: number;
+            is_dir: boolean;
+            name: string;
+            original_path: string;
+            /** Format: date-time */
+            purge_after: string;
+            /** Format: int64 */
+            size: number;
+        };
         ListingBody: {
             entries: components["schemas"]["Entry"][];
             mount: components["schemas"]["ListingMount"];
@@ -814,6 +907,8 @@ export interface components {
             mode: string;
             offline: boolean;
             path: string;
+            /** @description Deletes here go to the trash (else they are permanent). */
+            trash: boolean;
         };
         LoginBody: {
             /**
@@ -868,6 +963,16 @@ export interface components {
         };
         PathResultBody: {
             path: string;
+        };
+        PurgedBody: {
+            /**
+             * Format: int64
+             * @description Items that could not be removed now (their storage is offline);
+             *     they stay in the trash.
+             */
+            failed: number;
+            /** Format: int64 */
+            purged: number;
         };
         ResyncBody: {
             error: string;
@@ -944,6 +1049,17 @@ export interface components {
             path: string;
             /** Format: int64 */
             size: number;
+        };
+        TrashListBody: {
+            /** @description Newest first. */
+            items: components["schemas"]["Item"][];
+            /** @description More items are older than the last one (ask with `before`). */
+            more: boolean;
+            /**
+             * Format: int64
+             * @description Days an item stays before it is purged (0: the trash is off).
+             */
+            retention_days: number;
         };
         UnlockBody: {
             /** @description Pass as `k` to the other public routes (null: no password needed). */
@@ -2231,7 +2347,10 @@ export interface operations {
     };
     delete_connection: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Also purge the trashed items that came from it */
+                purge_trash?: boolean;
+            };
             header?: never;
             path: {
                 id: number;
@@ -2245,7 +2364,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["EmptyBody"];
+                    "application/json": components["schemas"]["ConnectionDeletedBody"];
                 };
             };
             /** @description Bad request (a parameter or the body) */
@@ -4641,6 +4760,320 @@ export interface operations {
             };
             /** @description Internal error (details are only logged) */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    list_trash: {
+        parameters: {
+            query?: {
+                limit?: number;
+                /** @description Items older than this id */
+                before?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TrashListBody"];
+                };
+            };
+            /** @description Bad request (a parameter or the body) */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not signed in */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description In conflict with what is there */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Internal error (details are only logged) */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    empty_trash: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PurgedBody"];
+                };
+            };
+            /** @description Bad request (a parameter or the body) */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not signed in */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Internal error (details are only logged) */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    purge_trash_item: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EmptyBody"];
+                };
+            };
+            /** @description Bad request (a parameter or the body) */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not signed in */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description In conflict with what is there */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Internal error (details are only logged) */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    restore_trash_item: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Where it came back */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PathResultBody"];
+                };
+            };
+            /** @description Bad request (a parameter or the body) */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not signed in */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed (or a cookie request without X-Strata, or a read-only folder or storage) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not mounted any more, covered by a mount, or the name can't be used */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Internal error (details are only logged) */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

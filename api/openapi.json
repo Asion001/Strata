@@ -197,6 +197,20 @@
           }
         ]
       },
+      "ConnectionDeletedBody": {
+        "description": "A deleted connection.",
+        "properties": {
+          "left_on_storage": {
+            "description": "Trashed items from its local folder that couldn't be removed (the\nfolder couldn't be reached, or removing failed); they stay in its\n`.strata-trash` folder.",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "left_on_storage"
+        ],
+        "type": "object"
+      },
       "ConnectionInput": {
         "properties": {
           "config": {
@@ -359,6 +373,10 @@
               "type": "string"
             },
             "type": "array"
+          },
+          "permanent": {
+            "description": "Skip the trash and delete for good.",
+            "type": "boolean"
           }
         },
         "required": [
@@ -371,10 +389,16 @@
           "deleted": {
             "format": "int64",
             "type": "integer"
+          },
+          "trashed": {
+            "description": "How many of them went to the trash.",
+            "format": "int64",
+            "type": "integer"
           }
         },
         "required": [
-          "deleted"
+          "deleted",
+          "trashed"
         ],
         "type": "object"
       },
@@ -510,6 +534,45 @@
         ],
         "type": "object"
       },
+      "Item": {
+        "properties": {
+          "deleted_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "is_dir": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "original_path": {
+            "type": "string"
+          },
+          "purge_after": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "size": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "original_path",
+          "is_dir",
+          "size",
+          "deleted_at",
+          "purge_after"
+        ],
+        "type": "object"
+      },
       "ListingBody": {
         "properties": {
           "entries": {
@@ -558,6 +621,10 @@
           },
           "path": {
             "type": "string"
+          },
+          "trash": {
+            "description": "Deletes here go to the trash (else they are permanent).",
+            "type": "boolean"
           }
         },
         "required": [
@@ -566,7 +633,8 @@
           "mode",
           "connection_name",
           "connection_kind",
-          "offline"
+          "offline",
+          "trash"
         ],
         "type": "object"
       },
@@ -726,6 +794,24 @@
         },
         "required": [
           "path"
+        ],
+        "type": "object"
+      },
+      "PurgedBody": {
+        "properties": {
+          "failed": {
+            "description": "Items that could not be removed now (their storage is offline);\nthey stay in the trash.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "purged": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "purged",
+          "failed"
         ],
         "type": "object"
       },
@@ -992,6 +1078,32 @@
           "mtime",
           "mode",
           "etag"
+        ],
+        "type": "object"
+      },
+      "TrashListBody": {
+        "properties": {
+          "items": {
+            "description": "Newest first.",
+            "items": {
+              "$ref": "#/components/schemas/Item"
+            },
+            "type": "array"
+          },
+          "more": {
+            "description": "More items are older than the last one (ask with `before`).",
+            "type": "boolean"
+          },
+          "retention_days": {
+            "description": "Days an item stays before it is purged (0: the trash is off).",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "retention_days",
+          "items",
+          "more"
         ],
         "type": "object"
       },
@@ -2511,6 +2623,15 @@
               "format": "int64",
               "type": "integer"
             }
+          },
+          {
+            "description": "Also purge the trashed items that came from it",
+            "in": "query",
+            "name": "purge_trash",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
           }
         ],
         "responses": {
@@ -2518,7 +2639,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/EmptyBody"
+                  "$ref": "#/components/schemas/ConnectionDeletedBody"
                 }
               }
             },
@@ -5911,6 +6032,421 @@
         ]
       }
     },
+    "/api/trash": {
+      "get": {
+        "operationId": "list_trash",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Items older than this id",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrashListBody"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Bad request (a parameter or the body)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not signed in"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "In conflict with what is there"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Internal error (details are only logged)"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ],
+        "tags": [
+          "trash"
+        ]
+      }
+    },
+    "/api/trash/empty": {
+      "post": {
+        "operationId": "empty_trash",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PurgedBody"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Bad request (a parameter or the body)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not signed in"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": ""
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Internal error (details are only logged)"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ],
+        "tags": [
+          "trash"
+        ]
+      }
+    },
+    "/api/trash/{id}": {
+      "delete": {
+        "operationId": "purge_trash_item",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmptyBody"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Bad request (a parameter or the body)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not signed in"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": ""
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "In conflict with what is there"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Internal error (details are only logged)"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ],
+        "tags": [
+          "trash"
+        ]
+      }
+    },
+    "/api/trash/{id}/restore": {
+      "post": {
+        "operationId": "restore_trash_item",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PathResultBody"
+                }
+              }
+            },
+            "description": "Where it came back"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Bad request (a parameter or the body)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not signed in"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed (or a cookie request without X-Strata, or a read-only folder or storage)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": ""
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not mounted any more, covered by a mount, or the name can't be used"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Internal error (details are only logged)"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ],
+        "tags": [
+          "trash"
+        ]
+      }
+    },
     "/api/uploads": {
       "post": {
         "operationId": "create_upload",
@@ -6792,6 +7328,10 @@
     },
     {
       "name": "files"
+    },
+    {
+      "description": "Deleted items, kept for a while",
+      "name": "trash"
     },
     {
       "description": "Resumable, chunked uploads",

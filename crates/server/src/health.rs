@@ -403,6 +403,7 @@ async fn probe_inner(st: &AppState, id: i64, counted: bool) -> anyhow::Result<Op
                         let n = e.file_name();
                         n != strata_storage::backend::PROBE_DIR
                             && n != strata_storage::backend::ATOMIC_TMP_DIR
+                            && n != strata_storage::backend::TRASH_DIR
                     })
                 })
             })

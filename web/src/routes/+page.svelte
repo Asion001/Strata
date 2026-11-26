@@ -2,7 +2,7 @@
   import { page } from '$app/state';
   import { goto } from '$app/navigation';
   import { untrack } from 'svelte';
-  import { api, contentUrl, previewUrl, thumbUrl, type Entry } from '$lib/api';
+  import { api, ApiError, contentUrl, previewUrl, thumbUrl, type Entry } from '$lib/api';
   import { bytes, when, join, parent, isImage, isBrowserImage, isTextName } from '$lib/format';
   import { cn } from '$lib/utils';
   import FileIcon from '$lib/components/files/FileIcon.svelte';
@@ -25,7 +25,7 @@
   import XIcon from '@lucide/svelte/icons/x';
   import InfoIcon from '@lucide/svelte/icons/info';
   import { fileHref } from '$lib/components/shell/nav';
-  import { cancelUpload, clearFinished, enqueue as queueFiles, net, retryUpload, uploads } from '$lib/offline/app.svelte';
+  import { cancelUpload, clearFinished, enqueue as queueFiles, net, retryUpload, uploads, userRecorded } from '$lib/offline/app.svelte';
   import { isActive, progress as jobProgress } from '$lib/offline/jobs';
   const Recent = () => import('$lib/offline/recent');
   import { reloadMounts } from '$lib/mounts.svelte';
@@ -41,7 +41,7 @@
   // The folder `entries` belong to. It lags `path` until a new listing
   // arrives, and every action on an entry joins with it, never with `path`.
   let listedPath = $state('');
-  let mount = $state<{ id: number; mode: string; connection_name: string; path: string; offline?: boolean } | null>(null);
+  let mount = $state<{ id: number; mode: string; connection_name: string; path: string; offline?: boolean; trash?: boolean } | null>(null);
   let editing = $state<string | null>(null);
   let loading = $state(false);
   let error = $state('');
@@ -57,9 +57,11 @@
   }
   async function togglePin(e: Entry) {
     menu = null;
-    if (!session.user) return;
     const p = join(listedPath, e.name);
     const on = !pinned.has(p);
+    // (Right after the page loads, who is signed in may not be recorded yet.)
+    await userRecorded();
+    if (!session.user) return;
     const r = await (await Recent()).pin(session.user.id, p, e.etag, contentUrl(p), on, e.size).catch(() => 'failed' as const);
     const why = { 'no-version': 'it has no version to keep', unreadable: "it couldn't be read", 'too-big': 'it is too big, or offline storage is full', failed: 'offline storage is not available' };
     if (r !== true) toast(`Couldn't keep “${e.name}” offline: ${why[r]}.`, 'error');
@@ -245,7 +247,7 @@
     const it = viewerIndex >= 0 ? viewerItems[viewerIndex] : undefined;
     if (!it || !session.user || offlineAt) return;
     const user = session.user.id;
-    void Recent().then((r) => r.remember(user, it.path, it.etag, contentUrl(it.path), it.size)).catch(() => {});
+    void userRecorded().then(Recent).then((r) => r.remember(user, it.path, it.etag, contentUrl(it.path), it.size)).catch(() => {});
   });
 
   function open(e: Entry) {
@@ -334,30 +336,38 @@
 
   /** Runs `fn` for each item in turn; one failure doesn't stop the rest.
    *  Says what failed, then refreshes. */
+  const SKIPPED = Symbol('skipped');
   async function each(items: Entry[], verb: string, fn: (e: Entry) => Promise<unknown>, fromSelection = true) {
     const dir = listedPath;
     const failed: string[] = [];
+    const done: Entry[] = [];
+    const skipped: string[] = [];
     let lastError = '';
     busy = true;
     try {
       for (const e of items) {
-        try { await fn(e); } catch (err) { failed.push(e.name); lastError = err instanceof Error ? err.message : String(err); }
+        try {
+          // SKIPPED: the user chose to keep it (no error, no success).
+          if ((await fn(e)) === SKIPPED) skipped.push(e.name);
+          else done.push(e);
+        } catch (err) { failed.push(e.name); lastError = err instanceof Error ? err.message : String(err); }
       }
     } finally {
       busy = false;
     }
     if (failed.length === 1) toast(`Couldn't ${verb} “${failed[0]}”: ${lastError}`, 'error');
     else if (failed.length) toast(`Couldn't ${verb} ${failed.length} items (${failed.slice(0, 3).join(', ')}${failed.length > 3 ? ', …' : ''}). ${lastError}`, 'error');
-    else toast(`${names(items)} ${verb === 'delete' ? 'deleted' : verb === 'move' ? 'moved' : 'copied'}.`, 'success');
+    else if (done.length) toast(`${names(done)} ${verb === 'delete' ? 'deleted' : verb === 'move' ? 'moved' : 'copied'}.`, 'success');
     await load();
     reloadMounts();
     // What failed stays selected for a retry, if the user is still here.
     // (A row-menu action leaves the selection alone.)
     if (fromSelection && listedPath === dir) {
       selection.clear();
-      for (const n of failed) if (byName.has(n)) selection.toggle(n);
+      for (const n of [...failed, ...skipped]) if (byName.has(n)) selection.toggle(n);
     }
-    return failed;
+    // What wasn't done, failed or kept.
+    return [...failed, ...skipped];
   }
 
   /** Mounts are moved and removed on the Mounts page, never as files. */
@@ -400,11 +410,14 @@
     const items = withoutMounts(all, 'remove');
     if (!items.length) return null;
     const dir = listedPath;
+    // Where the server keeps a trash for this folder, deletes go there.
+    const toTrash = !!mount?.trash;
     const ok = await confirmDialog({
       title: `Delete ${names(items)}?`,
-      body: items.length === 1
+      body: (items.length === 1
         ? (items[0].is_dir ? 'The folder and everything in it will be deleted.' : 'The file will be deleted.')
-        : `${items.slice(0, 5).map((e) => e.name).join(', ')}${items.length > 5 ? `, and ${items.length - 5} more` : ''}. Folders are deleted with everything in them.`,
+        : `${items.slice(0, 5).map((e) => e.name).join(', ')}${items.length > 5 ? `, and ${items.length - 5} more` : ''}. Folders are deleted with everything in them.`)
+        + (toTrash ? (items.length === 1 ? ' It stays in the trash for a while and can be restored.' : ' They stay in the trash for a while and can be restored.') : ''),
       confirm: 'Delete',
       danger: true
     });
@@ -413,7 +426,25 @@
       waitForBusy();
       return null;
     }
-    return each(items, 'delete', (e) => api('POST', '/api/files/delete', { paths: [join(dir, e.name)] }), fromSelection);
+    return each(items, 'delete', (e) => deleteOne(join(dir, e.name), e.name), fromSelection);
+  }
+
+  /** Delete one path, to the trash where there is one. An item the trash
+   *  can't take (on another disk) is deleted for good only if confirmed. */
+  async function deleteOne(path: string, name: string) {
+    try {
+      await api('POST', '/api/files/delete', { paths: [path] });
+    } catch (e) {
+      if (!(e instanceof ApiError && e.status === 409 && e.message.includes('delete it permanently'))) throw e;
+      const ok = await confirmDialog({
+        title: `Delete “${name}” for good?`,
+        body: 'It can’t be moved to the trash here, so it will be deleted permanently.',
+        confirm: 'Delete permanently',
+        danger: true
+      });
+      if (!ok) return SKIPPED;
+      await api('POST', '/api/files/delete', { paths: [path], permanent: true });
+    }
   }
 
   async function transferPicked(copy: boolean) {

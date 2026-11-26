@@ -123,9 +123,13 @@ test('sign-out removes cached files, listings and queued uploads', async ({ brow
   await page.goto(`/?p=${encodeURIComponent(dir)}`);
   await controlled(page);
   await page.reload();
+  await expect(page.getByRole('button', { name: 'pic.png', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Actions for pic.png', exact: true }).click();
   await page.getByRole('menuitemcheckbox', { name: 'Keep offline' }).click();
-  await expect(page.getByText('“pic.png” is kept offline.')).toBeVisible();
+  // (Any answer about it, so a failure shows the reason given.)
+  const said = page.getByText(/“pic\.png”.*offline/).first();
+  await expect(said).toBeVisible();
+  expect(await said.textContent()).toBe('“pic.png” is kept offline.');
 
   // An upload queued while offline.
   await setOffline(ctx, page, true);

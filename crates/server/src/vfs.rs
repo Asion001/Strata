@@ -49,7 +49,7 @@ pub struct Node {
 }
 
 /// Escape a string for use as a LIKE prefix.
-fn like_escape(s: &str) -> String {
+pub(crate) fn like_escape(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('%', "\\%")
         .replace('_', "\\_")
@@ -517,7 +517,7 @@ pub async fn scan_tree(st: &AppState, m: &Mount, rel: &str) -> ApiResult<usize> 
 
 /// Put one raw entry into the cache (caller holds the volume lock). Returns
 /// true if the row is new.
-async fn cache_node(st: &AppState, m: &Mount, rel: &str, n: &Node) -> ApiResult<bool> {
+pub(crate) async fn cache_node(st: &AppState, m: &Mount, rel: &str, n: &Node) -> ApiResult<bool> {
     let (parent, name) = paths::split(rel).ok_or_else(|| bad("not an entry"))?;
     Ok(sqlx::query_scalar(
         "INSERT INTO nodes (volume_id, parent, name, is_dir, size, mtime, etag)
@@ -582,7 +582,7 @@ async fn upsert_raw_nodes(
 }
 
 /// Delete a node and everything below it from `nodes` (and raw scan marks).
-async fn delete_subtree_rows(st: &AppState, volume_id: i64, rel: &str) -> ApiResult<()> {
+pub(crate) async fn delete_subtree_rows(st: &AppState, volume_id: i64, rel: &str) -> ApiResult<()> {
     let (parent, name) = paths::split(rel).ok_or_else(|| bad("cannot delete the root"))?;
     let like = format!("{}/%", like_escape(rel));
     sqlx::query(
@@ -1413,7 +1413,10 @@ pub async fn write_stream_if(
 
 // ---------------------------------------------------------------- delete
 
-pub async fn delete(st: &AppState, user_id: i64, path: &str) -> ApiResult<()> {
+/// Delete `path` from the user's tree: to the trash when `to_trash` and the
+/// mount supports it (see `trash`), otherwise for good. Returns whether it
+/// went to the trash.
+pub async fn delete(st: &AppState, user_id: i64, path: &str, to_trash: bool) -> ApiResult<bool> {
     if path.is_empty() {
         return Err(bad("cannot delete the root folder"));
     }
@@ -1430,7 +1433,12 @@ pub async fn delete(st: &AppState, user_id: i64, path: &str) -> ApiResult<()> {
         ));
     }
     let (m, rel) = mounts::resolve(st, user_id, path).await?;
-    delete_in(st, &m, &rel).await
+    if to_trash && crate::trash::enabled(st) && crate::trash::supports_trash(&m) {
+        crate::trash::trash(st, user_id, path, &m, &rel).await?;
+        return Ok(true);
+    }
+    delete_in(st, &m, &rel).await?;
+    Ok(false)
 }
 
 pub async fn delete_in(st: &AppState, m: &Mount, rel: &str) -> ApiResult<()> {

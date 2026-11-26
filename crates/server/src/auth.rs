@@ -451,6 +451,20 @@ pub async fn admin_delete_user(
     // Mounts go with the user; volumes (and their data) stay. One transaction,
     // so a refused delete leaves the account exactly as it was.
     let mut tx = st.db.begin().await?;
+    // Their trash goes too. Raw items live on disk: they are removed once the
+    // delete has gone through (a refused delete rolls this back).
+    let trashed: Vec<(i64, i64, String)> = sqlx::query_as(
+        "DELETE FROM trash t USING volumes v WHERE v.id = t.volume_id AND t.owner_id = $1
+         RETURNING t.id, v.connection_id, v.mode",
+    )
+    .bind(id)
+    .fetch_all(&mut *tx)
+    .await?;
+    let raw_trash: Vec<(i64, i64)> = trashed
+        .into_iter()
+        .filter(|(_, _, mode)| mode == "raw")
+        .map(|(t, c, _)| (t, c))
+        .collect();
     sqlx::query("DELETE FROM mounts WHERE owner_id = $1")
         .bind(id)
         .execute(&mut *tx)
@@ -471,6 +485,7 @@ pub async fn admin_delete_user(
     }
     tx.commit().await?;
     crate::mounts::invalidate(&st, id);
+    crate::trash::remove_raw_items(&st, &raw_trash).await;
     Ok(Json(json!({})))
 }
 
