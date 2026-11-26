@@ -144,18 +144,25 @@ impl ApiError {
     }
 
     /// The message a client sees. Never internal details (paths, SQL):
-    /// those are logged.
+    /// those go to the log (see `log_internal`).
     pub fn public_message(&self) -> String {
+        match self {
+            ApiError::Internal(_) => "internal error".to_string(),
+            other => other.to_string(),
+        }
+    }
+
+    /// Log an internal error's details (a client gets none of them).
+    pub fn log_internal(&self) {
         if let ApiError::Internal(e) = self {
             tracing::error!("internal error: {e:#}");
-            return "internal error".to_string();
         }
-        self.to_string()
     }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        self.log_internal();
         let status = self.status();
         let msg = self.public_message();
         if let ApiError::PreconditionFailed(current) = &self {

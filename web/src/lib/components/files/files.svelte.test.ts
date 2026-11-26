@@ -123,23 +123,19 @@ describe('files controller', () => {
     stop();
   });
 
-  it('deletes in batches, and one by one when a batch fails as a whole', async () => {
+  it('deletes in batches, and never sends a batch that got no answer again', async () => {
     listing.A = Array.from({ length: BATCH + 2 }, (_, i) => file(`f${i}`));
     const { c, stop } = setup();
     await vi.waitFor(() => expect(c.entries).toHaveLength(BATCH + 2));
     let batches = 0;
     handler = ((base) => (call: Call) => {
-      if (call.url === '/api/files/delete' && call.body!.paths!.length > 1 && batches++ === 0) throw new ApiError(504, 'gateway timeout');
-      // (f2 went with the batch that timed out; f3 can't be deleted.)
-      if (call.url === '/api/files/delete' && call.body!.paths![0] === 'A/f2') throw new ApiError(404, 'not found');
-      if (call.url === '/api/files/delete' && call.body!.paths![0] === 'A/f3') throw new ApiError(409, 'busy');
+      if (call.url === '/api/files/delete' && batches++ === 0) throw new ApiError(504, 'gateway timeout');
       return base(call);
     })(handler);
     const failed = await c.removeItems(c.entries);
-    // The first batch failed: one request per path; the second batch went whole.
-    expect(deletes().map((d) => d.body!.paths!.length)).toEqual([BATCH, ...Array(BATCH).fill(1), 2]);
-    expect(failed).toEqual(['f3']);
-    expect(toasts.list.at(-1)!.text).toBe("Couldn't delete “f3”: busy");
+    expect(deletes().map((d) => d.body!.paths!.length)).toEqual([BATCH, 2]);
+    expect(failed).toHaveLength(BATCH);
+    expect(toasts.list.at(-1)!.text).toContain('Some may have been deleted anyway');
     stop();
   });
 

@@ -392,13 +392,16 @@ pub async fn delete(
                 error: None,
                 status: None,
             },
-            Err(e) if b.keep_going => DeleteResult {
-                path: raw.clone(),
-                trashed: false,
-                trash_id: None,
-                status: Some(e.status().as_u16()),
-                error: Some(e.public_message()),
-            },
+            Err(e) if b.keep_going => {
+                e.log_internal();
+                DeleteResult {
+                    path: raw.clone(),
+                    trashed: false,
+                    trash_id: None,
+                    status: Some(e.status().as_u16()),
+                    error: Some(e.public_message()),
+                }
+            }
             Err(e) => return Err(e),
         };
         results.push(r);

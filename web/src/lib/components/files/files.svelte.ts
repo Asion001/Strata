@@ -10,11 +10,21 @@ import { Selection, loadPref, nextSort, savePref, sortEntries, type Sort, type S
 import { enqueue as queueFiles, userRecorded } from '$lib/offline/app.svelte';
 import { reloadMounts } from '$lib/mounts.svelte';
 import { session } from '$lib/session.svelte';
+import { staleApp } from '$lib/lazy';
 import { toast, toastError } from '$lib/toast.svelte';
 
 const Recent = () => import('$lib/offline/recent');
-const Bulk = () => import('./bulk');
-const Actions = () => import('./actions');
+// (A part that can't load, say after a deploy, goes to staleApp, which
+// reloads into the new version or says so; the action does nothing.)
+const lazy =
+  <T>(load: () => Promise<T>) =>
+  (): Promise<T | null> =>
+    load().catch((e) => {
+      void staleApp(e);
+      return null;
+    });
+const Bulk = lazy(() => import('./bulk'));
+const Actions = lazy(() => import('./actions'));
 
 export type Mount = { id: number; mode: string; connection_name: string; path: string; offline?: boolean; trash?: boolean };
 export type ViewerItem = { name: string; size: number; src: string; download: string; path: string; thumb?: string; poster?: string; mtime: string; etag: string | null };
@@ -289,11 +299,11 @@ export class FilesController {
   }
 
   // Entry actions (their code loads on first use).
-  newFolder = async () => (await Actions()).newFolder(this);
-  rename = async (e: Entry) => (await Actions()).rename(this, e);
-  moveTo = async (e: Entry, copy = false) => (await Actions()).moveTo(this, e, copy);
-  share = async (e: Entry) => (await Actions()).share(this, e);
-  togglePin = async (e: Entry) => (await Actions()).togglePin(this, e);
+  newFolder = async () => (await Actions())?.newFolder(this);
+  rename = async (e: Entry) => (await Actions())?.rename(this, e);
+  moveTo = async (e: Entry, copy = false) => (await Actions())?.moveTo(this, e, copy);
+  share = async (e: Entry) => (await Actions())?.share(this, e);
+  togglePin = async (e: Entry) => (await Actions())?.togglePin(this, e);
   remove(e: Entry, permanent = false) {
     this.menu = null;
     void this.removeItems([e], false, permanent);
@@ -323,8 +333,8 @@ export class FilesController {
   // Bulk actions (their code loads on first use).
   /** The names that failed; null when nothing was tried (busy, cancelled).
    *  `permanent` skips the trash (Shift+Delete, "Delete permanently"). */
-  removeItems = async (all: Entry[], fromSelection = true, permanent = false) => (await Bulk()).removeItems(this, all, fromSelection, permanent);
-  transferPicked = async (copy: boolean) => (await Bulk()).transferPicked(this, copy);
+  removeItems = async (all: Entry[], fromSelection = true, permanent = false) => (await Bulk())?.removeItems(this, all, fromSelection, permanent) ?? null;
+  transferPicked = async (copy: boolean) => (await Bulk())?.transferPicked(this, copy);
 
   /** Delete from the viewer: on to the next file, or closed after the last. */
   viewerDelete = async (i: number) => {

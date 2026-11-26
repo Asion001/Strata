@@ -62,34 +62,22 @@ function withoutMounts(items: Entry[], verb: string) {
   return kept;
 }
 
-/** Paths per delete request. */
+/** Paths per delete request (each one answers per path). */
 export const BATCH = 50;
 type Result = Schemas['DeleteResult'];
 
 /** Delete `paths`, going on past failures: one result per path. */
 async function deleteBatch(paths: string[], permanent: boolean): Promise<Result[]> {
-  const failed = (p: string, e: unknown): Result => ({ path: p, trashed: false, trash_id: null, error: message(e), status: e instanceof ApiError ? e.status : null });
   try {
-    const r = await api<Schemas['DeletedBody']>('POST', '/api/files/delete', { paths, permanent, keep_going: true });
-    if (r.results?.length === paths.length) return r.results;
-    // (No per-path answer: everything was deleted.)
-    return paths.map((p) => ({ path: p, trashed: r.trashed === paths.length, trash_id: null, error: null, status: null }));
+    return (await api<Schemas['DeletedBody']>('POST', '/api/files/delete', { paths, permanent, keep_going: true })).results;
   } catch (e) {
-    // Refused as a whole (signed out, forbidden, offline): no path was tried.
-    if ((e instanceof ApiError && e.status < 500) || !navigator.onLine) return paths.map((p) => failed(p, e));
+    // Refused as a whole, or no answer (a gateway timed out, the connection
+    // dropped). Not tried again: the server may still be deleting them, and
+    // the refreshed listing shows what is gone.
+    const refused = e instanceof ApiError && e.status < 500;
+    const error = refused ? message(e) : `${message(e)}. Some may have been deleted anyway (to Deleted files, where there is a trash)`;
+    return paths.map((p) => ({ path: p, trashed: false, trash_id: null, error, status: e instanceof ApiError ? e.status : null }));
   }
-  // No answer (a gateway timed out, the connection dropped): some paths may
-  // be gone already. One at a time; one already gone counts as done.
-  const out: Result[] = [];
-  for (const p of paths) {
-    try {
-      const r = await api<Schemas['DeletedBody']>('POST', '/api/files/delete', { paths: [p], permanent });
-      out.push(r.results[0]);
-    } catch (e) {
-      out.push(e instanceof ApiError && e.status === 404 ? { path: p, trashed: false, trash_id: null, error: null, status: null } : failed(p, e));
-    }
-  }
-  return out;
 }
 
 /** The names that failed; null when nothing was tried (busy, cancelled). */
