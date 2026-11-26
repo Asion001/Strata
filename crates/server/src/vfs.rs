@@ -618,6 +618,37 @@ pub async fn mkdir_p(st: &AppState, user_id: i64, path: &str) -> ApiResult<()> {
     mkdir_in(st, &m, &rel).await
 }
 
+/// Raw storage without real folders (S3) would store `a/b` next to a file
+/// `a`, leaving a file and a folder with one name. Refuse a write or folder
+/// whose path runs through a file on the backend (the node cache may not
+/// know about it yet).
+pub async fn check_raw_place(st: &AppState, m: &Mount, rel: &str) -> ApiResult<()> {
+    if m.is_hashed() {
+        return Ok(());
+    }
+    check_no_file_above(m, &op(st, m).await?, rel).await
+}
+
+async fn check_no_file_above(m: &Mount, op: &opendal::Operator, rel: &str) -> ApiResult<()> {
+    let parts: Vec<&str> = rel.split('/').collect();
+    for i in 1..parts.len() {
+        let above = parts[..i].join("/");
+        match op.stat(&backend_path(m, &above, false)).await {
+            Ok(md) if md.is_file() => {
+                return Err(conflict("a file with that name already exists"));
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == ErrorKind::NotFound => {}
+            // A filesystem's "not a directory": a file further up.
+            Err(e) => match ApiError::from(e) {
+                ApiError::NotFound => {}
+                e => return Err(e),
+            },
+        }
+    }
+    Ok(())
+}
+
 pub async fn mkdir_in(st: &AppState, m: &Mount, rel: &str) -> ApiResult<()> {
     // Offline storage refuses even walking (read-only storage may be walked,
     // see below).
@@ -647,6 +678,7 @@ pub async fn mkdir_in(st: &AppState, m: &Mount, rel: &str) -> ApiResult<()> {
     }
     if !m.is_hashed() {
         let op = op(st, m).await?;
+        check_no_file_above(m, &op, rel).await?;
         let dir = backend_path(m, rel, true);
         if op.info().capability().write {
             op.create_dir(&dir).await?;
@@ -1300,6 +1332,7 @@ pub async fn write_stream_if(
         } else {
             None
         };
+        check_no_file_above(m, &op, rel).await?;
         let mut w = op.writer_with(&path).chunk(8 << 20).await?;
         while let Some(b) = input.next().await {
             let b = match b {
@@ -1324,6 +1357,11 @@ pub async fn write_stream_if(
                 }
             },
         };
+        // Again under the lock: a file may have appeared above since.
+        if let Err(e) = check_no_file_above(m, &op, rel).await {
+            let _ = w.abort().await;
+            return Err(e);
+        }
         w.close().await?;
         let node = stat(st, m, rel).await?;
         let created = cache_node(st, m, rel, &node).await?;

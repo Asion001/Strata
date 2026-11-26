@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc ac7e6691f0b162c4198657cfbfd2e12aa1dddad77784879273345a2106ce917f # shrinks to (initial_state, transitions, seen_counter) = (Model { vols: [(LocalHashed, Vol { tree: {} })], mounts: {"": 0} }, [Mount("b/b", LocalRaw), Upload("b/b/d/a", Content { seed: 0, size: 0 }), Move("b/b/d/a/b", "c/c/b")], None)

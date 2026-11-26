@@ -64,6 +64,11 @@ impl From<opendal::Error> for ApiError {
         if strata_storage::readonly::is_read_only_refusal(&e) {
             return ApiError::ReadOnly;
         }
+        // A path below a file ("not a directory" from a filesystem) is
+        // simply not there.
+        if not_a_directory(&e) {
+            return ApiError::NotFound;
+        }
         match e.kind() {
             opendal::ErrorKind::NotFound => ApiError::NotFound,
             opendal::ErrorKind::AlreadyExists => ApiError::Conflict("already exists".into()),
@@ -75,6 +80,20 @@ impl From<opendal::Error> for ApiError {
             _ => ApiError::Internal(e.into()),
         }
     }
+}
+
+/// Does this backend error come from a path that runs through a file?
+fn not_a_directory(e: &opendal::Error) -> bool {
+    let mut cur: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(e);
+    while let Some(c) = cur {
+        if let Some(io) = c.downcast_ref::<std::io::Error>()
+            && io.kind() == std::io::ErrorKind::NotADirectory
+        {
+            return true;
+        }
+        cur = c.source();
+    }
+    false
 }
 
 /// An error while reading a file's stream, before anything was sent: a
