@@ -3,6 +3,7 @@
   import { session } from '$lib/session.svelte';
   import { cn } from '$lib/utils';
   import { toast, toastError } from '$lib/toast.svelte';
+  import { alertDialog } from '$lib/dialogs.svelte';
   import Button from '$lib/components/ui/button/button.svelte';
   import Input from '$lib/components/ui/input/input.svelte';
   import { manageNav } from '$lib/components/shell/nav';
@@ -23,12 +24,34 @@
       old_password = new_password = '';
     } catch (err) { toastError(err); } finally { busy = false; }
   }
+  // The offline cache's size cap (this device only).
+  let capMb = $state<number | null>(null);
+  $effect(() => {
+    import('$lib/offline/recent').then((r) => (capMb = r.capMb() ? Number(r.capMb()) : null));
+  });
+  async function saveCap(e: Event) {
+    e.preventDefault();
+    const r = await import('$lib/offline/recent');
+    r.setCapMb(capMb && capMb >= 1 ? Math.floor(capMb) : null);
+    if (session.user) await r.trim(session.user.id).catch(() => {});
+    toast('Saved.', 'success');
+  }
+
   async function logout() {
-    await api('POST', '/api/auth/logout');
     // Unsaved editor drafts hold file contents: don't leave them behind.
     const { markSignedOut, clearAllDrafts } = await import('$lib/editor/drafts');
+    const { signOut } = await import('$lib/offline/app.svelte');
     markSignedOut(); // stops autosave in every tab before the drafts go
+    // Queued uploads are cancelled (with their server sessions), then the
+    // session ends, then every cached file, listing and queued upload goes
+    // (offline too: then only the local part).
+    const ended = await signOut(session.user?.id ?? null, () => api('POST', '/api/auth/logout'));
     await clearAllDrafts();
+    if (!ended) {
+      // (Offline: everything here is gone, and the server session is ended
+      // the next time the app can reach it.)
+      await alertDialog({ title: 'Signed out on this device', body: "The server couldn't be reached. Your data on this device is gone; the session on the server is ended the next time Strata is opened online.", ok: 'OK' });
+    }
     location.href = '/login';
   }
 </script>
@@ -53,6 +76,15 @@
       {/each}
     </ul>
   </nav>
+
+  <h2 class={h2Class}>Offline</h2>
+  <form class={cn(cardClass, 'grid gap-2 p-4')} onsubmit={saveCap}>
+    <label class={labelClass}>Storage for files kept offline (MB)
+      <Input type="number" min="1" step="1" bind:value={capMb} placeholder="500" />
+    </label>
+    <p class={mutedClass}>The 50 most recently opened files under 20 MB, and the ones you keep offline, up to this much. Signing out removes them.</p>
+    <div><Button type="submit" variant="outline">Save</Button></div>
+  </form>
 
   <h2 class={h2Class}>Change password</h2>
   <form class={cn(cardClass, 'grid gap-4 p-4')} onsubmit={change}>

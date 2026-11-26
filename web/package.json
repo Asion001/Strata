@@ -10,7 +10,8 @@
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "test": "vitest run",
     "e2e": "playwright test",
-    "size": "node scripts/bundle-size.mjs"
+    "size": "node scripts/bundle-size.mjs",
+    "api:types": "openapi-typescript ../api/openapi.json -o src/lib/openapi.d.ts"
   },
   "devDependencies": {
     "@playwright/test": "^1.65.1",
@@ -20,8 +21,10 @@
     "@tailwindcss/vite": "^4.3.4",
     "@types/markdown-it": "^14.2.0",
     "@types/node": "^22.20.5",
+    "@vitest/coverage-v8": "^5.1.0",
     "fake-indexeddb": "^6.2.8",
     "jsdom": "^31.0.1",
+    "openapi-typescript": "^7.13.0",
     "svelte": "^5.57.3",
     "svelte-check": "^4.7.8",
     "tailwindcss": "^4.3.4",

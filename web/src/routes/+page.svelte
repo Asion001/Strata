@@ -2,7 +2,7 @@
   import { page } from '$app/state';
   import { goto } from '$app/navigation';
   import { untrack } from 'svelte';
-  import { api, contentUrl, previewUrl, thumbUrl, type Entry } from '$lib/api';
+  import { api, ApiError, contentUrl, previewUrl, thumbUrl, type Entry } from '$lib/api';
   import { bytes, when, join, parent, isImage, isBrowserImage, isTextName } from '$lib/format';
   import { cn } from '$lib/utils';
   import FileIcon from '$lib/components/files/FileIcon.svelte';
@@ -25,7 +25,9 @@
   import XIcon from '@lucide/svelte/icons/x';
   import InfoIcon from '@lucide/svelte/icons/info';
   import { fileHref } from '$lib/components/shell/nav';
-  import { runUpload, type UploadTask } from '$lib/upload';
+  import { cancelUpload, clearFinished, enqueue as queueFiles, net, retryUpload, uploads, userRecorded } from '$lib/offline/app.svelte';
+  import { isActive, progress as jobProgress } from '$lib/offline/jobs';
+  const Recent = () => import('$lib/offline/recent');
   import { reloadMounts } from '$lib/mounts.svelte';
   import VirtualList from '$lib/VirtualList.svelte';
   import Editor from '$lib/editor/Editor.svelte';
@@ -39,13 +41,35 @@
   // The folder `entries` belong to. It lags `path` until a new listing
   // arrives, and every action on an entry joins with it, never with `path`.
   let listedPath = $state('');
-  let mount = $state<{ id: number; mode: string; connection_name: string; path: string; offline?: boolean } | null>(null);
+  let mount = $state<{ id: number; mode: string; connection_name: string; path: string; offline?: boolean; trash?: boolean } | null>(null);
   let editing = $state<string | null>(null);
   let loading = $state(false);
   let error = $state('');
+  /** The listing shown came from the offline cache, saved at this time. */
+  let offlineAt = $state<string | null>(null);
+  /** Paths kept offline ("Keep offline"). */
+  let pinned = $state(new Set<string>());
+  async function loadPins() {
+    if (!session.user) return;
+    try {
+      pinned = new Set((await (await Recent()).list(session.user.id)).filter((r) => r.pinned).map((r) => r.path));
+    } catch {}
+  }
+  async function togglePin(e: Entry) {
+    menu = null;
+    const p = join(listedPath, e.name);
+    const on = !pinned.has(p);
+    // (Right after the page loads, who is signed in may not be recorded yet.)
+    await userRecorded();
+    if (!session.user) return;
+    const r = await (await Recent()).pin(session.user.id, p, e.etag, contentUrl(p), on, e.size).catch(() => 'failed' as const);
+    const why = { 'no-version': 'it has no version to keep', unreadable: "it couldn't be read", 'too-big': 'it is too big, or offline storage is full', failed: 'offline storage is not available' };
+    if (r !== true) toast(`Couldn't keep “${e.name}” offline: ${why[r]}.`, 'error');
+    else toast(on ? `“${e.name}” is kept offline.` : `“${e.name}” is no longer kept offline.`, 'success');
+    await loadPins();
+  }
   let query = $state('');
   let hits = $state<{ path: string; name: string; is_dir: boolean; size: number; mtime: string }[] | null>(null);
-  let uploads = $state<UploadTask[]>([]);
   let menu = $state<Entry | null>(null);
   let viewerIndex = $state(-1);
   // The preview viewer (and, through it, the PDF viewer) loads on first use.
@@ -170,8 +194,11 @@
     loading = true;
     error = '';
     try {
-      const r = await api('GET', `/api/files/list?path=${encodeURIComponent(p)}`);
+      const meta: { offlineAt?: string | null } = {};
+      const r = await api('GET', `/api/files/list?path=${encodeURIComponent(p)}`, undefined, meta);
       if (my !== seq) return;
+      offlineAt = meta.offlineAt ?? null;
+      void loadPins();
       entries = r.entries;
       if (listedPath !== p) details = null;
       listedPath = p;
@@ -182,7 +209,7 @@
       }
       mount = r.mount;
     } catch (e) {
-      if (my === seq) { error = (e as Error).message; entries = []; }
+      if (my === seq) { error = (e as Error).message; entries = []; offlineAt = null; }
     } finally {
       if (my === seq) loading = false;
     }
@@ -213,7 +240,15 @@
 
   const crumbs = $derived(path ? path.split('/').map((n, i, a) => ({ name: n, path: a.slice(0, i + 1).join('/') })) : []);
   const viewable = $derived(sorted.filter((e) => !e.is_dir));
-  let viewerItems = $state<{ name: string; size: number; src: string; download: string; path: string; thumb?: string; poster?: string; mtime: string }[]>([]);
+  let viewerItems = $state<{ name: string; size: number; src: string; download: string; path: string; thumb?: string; poster?: string; mtime: string; etag: string | null }[]>([]);
+  // Every file shown in the viewer (opened, or reached with next and
+  // previous) goes into the recent-files cache, if it fits, for offline.
+  $effect(() => {
+    const it = viewerIndex >= 0 ? viewerItems[viewerIndex] : undefined;
+    if (!it || !session.user || offlineAt) return;
+    const user = session.user.id;
+    void userRecorded().then(Recent).then((r) => r.remember(user, it.path, it.etag, contentUrl(it.path), it.size)).catch(() => {});
+  });
 
   function open(e: Entry) {
     if (e.is_dir) goto(`/?p=${encodeURIComponent(join(listedPath, e.name))}`);
@@ -223,7 +258,7 @@
       viewerItems = viewable.map((v) => {
         const p = join(listedPath, v.name);
         return {
-          name: v.name, size: v.size, mtime: v.mtime, path: p,
+          name: v.name, size: v.size, mtime: v.mtime, path: p, etag: v.etag,
           src: previewUrl(p), download: contentUrl(p, true),
           // The list's own thumbnail URL: already in the cache, so it shows at once.
           thumb: isImage(v.name) ? thumbUrl(p, v.etag) : undefined,
@@ -301,30 +336,38 @@
 
   /** Runs `fn` for each item in turn; one failure doesn't stop the rest.
    *  Says what failed, then refreshes. */
+  const SKIPPED = Symbol('skipped');
   async function each(items: Entry[], verb: string, fn: (e: Entry) => Promise<unknown>, fromSelection = true) {
     const dir = listedPath;
     const failed: string[] = [];
+    const done: Entry[] = [];
+    const skipped: string[] = [];
     let lastError = '';
     busy = true;
     try {
       for (const e of items) {
-        try { await fn(e); } catch (err) { failed.push(e.name); lastError = err instanceof Error ? err.message : String(err); }
+        try {
+          // SKIPPED: the user chose to keep it (no error, no success).
+          if ((await fn(e)) === SKIPPED) skipped.push(e.name);
+          else done.push(e);
+        } catch (err) { failed.push(e.name); lastError = err instanceof Error ? err.message : String(err); }
       }
     } finally {
       busy = false;
     }
     if (failed.length === 1) toast(`Couldn't ${verb} “${failed[0]}”: ${lastError}`, 'error');
     else if (failed.length) toast(`Couldn't ${verb} ${failed.length} items (${failed.slice(0, 3).join(', ')}${failed.length > 3 ? ', …' : ''}). ${lastError}`, 'error');
-    else toast(`${names(items)} ${verb === 'delete' ? 'deleted' : verb === 'move' ? 'moved' : 'copied'}.`, 'success');
+    else if (done.length) toast(`${names(done)} ${verb === 'delete' ? 'deleted' : verb === 'move' ? 'moved' : 'copied'}.`, 'success');
     await load();
     reloadMounts();
     // What failed stays selected for a retry, if the user is still here.
     // (A row-menu action leaves the selection alone.)
     if (fromSelection && listedPath === dir) {
       selection.clear();
-      for (const n of failed) if (byName.has(n)) selection.toggle(n);
+      for (const n of [...failed, ...skipped]) if (byName.has(n)) selection.toggle(n);
     }
-    return failed;
+    // What wasn't done, failed or kept.
+    return [...failed, ...skipped];
   }
 
   /** Mounts are moved and removed on the Mounts page, never as files. */
@@ -367,11 +410,14 @@
     const items = withoutMounts(all, 'remove');
     if (!items.length) return null;
     const dir = listedPath;
+    // Where the server keeps a trash for this folder, deletes go there.
+    const toTrash = !!mount?.trash;
     const ok = await confirmDialog({
       title: `Delete ${names(items)}?`,
-      body: items.length === 1
+      body: (items.length === 1
         ? (items[0].is_dir ? 'The folder and everything in it will be deleted.' : 'The file will be deleted.')
-        : `${items.slice(0, 5).map((e) => e.name).join(', ')}${items.length > 5 ? `, and ${items.length - 5} more` : ''}. Folders are deleted with everything in them.`,
+        : `${items.slice(0, 5).map((e) => e.name).join(', ')}${items.length > 5 ? `, and ${items.length - 5} more` : ''}. Folders are deleted with everything in them.`)
+        + (toTrash ? (items.length === 1 ? ' It stays in the trash for a while and can be restored.' : ' They stay in the trash for a while and can be restored.') : ''),
       confirm: 'Delete',
       danger: true
     });
@@ -380,7 +426,25 @@
       waitForBusy();
       return null;
     }
-    return each(items, 'delete', (e) => api('POST', '/api/files/delete', { paths: [join(dir, e.name)] }), fromSelection);
+    return each(items, 'delete', (e) => deleteOne(join(dir, e.name), e.name), fromSelection);
+  }
+
+  /** Delete one path, to the trash where there is one. An item the trash
+   *  can't take (on another disk) is deleted for good only if confirmed. */
+  async function deleteOne(path: string, name: string) {
+    try {
+      await api('POST', '/api/files/delete', { paths: [path] });
+    } catch (e) {
+      if (!(e instanceof ApiError && e.status === 409 && e.message.includes('delete it permanently'))) throw e;
+      const ok = await confirmDialog({
+        title: `Delete “${name}” for good?`,
+        body: 'It can’t be moved to the trash here, so it will be deleted permanently.',
+        confirm: 'Delete permanently',
+        danger: true
+      });
+      if (!ok) return SKIPPED;
+      await api('POST', '/api/files/delete', { paths: [path], permanent: true });
+    }
   }
 
   async function transferPicked(copy: boolean) {
@@ -406,28 +470,24 @@
     );
   }
 
-  let uid = 0;
+  // Uploads go through the offline queue (they survive going offline, a
+  // reload or a closed tab); a finished one refreshes its folder.
   function enqueue(files: Iterable<File>, base = path) {
-    for (const f of files) {
-      const rel = (f as File & { webkitRelativePath?: string }).webkitRelativePath || f.name;
-      uploads.push({ id: ++uid, file: f, path: join(base, rel), status: 'queued', progress: 0, sent: 0, skipped: 0 });
-    }
-    pump();
+    if (!session.user) return;
+    const items = [...files].map((f) => ({ file: f, path: join(base, (f as File & { webkitRelativePath?: string }).webkitRelativePath || f.name) }));
+    queueFiles(session.user.id, items).catch((e) => toastError(e));
   }
-  let active = 0;
-  function pump() {
-    while (active < 2) {
-      const t = uploads.find((u) => u.status === 'queued');
-      if (!t) return;
-      active++;
-      t.status = 'hashing';
-      runUpload(t, () => (uploads = uploads)).finally(() => {
-        active--;
-        if (parent(t.path) === path) load();
-        pump();
-      });
-    }
-  }
+  // Back online: the folder again (and no "offline" banner).
+  $effect(() => {
+    const back = () => { if (offlineAt || error) load(); };
+    window.addEventListener('online', back);
+    return () => window.removeEventListener('online', back);
+  });
+  $effect(() => {
+    const done = (e: Event) => { if (parent((e as CustomEvent<string>).detail) === path) load(); };
+    window.addEventListener('strata-upload-done', done);
+    return () => window.removeEventListener('strata-upload-done', done);
+  });
 
   function onDrop(e: DragEvent) {
     e.preventDefault();
@@ -533,6 +593,9 @@
     <input bind:this={fileInput} type="file" multiple hidden onchange={(e) => { enqueue(e.currentTarget.files!); e.currentTarget.value = ''; }} />
     <input bind:this={folderInput} type="file" webkitdirectory hidden onchange={(e) => { enqueue(e.currentTarget.files!); e.currentTarget.value = ''; }} />
   </header>
+  {#if offlineAt}
+    <p class="border-b border-border bg-muted px-4 py-2 text-sm" role="status" data-testid="offline-banner">Offline, as of {new Date(offlineAt).toLocaleString()}. Files kept offline open; the rest needs the network.</p>
+  {/if}
   {#if mount?.offline}
     <p class="border-b border-border px-4 py-2 text-sm text-muted-foreground" role="status">This storage is offline. Its files can't be opened or changed until it's back.</p>
   {/if}
@@ -649,19 +712,21 @@
     </div>
   {/if}
 
-  {#if uploads.length}
-    <div class="uploads fixed right-4 z-20 grid max-h-[50vh] w-[min(380px,calc(100vw-2rem))] gap-2 overflow-auto rounded-xl border border-border bg-popover p-3 shadow-lg">
-      <div class="flex items-center"><b class="flex-1 text-sm">Uploads</b>
-        <Button variant="ghost" size="sm" onclick={() => (uploads = uploads.filter((u) => u.status !== 'done' && u.status !== 'error'))}>Clear</Button></div>
-      {#each uploads.slice(-6) as u (u.id)}
-        <div class="grid gap-1 text-sm">
-          <div class="flex gap-2"><span class="min-w-0 flex-1 truncate">{u.path}</span>
-            <span class="text-muted-foreground">{u.status === 'error' ? '' : u.status === 'done' ? (u.skipped ? `done, ${bytes(u.skipped)} deduped` : 'done') : u.status}</span></div>
-          {#if u.status === 'error'}<div class="text-destructive">{u.error}</div>{/if}
-          <progress max="1" value={u.progress} class="h-1.5 w-full accent-primary"></progress>
+  {#if uploads.jobs.length}
+    <section aria-label="Uploads" class="uploads fixed right-4 z-20 grid max-h-[50vh] w-[min(380px,calc(100vw-2rem))] gap-2 overflow-auto rounded-xl border border-border bg-popover p-3 shadow-lg">
+      <div class="flex items-center"><b class="flex-1 text-sm">Uploads{#if !net.online && uploads.jobs.some(isActive)} <span class="font-normal text-muted-foreground">· waiting for the network</span>{/if}</b>
+        {#if uploads.jobs.some((u) => !isActive(u))}<Button variant="ghost" size="sm" onclick={clearFinished}>Clear</Button>{/if}</div>
+      {#each uploads.jobs.slice(-6) as u (u.id)}
+        <div class="grid gap-1 text-sm" data-testid="upload">
+          <div class="flex items-center gap-2"><span class="min-w-0 flex-1 truncate">{u.path}</span>
+            <span class="text-muted-foreground">{u.state === 'failed' ? '' : u.state === 'done' ? (u.skipped ? `done, ${bytes(u.skipped)} deduped` : 'done') : u.state}</span>
+            {#if isActive(u) && u.state !== 'committing'}<Button variant="ghost" size="sm" class="h-6 px-2" onclick={async () => { if (!(await cancelUpload(u.id))) toast('Too late to cancel: the file is being saved.', 'info'); }} aria-label="Cancel upload of {u.path}">Cancel</Button>{/if}
+            {#if u.state === 'failed'}<Button variant="ghost" size="sm" class="h-6 px-2" onclick={async () => { if (!(await retryUpload(u.id))) toast('The file is no longer available here; add it again.', 'error'); }}>Retry</Button>{/if}</div>
+          {#if u.state === 'failed'}<div class="text-destructive">{u.error}</div>{/if}
+          <progress max="1" value={jobProgress(u)} class="h-1.5 w-full accent-primary"></progress>
         </div>
       {/each}
-    </div>
+    </section>
   {/if}
 
   {#if dragging}
@@ -700,6 +765,9 @@
       {/if}
       <button role="menuitem" class="item" onclick={() => moveTo(e, true)}>Copy…</button>
       <button role="menuitem" class="item" onclick={() => share(e)}>Share link…</button>
+      {#if !e.is_dir}
+        <button role="menuitemcheckbox" aria-checked={pinned.has(join(listedPath, e.name))} class="item" onclick={() => togglePin(e)}>Keep offline</button>
+      {/if}
       {#if e.mount_id}
         <a role="menuitem" class="item" href="/mounts">Manage mount…</a>
       {:else}

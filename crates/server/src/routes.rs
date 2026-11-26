@@ -9,7 +9,7 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::state::AppState;
-use crate::{auth, connections, files, journal, mounts, shares, thumbs, uploads};
+use crate::{auth, connections, files, journal, mounts, shares, thumbs, trash, uploads};
 
 /// Marks a response that must not be compressed on the fly: file contents,
 /// which are read in byte ranges (compressing would drop the Content-Length
@@ -35,9 +35,48 @@ async fn healthz(
     }
 }
 
+/// The OpenAPI document (generated once).
+async fn openapi_json() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    static DOC: std::sync::LazyLock<String> = std::sync::LazyLock::new(crate::openapi::json);
+    ([(header::CONTENT_TYPE, "application/json")], DOC.as_str()).into_response()
+}
+
+/// axum's own rejections (a body that isn't JSON, a bad query or path) are
+/// plain text: answered as the API's JSON error instead, like every other.
+async fn json_rejections(resp: axum::response::Response) -> axum::response::Response {
+    let plain = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|t| t.starts_with("text/plain"));
+    if !resp.status().is_client_error() || !plain {
+        return resp;
+    }
+    // (Only the body changes: status, headers and extensions stay.)
+    let (mut parts, body) = resp.into_parts();
+    let body = axum::body::to_bytes(body, 64 * 1024)
+        .await
+        .unwrap_or_default();
+    let msg = String::from_utf8_lossy(&body).trim().to_string();
+    let msg = if msg.is_empty() {
+        parts.status.to_string()
+    } else {
+        msg
+    };
+    let json = serde_json::to_vec(&json!({ "error": msg })).unwrap_or_default();
+    parts.headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    parts.headers.remove(header::CONTENT_LENGTH);
+    axum::response::Response::from_parts(parts, axum::body::Body::from(json))
+}
+
 pub fn router(st: AppState) -> Router {
     let api = Router::new()
         .route("/health", get(healthz))
+        .route("/v1/openapi.json", get(openapi_json))
         .route("/auth/login", post(auth::login))
         .route("/auth/logout", post(auth::logout))
         .route("/auth/me", get(auth::me))
@@ -97,12 +136,17 @@ pub fn router(st: AppState) -> Router {
         .route("/ws", get(journal::ws))
         .route("/shares", get(shares::list).post(shares::create))
         .route("/shares/{id}", axum::routing::delete(shares::delete))
+        .route("/trash", get(trash::list))
+        .route("/trash/empty", post(trash::empty))
+        .route("/trash/{id}", axum::routing::delete(trash::delete_one))
+        .route("/trash/{id}/restore", post(trash::restore_one))
         .route("/public/{token}", get(shares::info))
         .route("/public/{token}/unlock", post(shares::unlock))
         .route("/public/{token}/content", get(shares::content))
         .route("/public/{token}/thumb", get(shares::thumb))
         .route("/public/{token}/image", get(shares::image))
         .fallback(|| async { crate::error::ApiError::NotFound })
+        .layer(axum::middleware::map_response(json_rejections))
         .layer(SetResponseHeaderLayer::if_not_present(
             header::CACHE_CONTROL,
             HeaderValue::from_static("no-store"),

@@ -62,9 +62,16 @@ jobs:
           sudo mount -o loop,user_subvol_rm_allowed "$RUNNER_TEMP/btrfs.img" /mnt/btrfs
           sudo chown "$(id -u):$(id -g)" /mnt/btrfs
           echo "STRATA_TEST_BTRFS_DIR=/mnt/btrfs" >> "$GITHUB_ENV"
+      # (The browser chunker is compared with the server's under Node.)
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      # Property tests run 256 cases here (10,000 nightly).
       - run: cargo test --workspace
+        env:
+          PROPTEST_CASES: "256"
 
   web:
     runs-on: ubuntu-latest
@@ -81,9 +88,27 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - run: npm ci
       - run: npm run check
-      - run: npm test
+      # The API types are generated from api/openapi.json: never edited.
+      - name: API types match the OpenAPI snapshot
+        run: npm run api:types && git diff --exit-code src/lib/openapi.d.ts
+      # (With coverage: the offline queue and cache must stay at 100%.)
+      - run: npm test -- --coverage
       - run: npm run build
       - run: npm run size
+
+  # The API contract: Strata in Docker (Postgres, MinIO) and Schemathesis
+  # over every operation of api/openapi.json (no 5xx, documented answers).
+  # (The snapshot itself is checked against the code by `cargo test`.)
+  api-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+      - name: Schemathesis against the server
+        run: scripts/api-contract.sh
 
   # Browser tests against a real server built from this commit (Chromium,
   # plus WebKit for media playback), so UI changes can't silently break them.
@@ -146,14 +171,14 @@ jobs:
           done
           cat "$RUNNER_TEMP/strata.log"
           exit 1
-      - name: Playwright (Chromium; WebKit for media playback)
+      - name: Playwright (Chromium; WebKit for media playback and offline)
         working-directory: web
         env:
           STRATA_E2E_URL: http://127.0.0.1:8080
           STRATA_E2E_USER: admin
         run: |
           STRATA_E2E_PASSWORD=$(cat "$RUNNER_TEMP/e2e-password") \
-            npx playwright test --project=chromium --project=webkit-media --trace retain-on-failure --reporter=list,html
+            npx playwright test --project=chromium --project=webkit-media --project=webkit-offline --trace retain-on-failure --reporter=list,html
       - name: Server log
         if: failure()
         run: cat "$RUNNER_TEMP/strata.log"

@@ -430,9 +430,14 @@ async fn shares_journal_and_gc() {
         StatusCode::NOT_FOUND
     );
 
-    // GC: delete the file; with grace 0 its blob goes away
-    t.ok("POST", "/api/files/delete", json!({"paths": ["pub"]}))
-        .await;
+    // GC: delete the file for good (the trash would keep it); with grace 0
+    // its blob goes away
+    t.ok(
+        "POST",
+        "/api/files/delete",
+        json!({"paths": ["pub"], "permanent": true}),
+    )
+    .await;
     let n = strata_server::background::gc(&t.st, 0).await.unwrap();
     assert_eq!(n, 1);
     let blobs: i64 = sqlx::query_scalar("SELECT count(*) FROM blobs")
@@ -862,8 +867,12 @@ async fn gc_keeps_blobs_of_pending_uploads_and_survives_broken_backends() {
 async fn store_blob_rewrites_a_blob_gc_removed_meanwhile() {
     let Some(t) = app().await else { return };
     t.upload("a.txt", b"again").await;
-    t.ok("POST", "/api/files/delete", json!({"paths": ["a.txt"]}))
-        .await;
+    t.ok(
+        "POST",
+        "/api/files/delete",
+        json!({"paths": ["a.txt"], "permanent": true}),
+    )
+    .await;
     sqlx::query("UPDATE blobs SET created_at = now() - interval '3 days'")
         .execute(&t.st.db)
         .await
@@ -1150,6 +1159,7 @@ fn state_dir_inside_storage_base_is_refused() {
         raw_ttl_secs: 1,
         raw_background_rescan: true,
         probe_secs: 60,
+        trash_days: 30,
     };
     assert!(cfg.clone().checked().is_err());
     cfg.data_dir = "/var/lib/strata".into();
@@ -1365,4 +1375,119 @@ fn walk(dir: &std::path::Path) -> Vec<String> {
         out.push(name);
     }
     out
+}
+
+/// Text Postgres can't store (a NUL character) is a bad request, not a
+/// server error (found by the API contract test).
+#[tokio::test]
+async fn nul_characters_are_bad_requests() {
+    let Some(t) = app().await else { return };
+    let (s, v) = t
+        .json(
+            "POST",
+            "/api/auth/login",
+            json!({"username": "a\u{0}", "password": "x"}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
+    let (s, v) = t
+        .json(
+            "POST",
+            "/api/shares",
+            json!({"path": "", "password": "p\u{0}w"}),
+        )
+        .await;
+    assert!(s.is_client_error(), "{s} {v}");
+}
+
+/// A mount over a folder that holds other mounts is refused: they would be
+/// cut off (found by the state-machine test).
+#[tokio::test]
+async fn no_mount_over_other_mounts() {
+    let Some(t) = app().await else { return };
+    let c = t
+        .ok(
+            "POST",
+            "/api/connections",
+            json!({"name": "disk", "config": {"kind": "local", "path": "d"}}),
+        )
+        .await;
+    t.ok(
+        "POST",
+        "/api/mounts",
+        json!({"path": "a/a/a", "connection_id": c["id"], "base_path": "one", "mode": "raw"}),
+    )
+    .await;
+    let (s, v) = t
+        .json(
+            "POST",
+            "/api/mounts",
+            json!({"path": "a", "connection_id": c["id"], "base_path": "two", "mode": "raw"}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    // Beside it is fine.
+    t.ok(
+        "POST",
+        "/api/mounts",
+        json!({"path": "b", "connection_id": c["id"], "base_path": "three", "mode": "raw"}),
+    )
+    .await;
+}
+
+/// A path below a file is simply not there (on a raw local folder too, where
+/// the filesystem says "not a directory"): 404, not a server error (found
+/// by the state-machine test).
+#[tokio::test]
+async fn paths_below_a_file_are_not_found() {
+    let Some(t) = app().await else { return };
+    let c = t
+        .ok(
+            "POST",
+            "/api/connections",
+            json!({"name": "disk", "config": {"kind": "local", "path": "d"}}),
+        )
+        .await;
+    t.ok(
+        "POST",
+        "/api/mounts",
+        json!({"path": "raw", "connection_id": c["id"], "base_path": "", "mode": "raw"}),
+    )
+    .await;
+    t.upload("raw/f", b"").await;
+    t.upload("home-f", b"x").await;
+    t.upload("src", b"s").await;
+    for p in ["raw/f/x", "home-f/x"] {
+        let (s, v) = t
+            .json(
+                "POST",
+                "/api/files/move",
+                json!({"from": p, "to": "elsewhere"}),
+            )
+            .await;
+        assert_eq!(s, StatusCode::NOT_FOUND, "move {p}: {v}");
+        let (s, v) = t.get(&format!("/api/files/stat?path={}", enc(p))).await;
+        assert_eq!(s, StatusCode::NOT_FOUND, "stat {p}: {v}");
+        let (s, v) = t
+            .json("POST", "/api/files/delete", json!({"paths": [p]}))
+            .await;
+        assert_eq!(s, StatusCode::NOT_FOUND, "delete {p}: {v}");
+        // Writing below a file is a conflict, not a missing path.
+        let (s, v) = t
+            .json(
+                "POST",
+                "/api/files/mkdir",
+                json!({"path": format!("{p}/y")}),
+            )
+            .await;
+        assert_eq!(s, StatusCode::CONFLICT, "mkdir below {p}: {v}");
+        let (s, v) = t
+            .json(
+                "POST",
+                "/api/files/move",
+                json!({"from": "src", "to": format!("{p}/y")}),
+            )
+            .await;
+        assert_eq!(s, StatusCode::CONFLICT, "move to below {p}: {v}");
+    }
 }

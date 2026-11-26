@@ -76,10 +76,71 @@ function icon(pad, rounded) {
   };
 }
 
+/** A launch screen: the background with the (full-bleed) icon in the
+ *  middle, a third of the short side. Opaque RGB; only the icon's square is
+ *  supersampled. */
+function splash(w, h, [br, bg, bb]) {
+  const s = Math.round(Math.min(w, h) / 3);
+  const ix = Math.round((w - s) / 2), iy = Math.round((h - s) / 2);
+  const draw = icon(0, true);
+  const row = Buffer.alloc(1 + w * 3);
+  const raw = Buffer.alloc((1 + w * 3) * h);
+  for (let y = 0; y < h; y++) {
+    row[0] = 0;
+    for (let x = 0; x < w; x++) {
+      let r = br, g = bg, b = bb;
+      if (x >= ix && x < ix + s && y >= iy && y < iy + s) {
+        let ar = 0, ag = 0, ab = 0, aa = 0;
+        for (let sy = 0; sy < 4; sy++)
+          for (let sx = 0; sx < 4; sx++) {
+            const p = draw((x - ix + (sx + 0.5) / 4) / s, (y - iy + (sy + 0.5) / 4) / s);
+            ar += p[0] * p[3]; ag += p[1] * p[3]; ab += p[2] * p[3]; aa += p[3];
+          }
+        const k = aa / 16;
+        if (aa) { r = (ar / aa) * k + br * (1 - k); g = (ag / aa) * k + bg * (1 - k); b = (ab / aa) * k + bb * (1 - k); }
+      }
+      const o = 1 + x * 3;
+      row[o] = r; row[o + 1] = g; row[o + 2] = b;
+    }
+    row.copy(raw, y * row.length);
+  }
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(w, 0);
+  ihdr.writeUInt32BE(h, 4);
+  ihdr[8] = 8; ihdr[9] = 2;
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk('IHDR', ihdr),
+    chunk('IDAT', deflateSync(raw, { level: 9 })),
+    chunk('IEND', Buffer.alloc(0))
+  ]);
+}
+
+/** iPhone launch screens (portrait, device pixels), as listed in
+ *  src/app.html: [width, height, CSS width, CSS height, pixel ratio]. */
+export const SPLASH = [
+  [1320, 2868, 440, 956, 3],
+  [1206, 2622, 402, 874, 3],
+  [1290, 2796, 430, 932, 3],
+  [1179, 2556, 393, 852, 3],
+  [1284, 2778, 428, 926, 3],
+  [1170, 2532, 390, 844, 3],
+  [1125, 2436, 375, 812, 3],
+  [1242, 2688, 414, 896, 3],
+  [828, 1792, 414, 896, 2],
+  [750, 1334, 375, 667, 2],
+  [640, 1136, 320, 568, 2]
+];
+
 mkdirSync('static/icons', { recursive: true });
 writeFileSync('static/icons/icon-192.png', png(192, icon(0.02, true)));
 writeFileSync('static/icons/icon-512.png', png(512, icon(0.02, true)));
 writeFileSync('static/icons/maskable-512.png', png(512, icon(0, false)));
 writeFileSync('static/icons/apple-touch-icon.png', png(180, icon(0, false)));
 writeFileSync('static/favicon.png', png(32, icon(0, true)));
+mkdirSync('static/splash', { recursive: true });
+for (const [w, h] of SPLASH) {
+  writeFileSync(`static/splash/light-${w}x${h}.png`, splash(w, h, [248, 250, 252]));
+  writeFileSync(`static/splash/dark-${w}x${h}.png`, splash(w, h, [11, 17, 32]));
+}
 console.log('icons written');

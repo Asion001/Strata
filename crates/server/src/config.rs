@@ -33,6 +33,9 @@ pub struct Config {
     pub raw_background_rescan: bool,
     /// Seconds between health probes of each connection (jittered).
     pub probe_secs: u64,
+    /// Days deleted items stay in the trash; 0 turns the trash off (deletes
+    /// are permanent).
+    pub trash_days: i64,
 }
 
 fn env(name: &str) -> Option<String> {
@@ -74,6 +77,10 @@ impl Config {
                 .and_then(|v| v.parse().ok())
                 .map(|s: u64| s.max(5))
                 .unwrap_or(60),
+            trash_days: env("STRATA_TRASH_DAYS")
+                .and_then(|v| v.parse().ok())
+                .map(|d: i64| d.clamp(0, 3650))
+                .unwrap_or(30),
             data_dir,
         }
         .checked()

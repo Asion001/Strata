@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::backend::{ConnectionConfig, PROBE_DIR};
 
 /// Native snapshot support a backend offers.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SnapshotKind {
     #[default]
@@ -22,7 +22,7 @@ pub enum SnapshotKind {
     Smb,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default, utoipa::ToSchema)]
 pub struct Snapshots {
     pub kind: SnapshotKind,
     /// Whether Strata can create snapshots itself (vs. only read existing
@@ -31,7 +31,7 @@ pub struct Snapshots {
     pub create: bool,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(default)]
 pub struct Capabilities {
     pub snapshots: Snapshots,

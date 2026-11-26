@@ -33,13 +33,14 @@ use crate::mounts;
 use crate::state::AppState;
 use crate::vfs::{self, ByteStream};
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct ChunkSpec {
     pub hash: String,
     pub size: i64,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
+#[schema(as = UploadInput)]
 pub struct CreateReq {
     pub path: String,
     pub size: i64,
@@ -152,6 +153,7 @@ pub async fn create(
     {
         return Err(conflict("a folder with that name already exists"));
     }
+    vfs::check_raw_place(&st, &m, &rel).await?;
     let id = random_token(16);
     sqlx::query(
         "INSERT INTO uploads (id, user_id, path, volume_id, size, chunks, chunk_sizes, mtime)

@@ -50,6 +50,10 @@ impl From<sqlx::Error> for ApiError {
             sqlx::Error::Database(d) if d.code().as_deref() == Some("23505") => {
                 ApiError::Conflict("already exists".into())
             }
+            // Text Postgres can't hold (a NUL character): the input is bad.
+            sqlx::Error::Database(d) if d.code().as_deref() == Some("22021") => {
+                ApiError::BadRequest("text with a character that can't be stored (NUL)".into())
+            }
             e => ApiError::Internal(e.into()),
         }
     }
@@ -59,6 +63,11 @@ impl From<opendal::Error> for ApiError {
     fn from(e: opendal::Error) -> Self {
         if strata_storage::readonly::is_read_only_refusal(&e) {
             return ApiError::ReadOnly;
+        }
+        // A path below a file ("not a directory" from a filesystem) is
+        // simply not there.
+        if not_a_directory(&e) {
+            return ApiError::NotFound;
         }
         match e.kind() {
             opendal::ErrorKind::NotFound => ApiError::NotFound,
@@ -71,6 +80,20 @@ impl From<opendal::Error> for ApiError {
             _ => ApiError::Internal(e.into()),
         }
     }
+}
+
+/// Does this backend error come from a path that runs through a file?
+fn not_a_directory(e: &opendal::Error) -> bool {
+    let mut cur: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(e);
+    while let Some(c) = cur {
+        if let Some(io) = c.downcast_ref::<std::io::Error>()
+            && io.kind() == std::io::ErrorKind::NotADirectory
+        {
+            return true;
+        }
+        cur = c.source();
+    }
+    false
 }
 
 /// An error while reading a file's stream, before anything was sent: a

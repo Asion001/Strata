@@ -141,6 +141,43 @@ meets a `deleting` row rewrites the object and clears the flag, so a crash at
 any point never leaves a live row without its object. Re-using a blob bumps its
 age. One unreachable backend never stops GC elsewhere.
 
+### Trash
+Deleting a file or folder moves it to its owner's trash (`trash` table), from
+which it can be restored, purged, or emptied; items past
+`STRATA_TRASH_DAYS` (default 30) are purged by the hourly background job.
+`0` turns the trash off for new deletes; items already in the trash keep the
+purge date they were given. `POST /api/files/delete` with `permanent: true` skips
+the trash.
+
+* **Hashed volumes:** the item's `nodes` rows move to `trash_nodes` in one
+  transaction. GC counts `trash_nodes` as references, so blobs live until the
+  purge; the backend is never touched.
+* **Raw local folders:** the item is renamed to
+  `<connection root>/.strata-trash/<id>/<name>` (hidden like `.strata-tmp`,
+  and refused as a connection or mount base). The row is written with
+  `ready = false` before the rename and marked ready after it; the background
+  job reconciles rows a crash left behind (no item moved: drop the row; item
+  moved: mark ready; item gone: drop the row), each under the volume lock.
+* **Other raw backends (S3, FTP):** no cheap, safe rename, so deletes stay
+  permanent; the listing's `mount.trash` says so, for the UI to warn.
+
+A restore puts the item back at its old place in the volume, recreating
+missing parent folders, under "name (restored).ext" if the name is taken. A
+raw file is put back with a hard link (falling back to rename), so an entry
+created outside Strata meanwhile is never replaced. Restoring needs a mount of
+the same volume; trash rows journal as `delete`, restores as `create`. Share
+links come back with an item restored to the same path (hashed rows keep their
+ids; for raw items, links to the item itself). Trash on an unmounted disk is
+never taken as empty: a missing item counts as gone only while the trash folder
+or the connection's root marker is there. A connection with trashed items is
+deleted only with `?purge_trash=true`, and one with raw trash can't be pointed
+at another folder; deleting a user removes their trash. A purge renames the
+item to `.strata-trash/purging-<id>-<n>` under the volume lock and removes it
+after. The background job removes left-over `purging-*` folders and sets
+`.strata-trash/<id>` folders that no row knows on two runs in a row aside as
+`orphan-<id>-<time>` (kept for an admin, never deleted: a database restored
+from backup can leave real files there).
+
 ### Write ordering
 Tree changes of one volume (including raw backend renames, the atomic close of
 a raw write, and raw rescans) run under a per-volume lock: an in-process queue

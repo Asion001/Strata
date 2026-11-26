@@ -1,7 +1,7 @@
 //! Connections CRUD and health probes.
 
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -11,7 +11,7 @@ use crate::auth::{AuthUser, User};
 use crate::error::{ApiError, ApiResult, bad, conflict};
 use crate::state::AppState;
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct ConnectionView {
     pub id: i64,
     pub owner_id: i64,
@@ -154,6 +154,22 @@ pub async fn check_access(st: &AppState, user: &User, connection_id: i64) -> Api
     }
 }
 
+/// Only a connection's own keys are ever used (never the server's), so an
+/// S3 connection needs them (checked once blank secrets are filled in from
+/// the stored connection, when editing).
+fn own_keys(cfg: &ConnectionConfig) -> ApiResult<()> {
+    if let ConnectionConfig::S3 {
+        access_key_id,
+        secret_access_key,
+        ..
+    } = cfg
+        && (access_key_id.trim().is_empty() || secret_access_key.is_empty())
+    {
+        return Err(bad("an S3 connection needs an access key and its secret"));
+    }
+    Ok(())
+}
+
 fn validate(user: &User, name: &str, cfg: &ConnectionConfig) -> ApiResult<()> {
     if name.trim().is_empty() || name.len() > 100 {
         return Err(bad("name is required"));
@@ -183,7 +199,8 @@ pub async fn list(
     ))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
+#[schema(as = ConnectionInput)]
 pub struct UpsertReq {
     pub name: String,
     pub config: ConnectionConfig,
@@ -195,6 +212,7 @@ pub async fn create(
     Json(req): Json<UpsertReq>,
 ) -> ApiResult<Json<ConnectionView>> {
     validate(&u, &req.name, &req.config)?;
+    own_keys(&req.config)?;
     req.config
         .create_local_root(&st.cfg.local_base)
         .map_err(|e| bad(format!("invalid config: {e}")))?;
@@ -272,11 +290,34 @@ pub async fn update(
         bad("the stored settings of this connection can't be read (wrong server key, or an unknown format)")
     })?;
     req.config.merge_secrets(&old);
+    own_keys(&req.config)?;
     // Only a re-pointed connection gets its folder made, a fresh failure
     // count and capabilities to detect: a rename never touches the storage
     // (an unmounted disk's folder must not be created again).
     let repointed = req.config != old;
+    // Held until the new config is in place: a delete going to the trash
+    // meanwhile would land in the old folder.
+    let mut raw_lock = None;
+    let mut locked_raw: Vec<i64> = Vec::new();
     if repointed {
+        // A raw trash lives in the connection's folder: re-pointed, its
+        // items could no longer be found (and reconcile would drop them).
+        if let Some((lock, ids)) = lock_connection_volumes(&st, id, true).await? {
+            locked_raw = ids;
+            raw_lock = Some(lock);
+        }
+        let raw_trash: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM trash t JOIN volumes v ON v.id = t.volume_id
+             WHERE v.connection_id = $1 AND v.mode = 'raw'",
+        )
+        .bind(id)
+        .fetch_one(&st.db)
+        .await?;
+        if raw_trash > 0 {
+            return Err(conflict(format!(
+                "{raw_trash} deleted item(s) from this connection are still in the trash; restore or delete them before pointing it somewhere else"
+            )));
+        }
         req.config
             .create_local_root(&st.cfg.local_base)
             .map_err(|e| bad(format!("invalid config: {e}")))?;
@@ -320,6 +361,20 @@ pub async fn update(
             "the connection was changed meanwhile; reload it and try again",
         ));
     }
+    if repointed {
+        // New volumes need the layout lock, held now: the locked set is final.
+        let raw: Vec<i64> = sqlx::query_scalar(
+            "SELECT id FROM volumes WHERE connection_id = $1 AND mode = 'raw' ORDER BY id",
+        )
+        .bind(id)
+        .fetch_all(&mut *tx)
+        .await?;
+        if raw != locked_raw {
+            return Err(conflict(
+                "the connection's storage keeps changing; try again",
+            ));
+        }
+    }
     let volumes: Vec<(String, String)> =
         sqlx::query_as("SELECT base_path, mode FROM volumes WHERE connection_id = $1")
             .bind(id)
@@ -357,6 +412,12 @@ pub async fn update(
     tx.commit().await?;
     drop(layout);
     st.forget_operator(id);
+    // (Saved already: whatever happens to the lock, the rest runs.)
+    if let Some(l) = raw_lock
+        && let Err(e) = l.release().await
+    {
+        tracing::warn!("releasing the volume locks of connection {id} failed: {e}");
+    }
     if repointed {
         // A new target starts over: not offline, a fresh failure count, and
         // (local) its own folder marker.
@@ -376,10 +437,51 @@ pub async fn update(
     get_view(&st, &u, id).await.map(Json)
 }
 
+#[derive(Deserialize, Default)]
+pub struct DeleteQuery {
+    /// Also purge every trashed item that came from this connection.
+    #[serde(default)]
+    pub purge_trash: bool,
+}
+
+/// Lock every volume of a connection (only its raw ones with `raw_only`),
+/// read again once locked: a volume made meanwhile is retried. None when it
+/// has none. Returns the locked ids.
+async fn lock_connection_volumes(
+    st: &AppState,
+    id: i64,
+    raw_only: bool,
+) -> ApiResult<Option<(crate::vfs::VolumeLock, Vec<i64>)>> {
+    let ids = || async {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT id FROM volumes WHERE connection_id = $1 AND (mode = 'raw' OR NOT $2) ORDER BY id",
+        )
+        .bind(id)
+        .bind(raw_only)
+        .fetch_all(&st.db)
+        .await
+    };
+    for _ in 0..3 {
+        let want = ids().await?;
+        if want.is_empty() {
+            return Ok(None);
+        }
+        let lock = crate::vfs::lock_volumes(st, &want).await?;
+        if ids().await? == want {
+            return Ok(Some((lock, want)));
+        }
+        lock.release().await?;
+    }
+    Err(conflict(
+        "the connection's storage keeps changing; try again",
+    ))
+}
+
 pub async fn delete(
     State(st): State<AppState>,
     AuthUser(u): AuthUser,
     Path(id): Path<i64>,
+    Query(q): Query<DeleteQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
     check_access(&st, &u, id).await?;
     let in_use: bool = sqlx::query_scalar(
@@ -408,13 +510,118 @@ pub async fn delete(
             "this connection holds hashed volumes with files; mount them again and delete the files first",
         ));
     }
+    // Trashed items keep their volume until they are restored or purged
+    // (hashed ones hold blobs, raw ones files under `.strata-trash`).
+    let trashed: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM trash t JOIN volumes v ON v.id = t.volume_id WHERE v.connection_id = $1",
+    )
+    .bind(id)
+    .fetch_one(&st.db)
+    .await?;
+    // Trashed items that couldn't be removed from the storage (it can't be
+    // reached): the connection still goes, and the answer says so.
+    let mut left_on_storage = 0usize;
+    // Without purge_trash, trashed items refuse the delete (checked again in
+    // the transaction below, so one trashed meanwhile counts too).
+    if trashed > 0 && !q.purge_trash {
+        return Err(conflict(format!(
+            "{trashed} deleted item(s) from this connection are still in the trash; \
+             restore them, or delete the connection with purge_trash to remove them for good"
+        )));
+    }
+    let mut removed = 0usize;
+    if trashed > 0 && q.purge_trash {
+        let ids: Vec<i64> = sqlx::query_scalar(
+            "SELECT t.id FROM trash t JOIN volumes v ON v.id = t.volume_id WHERE v.connection_id = $1",
+        )
+        .bind(id)
+        .fetch_all(&st.db)
+        .await?;
+        for t in ids {
+            match crate::trash::purge(&st, t).await {
+                Ok(()) => removed += 1,
+                Err(ApiError::NotFound) => {}
+                // Storage gone, offline or failing: the connection goes
+                // anyway (asked for). Its row goes with the others below, a
+                // raw item's files are removed there if the folder is there,
+                // and what stays on the storage is reported.
+                Err(e) => {
+                    tracing::warn!("purging trash item {t} for a connection delete failed: {e}")
+                }
+            }
+        }
+    }
+    // Every volume locked: no trash or restore is half done on them while
+    // their rows go, and none starts.
+    // (A refusal after a purge says that the trash is gone already.)
+    let refused = |e: ApiError| match e {
+        ApiError::Conflict(m) if removed > 0 => conflict(format!(
+            "{removed} deleted item(s) from this connection were removed for good, but the connection wasn't: {m}"
+        )),
+        e => e,
+    };
+    let lock = lock_connection_volumes(&st, id, false)
+        .await
+        .map_err(refused)?;
+    // (The config as read here: a re-point meanwhile is refused below.)
+    let seen_cfg: Option<Vec<u8>> =
+        sqlx::query_scalar("SELECT config_enc FROM connections WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&st.db)
+            .await?;
     // A local connection's marker goes with it (best effort, below).
     // (Its operator, rooted at the folder, built before the row goes.)
     let local_op = match st.connection_config(id).await {
         Ok(c) if c.kind() == "local" => st.operator_unchecked(id).await.ok(),
         _ => None,
     };
+    // (Built now from that config, checked only if needed after the rows
+    // are gone.)
+    let root = match seen_cfg.as_deref().map(|c| st.decrypt_config(c)) {
+        Some(Ok(cfg)) => st
+            .local_root(id, &cfg)
+            .await
+            .ok()
+            .flatten()
+            .map(|lr| (lr.dir.clone(), lr)),
+        _ => None,
+    };
     let mut tx = st.db.begin().await?;
+    let now_cfg: Option<Vec<u8>> =
+        sqlx::query_scalar("SELECT config_enc FROM connections WHERE id = $1 FOR UPDATE")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    if now_cfg != seen_cfg {
+        return Err(refused(conflict(
+            "the connection changed meanwhile; try again",
+        )));
+    }
+    // Trashed items: without purge_trash they aren't removed unasked; with
+    // it, any left by the purge above (or trashed since) go too.
+    if !q.purge_trash {
+        let n: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM trash t JOIN volumes v ON v.id = t.volume_id WHERE v.connection_id = $1",
+        )
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if n > 0 {
+            return Err(conflict(format!(
+                "{n} deleted item(s) from this connection are still in the trash; \
+                 restore them, or delete the connection with purge_trash to remove them for good"
+            )));
+        }
+    }
+    // (Hashed rows go with their volumes; raw ones say which files go.)
+    let raw_left: Vec<i64> = sqlx::query_scalar(
+        "DELETE FROM trash t USING volumes v
+         WHERE v.id = t.volume_id AND v.connection_id = $1 AND v.mode = 'raw'
+         RETURNING t.id",
+    )
+    .bind(id)
+    .fetch_all(&mut *tx)
+    .await?;
     sqlx::query("DELETE FROM volumes WHERE connection_id = $1")
         .bind(id)
         .execute(&mut *tx)
@@ -424,11 +631,43 @@ pub async fn delete(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
+    // (Deleted already: whatever happens to the lock, the cleanup runs.)
+    if let Some((lock, _)) = lock
+        && let Err(e) = lock.release().await
+    {
+        tracing::warn!("releasing the volume locks of deleted connection {id} failed: {e}");
+    }
+    if !raw_left.is_empty() {
+        // (Only a folder that is there and the right one: an unmounted
+        // disk's empty mount point would pass every removal as done. With
+        // no root marker written yet, its trash folder must be there.)
+        let there = match root {
+            Some((root, lr)) => {
+                let unmarked = lr.marker.is_none();
+                let ok = st
+                    .check_root(id, lr, std::time::Duration::from_secs(20))
+                    .await
+                    .is_ok()
+                    && (!unmarked
+                        || tokio::fs::symlink_metadata(
+                            root.join(strata_storage::backend::TRASH_DIR),
+                        )
+                        .await
+                        .is_ok_and(|m| m.is_dir()));
+                ok.then_some(root)
+            }
+            None => None,
+        };
+        left_on_storage += match &there {
+            Some(root) => crate::trash::remove_items_at(root, &raw_left).await,
+            None => raw_left.len(),
+        };
+    }
     st.forget_connection(id);
     if let Some(op) = local_op {
         crate::state::LocalRoot::remove_marker(&op, id).await;
     }
-    Ok(Json(json!({})))
+    Ok(Json(json!({ "left_on_storage": left_on_storage })))
 }
 
 pub async fn probe(
@@ -441,7 +680,8 @@ pub async fn probe(
     get_view(&st, &u, id).await.map(Json)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
+#[schema(as = ConnectionTest)]
 pub struct TestReq {
     pub config: ConnectionConfig,
     /// When editing, blank secrets are taken from this connection.
@@ -458,6 +698,7 @@ pub async fn test(
         check_access(&st, &u, id).await?;
         req.config.merge_secrets(&st.connection_config(id).await?);
     }
+    own_keys(&req.config)?;
     // A new local folder is made when the connection is saved; testing
     // must not make it (or fail because it isn't there yet). An existing
     // connection's unchanged folder isn't made by saving, so it is tested.

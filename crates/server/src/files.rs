@@ -36,8 +36,11 @@ pub async fn list(
     let (m, entries) = vfs::list(&st, u.id, &path).await?;
     Ok(Json(json!({
         "path": path,
+        // Whose listing this is (the app's offline cache keys by it).
+        "user": u.id,
         "mount": { "id": m.id, "path": m.path, "mode": m.mode, "connection_name": m.connection_name,
-                   "connection_kind": m.connection_kind, "offline": st.is_offline(m.connection_id) },
+                   "connection_kind": m.connection_kind, "offline": st.is_offline(m.connection_id),
+                   "trash": crate::trash::enabled(&st) && crate::trash::supports_trash(&m) },
         "entries": entries,
     })))
 }
@@ -294,7 +297,7 @@ pub async fn stat(
     ))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct PathBody {
     pub path: String,
 }
@@ -312,7 +315,7 @@ pub async fn mkdir(
     Ok(Json(json!({ "path": path })))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct FromTo {
     pub from: String,
     pub to: String,
@@ -340,9 +343,12 @@ pub async fn copy(
     Ok(Json(json!({ "path": to })))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct DeleteBody {
     pub paths: Vec<String>,
+    /// Skip the trash and delete for good.
+    #[serde(default)]
+    pub permanent: bool,
 }
 
 pub async fn delete(
@@ -350,11 +356,16 @@ pub async fn delete(
     AuthUser(u): AuthUser,
     Json(b): Json<DeleteBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    let mut trashed = 0;
     for p in &b.paths {
         let p = paths::normalize(p)?;
-        vfs::delete(&st, u.id, &p).await?;
+        if vfs::delete(&st, u.id, &p, !b.permanent).await? {
+            trashed += 1;
+        }
     }
-    Ok(Json(json!({ "deleted": b.paths.len() })))
+    Ok(Json(
+        json!({ "deleted": b.paths.len(), "trashed": trashed }),
+    ))
 }
 
 #[derive(Deserialize)]

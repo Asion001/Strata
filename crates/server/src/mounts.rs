@@ -17,7 +17,7 @@ use crate::journal::{self, Change};
 use crate::state::AppState;
 use crate::vfs;
 
-#[derive(Clone, Debug, Serialize, sqlx::FromRow)]
+#[derive(Clone, Debug, Serialize, sqlx::FromRow, utoipa::ToSchema)]
 pub struct Mount {
     pub id: i64,
     pub owner_id: i64,
@@ -118,13 +118,36 @@ pub async fn list(
     Ok(Json(v))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
+#[schema(as = MountInput)]
 pub struct CreateReq {
     pub path: String,
     pub connection_id: i64,
     #[serde(default)]
     pub base_path: String,
     pub mode: String,
+}
+
+/// Refuse a mount over other mounts of the user: they would be cut off
+/// (the new volume doesn't have the folders that lead to them).
+async fn mounts_inside<'e>(
+    db: impl sqlx::PgExecutor<'e>,
+    user_id: i64,
+    path: &str,
+) -> ApiResult<()> {
+    let inside: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM mounts WHERE owner_id = $1 AND left(path, length($2) + 1) = $2 || '/')",
+    )
+    .bind(user_id)
+    .bind(path)
+    .fetch_one(db)
+    .await?;
+    if inside {
+        return Err(conflict(
+            "other mounts live inside this folder; remove them first",
+        ));
+    }
+    Ok(())
 }
 
 pub async fn create(
@@ -176,6 +199,7 @@ pub async fn create(
     // Refuse an overlap before making any folder; the parent folder is made
     // outside the layout lock (it may be slow remote storage).
     check_storage_overlap(&st, req.connection_id, &base, &req.mode).await?;
+    mounts_inside(&st.db, u.id, &path).await?;
     let (parent, name) = paths::split(&path).unwrap();
     // The mount point's parent must be a folder (create it if missing).
     vfs::mkdir_p(&st, u.id, parent).await?;
@@ -183,6 +207,7 @@ pub async fn create(
     // volume or connection edit can't slip an overlap in between.
     let (mut tx, _layout) = lock_layout(&st).await?;
     check_storage_overlap(&st, req.connection_id, &base, &req.mode).await?;
+    mounts_inside(&mut *tx, u.id, &path).await?;
     let volume_id: i64 = sqlx::query_scalar(
         "INSERT INTO volumes (connection_id, base_path, mode) VALUES ($1, $2, $3)
          ON CONFLICT (connection_id, base_path, mode) DO UPDATE SET mode = EXCLUDED.mode RETURNING id",
@@ -378,19 +403,27 @@ pub async fn delete(
     if m.path.is_empty() {
         return Err(bad("the root folder cannot be unmounted"));
     }
-    let nested = user_mounts(&st, u.id)
-        .await?
-        .iter()
-        .any(|o| o.id != m.id && paths::strip_prefix(&o.path, &m.path).is_some());
-    if nested {
-        return Err(conflict(
-            "other mounts live inside this one; remove them first",
-        ));
-    }
-    sqlx::query("DELETE FROM mounts WHERE id = $1")
+    // Under the layout lock, so a mount can't be added inside this one
+    // while it goes (it would be cut off from the tree).
+    let (mut tx, _layout) = lock_layout(&st).await?;
+    mounts_inside(&mut *tx, u.id, &m.path)
+        .await
+        .map_err(|e| match e {
+            ApiError::Conflict(_) => {
+                conflict("other mounts live inside this one; remove them first")
+            }
+            e => e,
+        })?;
+    let gone = sqlx::query("DELETE FROM mounts WHERE id = $1 AND owner_id = $2")
         .bind(id)
-        .execute(&st.db)
-        .await?;
+        .bind(u.id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    if gone == 0 {
+        return Err(ApiError::NotFound);
+    }
+    tx.commit().await?;
     invalidate(&st, u.id);
     journal::record_user(
         &st,

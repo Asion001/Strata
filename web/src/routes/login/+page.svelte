@@ -10,6 +10,13 @@
   let username = $state('');
   let password = $state('');
   let error = $state('');
+  // A sign-out that couldn't reach the server: end it as soon as possible.
+  $effect(() => {
+    const finish = () => import('$lib/offline/app.svelte').then((o) => o.finishPendingLogout(() => api('POST', '/api/auth/logout')));
+    void finish();
+    window.addEventListener('online', finish);
+    return () => window.removeEventListener('online', finish);
+  });
   let busy = $state(false);
 
   async function submit(e: Event) {
@@ -17,6 +24,13 @@
     busy = true;
     error = '';
     try {
+      // A sign-out that couldn't reach the server ends that session first.
+      const offline = await import('$lib/offline/app.svelte');
+      // (Signing in can't wait for it: the browser has one session cookie,
+      // and ending the old session later would end the new one.)
+      if ((await offline.finishPendingLogout(() => api('POST', '/api/auth/logout'))) === 'unreachable') {
+        throw new Error("The server can't be reached. Try again when you're online.");
+      }
       const r = await api('POST', '/api/auth/login', { username, password });
       session.user = r.user;
       session.checked = true;

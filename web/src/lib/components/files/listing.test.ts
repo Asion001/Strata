@@ -3,7 +3,7 @@ import type { Entry } from '$lib/api';
 import { Selection, loadPref, nextSort, savePref, sortEntries } from './listing';
 
 const e = (name: string, is_dir = false, size = 0, mtime = '2026-01-01T00:00:00Z'): Entry => ({
-  name, is_dir, size, mtime, etag: null, mount_id: null
+  name, is_dir, size, mtime, etag: null, mount_id: null, offline: false
 });
 
 describe('sortEntries', () => {

@@ -284,4 +284,39 @@ mod tests {
             }
         }
     }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig {
+            cases: std::env::var("PROPTEST_CASES").ok().and_then(|c| c.parse().ok()).unwrap_or(256),
+            ..Default::default()
+        })]
+
+        /// For any chunking and any `bytes=a-b` header, the covering chunk
+        /// slices concatenated are exactly the requested bytes.
+        #[test]
+        fn a_range_maps_to_exactly_its_bytes(
+            sizes in proptest::collection::vec(0u64..64, 0..12),
+            a in 0u64..800,
+            b in 0u64..800,
+            suffix in proptest::bool::ANY,
+        ) {
+            let total: u64 = sizes.iter().sum();
+            let data: Vec<u8> = (0..total).map(|i| (i * 7 + 3) as u8).collect();
+            let header = if suffix { format!("bytes=-{a}") } else { format!("bytes={a}-{b}") };
+            match parse(Some(&header), total) {
+                Part { start, end } => {
+                    proptest::prop_assert!(start < end && end <= total);
+                    let mut off = 0usize;
+                    let starts: Vec<usize> = sizes.iter().map(|&s| { let o = off; off += s as usize; o }).collect();
+                    let got: Vec<u8> = covering(&sizes, start, end)
+                        .into_iter()
+                        .flat_map(|(i, r)| data[starts[i] + r.start as usize..starts[i] + r.end as usize].to_vec())
+                        .collect();
+                    proptest::prop_assert_eq!(&got[..], &data[start as usize..end as usize]);
+                }
+                Unsatisfiable => proptest::prop_assert!(total == 0 || (!suffix && a >= total) || (suffix && a == 0)),
+                Full => proptest::prop_assert!(!suffix && b < a || suffix && total == 0),
+            }
+        }
+    }
 }

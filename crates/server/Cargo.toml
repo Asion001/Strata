@@ -17,6 +17,7 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 serde.workspace = true
+utoipa.workspace = true
 serde_json.workspace = true
 bytes.workspace = true
 futures.workspace = true
@@ -41,6 +42,8 @@ cookie = "0.18"
 
 [dev-dependencies]
 tempfile = "3"
+proptest = "1.12"
+proptest-state-machine = "0.9"
 testcontainers-modules = { version = "0.15", features = ["minio"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"

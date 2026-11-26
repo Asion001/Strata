@@ -10,12 +10,14 @@ pub mod files;
 pub mod health;
 pub mod journal;
 pub mod mounts;
+pub mod openapi;
 pub mod range;
 pub mod routes;
 pub mod safe;
 pub mod shares;
 pub mod state;
 pub mod thumbs;
+pub mod trash;
 pub mod uploads;
 pub mod vfs;
 

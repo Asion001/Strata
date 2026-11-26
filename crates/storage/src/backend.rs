@@ -25,9 +25,16 @@ pub fn has_probe_component(path: &str) -> bool {
     path.split(['/', '\\']).any(|c| c == PROBE_DIR)
 }
 
-/// Does a `/`-separated path contain the reserved atomic-write folder?
+/// Folder at a local connection's root that holds deleted items until they
+/// are restored or purged (`<root>/.strata-trash/<trash id>/<name>`). Hidden
+/// from listings like the atomic-write folder.
+pub const TRASH_DIR: &str = ".strata-trash";
+
+/// Does a `/`-separated path contain a reserved folder of local connections
+/// (atomic-write staging or the trash)?
 pub fn has_reserved_component(path: &str) -> bool {
-    path.split('/').any(|c| c == ATOMIC_TMP_DIR)
+    path.split('/')
+        .any(|c| c == ATOMIC_TMP_DIR || c == TRASH_DIR)
 }
 
 /// Errors that mean "this folder exists but we may not write to it".
@@ -62,7 +69,7 @@ fn mounted_read_only(_: &Path) -> bool {
 }
 
 /// Backend configuration. Serialised to JSON and encrypted at rest.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum ConnectionConfig {
     /// A folder on the server. `path` is relative to the server's
@@ -186,7 +193,7 @@ impl ConnectionConfig {
         }
         let slashed = path.replace('\\', "/");
         if has_reserved_component(&slashed) {
-            bail!("{ATOMIC_TMP_DIR} is reserved");
+            bail!("{ATOMIC_TMP_DIR} and {TRASH_DIR} are reserved");
         }
         if has_probe_component(&slashed) {
             bail!("{PROBE_DIR} is reserved");
@@ -259,7 +266,11 @@ impl ConnectionConfig {
                 secret_access_key,
                 root,
             } => {
+                // Only the connection's own credentials: never the server's
+                // environment, config files or instance role.
                 let mut b = services::S3::default()
+                    .disable_config_load()
+                    .disable_ec2_metadata()
                     .bucket(bucket)
                     .access_key_id(access_key_id)
                     .secret_access_key(secret_access_key)
