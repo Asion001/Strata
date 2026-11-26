@@ -64,17 +64,20 @@ jobs:
           git worktree add "$RUNNER_TEMP/base" "$BASE"
           cd "$RUNNER_TEMP/base"
           # (A base from before the benches existed has nothing to compare.)
-          if cargo bench --workspace --benches --no-run; then
-            cargo bench --workspace --benches -- --save-baseline base
+          if cargo bench --workspace --bench '*' --no-run; then
+            cargo bench --workspace --bench '*' -- --save-baseline base
           else
             echo "The base doesn't build its benches: nothing to compare." >> "$GITHUB_STEP_SUMMARY"
           fi
       - name: Bench this change
-        run: cargo bench --workspace --benches -- --save-baseline head
+        run: cargo bench --workspace --bench '*' -- --save-baseline head
+      # (`shell: bash` sets pipefail: tee must not hide a failure.)
       - name: Targets
+        shell: bash
         run: python3 scripts/bench-check.py targets head | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Compare with the base
         if: always() && github.event_name == 'pull_request'
+        shell: bash
         run: python3 scripts/bench-check.py compare base head | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: always()
