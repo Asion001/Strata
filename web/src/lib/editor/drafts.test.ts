@@ -34,6 +34,16 @@ describe('drafts', () => {
     expect(offerSeen(d)).toBe(false); // mark pruned with its draft
   });
 
+  it('forgets recent Move/Copy folders when another account signs in', () => {
+    markSignedIn(1);
+    localStorage.setItem(RECENT_KEY, '["a"]');
+    markSignedIn(1);
+    expect(localStorage.getItem(RECENT_KEY)).toBe('["a"]');
+    markSignedIn(2);
+    expect(localStorage.getItem(RECENT_KEY)).toBeNull();
+    markSignedOut();
+  });
+
   it('a signed-out browser never recreates the wiped database', async () => {
     await saveDraft({ key: 'k', baseEtag: null, text: 'x', savedAt: 1 });
     localStorage.setItem(RECENT_KEY, '["Medical/2026"]');
