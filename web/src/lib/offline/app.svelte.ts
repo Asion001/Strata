@@ -35,7 +35,8 @@ export async function signedIn(u: User) {
   const done = (async () => {
     try {
       if (typeof caches !== 'undefined') await (await caches.open(META)).put(USER_KEY, new Response(String(u.id)));
-    } catch {}
+      console.log('DBG recorded', u.id);
+    } catch (e) { console.log('DBG record failed', String(e)); }
   })();
   recorded = done;
   await done;
