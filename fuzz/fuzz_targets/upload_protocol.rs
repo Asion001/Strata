@@ -106,6 +106,7 @@ fn app() -> &'static App {
                 raw_ttl_secs: 0,
                 probe_secs: 3600,
                 trash_days: 30,
+                busy_wait_ms: 60_000,
             };
             let pool = sqlx::PgPool::connect(&url).await.unwrap();
             let st = AppState::with_pool(cfg, pool).await.unwrap();
@@ -184,6 +185,7 @@ fuzz_target!(|input: Input| {
     let piece = |i: u8| &pool[i as usize % pool.len()];
     a.rt.block_on(async {
         let mut made: Vec<Made> = Vec::new();
+        let mut committed: std::collections::HashSet<String> = std::collections::HashSet::new();
         for step in input.steps.into_iter().take(MAX_STEPS) {
             match step {
                 Step::Create { file, chunks, size_off } => {
@@ -239,6 +241,11 @@ fuzz_target!(|input: Input| {
                     let Some(m) = pick(&made, u) else { continue };
                     let (s, v, _) = call(&a.router, &a.cookie, "POST", &format!("/api/uploads/{}/commit", m.id), Body::empty()).await;
                     if s != StatusCode::OK {
+                        continue;
+                    }
+                    // (A commit sent again replays the first answer; the
+                    // file may have been saved over since.)
+                    if !committed.insert(m.id.clone()) {
                         continue;
                     }
                     let enc: String = m.path.replace('/', "%2F");

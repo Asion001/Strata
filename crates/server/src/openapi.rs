@@ -22,12 +22,13 @@ use utoipa::{Modify, OpenApi, ToSchema};
 
 use crate::auth::{ChangePasswordReq, CreateUserReq, LoginReq, SetPasswordReq, User};
 use crate::connections::{ConnectionView, TestReq, UpsertReq};
+use crate::error::Existing;
 use crate::files::{DeleteBody, DeleteResult, FromTo, PathBody};
 use crate::journal::FeedEntry;
 use crate::mounts::{CreateReq as MountInput, Mount};
 use crate::shares::{CreateReq as ShareInput, Share, UnlockReq};
 use crate::trash::Item as TrashItem;
-use crate::uploads::{ChunkSpec, CreateReq as UploadInput};
+use crate::uploads::{ChunkSpec, CommitReq, CreateReq as UploadInput};
 use crate::vfs::{Entry, SearchHit};
 
 // ---------------------------------------------------------------- schemas
@@ -39,6 +40,12 @@ pub struct ErrorBody {
     /// On 412: the file's current version, if it exists.
     #[schema(nullable)]
     pub etag: Option<String>,
+    /// "exists" on a 409 when the destination name is taken.
+    #[schema(nullable)]
+    pub code: Option<String>,
+    /// With `code: "exists"`: what is there.
+    #[schema(nullable)]
+    pub details: Option<Existing>,
 }
 
 /// An answer with nothing to say.
@@ -406,8 +413,8 @@ fn cancel_upload() {}
     responses((status = 200, body = EmptyBody), (status = 413, description = "Larger than a chunk can be", body = ErrorBody),
         (status = 503, body = ErrorBody)))]
 fn put_chunk() {}
-#[utoipa::path(post, path = "/api/uploads/{id}/commit", tag = "uploads", params(("id" = String, Path)), responses(
-    (status = 200, body = CommittedBody), (status = 409, description = "Chunks missing, or the folder changed", body = ErrorBody),
+#[utoipa::path(post, path = "/api/uploads/{id}/commit", tag = "uploads", params(("id" = String, Path)), request_body = Option<CommitReq>, responses(
+    (status = 200, body = CommittedBody), (status = 409, description = "Chunks missing, the folder changed, or the name is taken (`code: \"exists\"`)", body = ErrorBody),
     (status = 503, body = ErrorBody)))]
 fn commit_upload() {}
 
@@ -742,9 +749,10 @@ fn nullable_is_required(v: &mut serde_json::Value) {
             .or_insert_with(|| Value::Array(vec![]));
         for (k, p) in props {
             // (Left out when there is nothing to say: Capabilities.fs_type
-            // when unknown, ErrorBody.etag but on a 412.)
+            // when unknown, ErrorBody.etag but on a 412, ErrorBody.code and
+            // details but for `exists`.)
             let omitted = (name == "Capabilities" && k == "fs_type")
-                || (name == "ErrorBody" && k == "etag")
+                || (name == "ErrorBody" && ["etag", "code", "details"].contains(&k.as_str()))
                 || SPARSE.contains(&name.as_str());
             if nullable(&p) && !omitted && !required.as_array().unwrap().iter().any(|r| r == &k) {
                 required.as_array_mut().unwrap().push(Value::String(k));

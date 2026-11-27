@@ -32,6 +32,9 @@ pub struct Config {
     /// Days deleted items stay in the trash; 0 turns the trash off (deletes
     /// are permanent).
     pub trash_days: i64,
+    /// How long an operation waits for another one writing the same name
+    /// (or committing the same upload) before giving up.
+    pub busy_wait_ms: u64,
 }
 
 fn env(name: &str) -> Option<String> {
@@ -74,6 +77,10 @@ impl Config {
                 .and_then(|v| v.parse().ok())
                 .map(|d: i64| d.clamp(0, 3650))
                 .unwrap_or(30),
+            busy_wait_ms: env("STRATA_BUSY_WAIT_MS")
+                .and_then(|v| v.parse().ok())
+                .map(|ms: u64| ms.min(3_600_000))
+                .unwrap_or(60_000),
             data_dir,
         }
         .checked()

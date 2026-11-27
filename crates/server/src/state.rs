@@ -40,6 +40,9 @@ pub struct Inner {
     /// connection id -> times its operator was forgotten (a config change),
     /// so an operator built from the old config isn't cached afterwards
     pub op_gens: DashMap<i64, u64>,
+    /// (volume, path) names a move, copy or upload is writing right now
+    /// (see `conflicts`), so two of them never pick the same one.
+    pub claims: DashMap<String, ()>,
     /// Connections the health probes found offline: their storage isn't
     /// touched (reads and writes get 503) until a probe succeeds again.
     pub offline: DashMap<i64, ()>,
@@ -106,6 +109,7 @@ impl AppState {
             cfg,
             ops: DashMap::new(),
             op_gens: DashMap::new(),
+            claims: DashMap::new(),
             offline: DashMap::new(),
             probe_locks: DashMap::new(),
             root_gates: DashMap::new(),

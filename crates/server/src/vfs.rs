@@ -270,18 +270,20 @@ pub async fn list(st: &AppState, user_id: i64, path: &str) -> ApiResult<(Mount, 
     let entries: Vec<Entry> = sqlx::query_as(
         "SELECT n.name, n.is_dir, n.size, n.mtime, n.etag, NULL::bigint AS mount_id, FALSE AS offline
          FROM nodes n
-         WHERE n.volume_id = $1 AND n.parent = $2
+         WHERE n.volume_id = $1 AND n.parent = $2 AND n.name !~ $5
            AND NOT EXISTS (SELECT 1 FROM mounts x WHERE x.owner_id = $3 AND x.parent_path = $4 AND x.name = n.name)
          UNION ALL
          SELECT x.name, TRUE, 0, x.created_at, NULL, x.id, c.health = 'offline'
          FROM mounts x JOIN volumes v ON v.id = x.volume_id JOIN connections c ON c.id = v.connection_id
-         WHERE x.owner_id = $3 AND x.parent_path = $4
+         WHERE x.owner_id = $3 AND x.parent_path = $4 AND x.name !~ $5
          ORDER BY 2 DESC, 1",
     )
     .bind(m.volume_id)
     .bind(&rel)
     .bind(user_id)
     .bind(path)
+    // (Not what a replace is writing beside the item it replaces.)
+    .bind(crate::conflicts::STAGED_NAME)
     .fetch_all(&st.db)
     .await?;
     if entries.is_empty() && !rel.is_empty() {
@@ -1478,6 +1480,19 @@ pub async fn delete_if_unchanged(
     Ok(true)
 }
 
+/// Storage without real folders (S3) drops a folder with its last item:
+/// keep the parent of what went (a folder marker; a no-op where folders are
+/// real).
+async fn keep_parent(m: &Mount, op: &opendal::Operator, rel: &str) -> ApiResult<()> {
+    if let Some((parent, _)) = paths::split(rel)
+        && !parent.is_empty()
+        && op.info().capability().create_dir
+    {
+        op.create_dir(&backend_path(m, parent, true)).await?;
+    }
+    Ok(())
+}
+
 async fn delete_locked(st: &AppState, m: &Mount, rel: &str, node: &Node) -> ApiResult<()> {
     if !m.is_hashed() {
         let op = op(st, m).await?;
@@ -1488,6 +1503,7 @@ async fn delete_locked(st: &AppState, m: &Mount, rel: &str, node: &Node) -> ApiR
         } else {
             op.delete(&backend_path(m, rel, false)).await?;
         }
+        keep_parent(m, &op, rel).await?;
     }
     // Hashed blobs are reclaimed later by GC.
     delete_subtree_rows(st, m.volume_id, rel).await?;
@@ -1665,6 +1681,16 @@ fn check_move_target(from: &str, to: &str) -> ApiResult<()> {
 /// The user-path check is not enough: two mounts may show the same volume, or
 /// overlapping folders of one connection (raw). Compare storage locations too.
 fn check_not_into_itself(sm: &Mount, srel: &str, dm: &Mount, drel: &str) -> ApiResult<()> {
+    if contains(sm, srel, dm, drel) {
+        return Err(bad("cannot move or copy a folder into itself"));
+    }
+    Ok(())
+}
+
+/// Whether `drel` of `dm` is `srel` of `sm` or inside it, in storage (two
+/// mounts can show the same volume, or overlapping folders of one raw
+/// connection).
+pub fn contains(sm: &Mount, srel: &str, dm: &Mount, drel: &str) -> bool {
     let same_volume = sm.volume_id == dm.volume_id && paths::strip_prefix(drel, srel).is_some();
     let overlapping_raw = !sm.is_hashed()
         && !dm.is_hashed()
@@ -1674,10 +1700,7 @@ fn check_not_into_itself(sm: &Mount, srel: &str, dm: &Mount, drel: &str) -> ApiR
             &paths::join(&sm.base_path, srel),
         )
         .is_some();
-    if same_volume || overlapping_raw {
-        return Err(bad("cannot move or copy a folder into itself"));
-    }
-    Ok(())
+    same_volume || overlapping_raw
 }
 
 async fn shift_mounts(st: &AppState, user_id: i64, from: &str, to: &str) -> ApiResult<()> {
@@ -1911,6 +1934,7 @@ pub async fn search(st: &AppState, user_id: i64, q: &str, limit: i64) -> ApiResu
                 n.name, n.is_dir, n.size, n.mtime
          FROM nodes n JOIN mounts m ON m.volume_id = n.volume_id
          WHERE m.owner_id = $1 AND n.name ILIKE $2
+           AND (m.path || '/' || n.parent || '/' || n.name) !~ $5
          ORDER BY similarity(n.name, $3) DESC, n.name
          LIMIT $4",
     )
@@ -1918,6 +1942,7 @@ pub async fn search(st: &AppState, user_id: i64, q: &str, limit: i64) -> ApiResu
     .bind(&pattern)
     .bind(q)
     .bind(limit)
+    .bind(crate::conflicts::STAGED_PART)
     .fetch_all(&st.db)
     .await?;
     Ok(hits)

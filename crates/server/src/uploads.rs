@@ -28,7 +28,8 @@ use strata_storage::chunker::MAX_SIZE;
 use strata_storage::{Hash, paths};
 
 use crate::auth::{AuthUser, random_token};
-use crate::error::{ApiError, ApiResult, bad, conflict};
+use crate::conflicts::{self, OnConflict, Source};
+use crate::error::{ApiError, ApiResult, Existing, bad, conflict};
 use crate::mounts;
 use crate::state::AppState;
 use crate::vfs::{self, ByteStream};
@@ -46,11 +47,31 @@ pub struct CreateReq {
     pub size: i64,
     pub chunks: Vec<ChunkSpec>,
     pub mtime: Option<DateTime<Utc>>,
+    /// When the name is taken: replace it (the default: an upload saves over
+    /// a file of that name), fail (409 `exists`, so the client can ask), or
+    /// keep both. Checked here and again at commit (which can answer anew).
+    #[serde(default = "saves_over")]
+    #[schema(default = "replace", required = false)]
+    pub on_conflict: OnConflict,
+}
+
+fn saves_over() -> OnConflict {
+    OnConflict::Replace
+}
+
+#[derive(Deserialize, Default, utoipa::ToSchema)]
+pub struct CommitReq {
+    /// The answer, if the name was taken meanwhile (left out: as asked at
+    /// create).
+    #[serde(default)]
+    pub on_conflict: Option<OnConflict>,
 }
 
 #[derive(sqlx::FromRow)]
 struct Upload {
     path: String,
+    on_conflict: String,
+    committed: Option<sqlx::types::Json<serde_json::Value>>,
     volume_id: i64,
     size: i64,
     chunks: Vec<Vec<u8>>,
@@ -59,7 +80,7 @@ struct Upload {
 }
 
 async fn load(st: &AppState, user_id: i64, id: &str) -> ApiResult<Upload> {
-    sqlx::query_as("SELECT path, volume_id, size, chunks, chunk_sizes, mtime FROM uploads WHERE id = $1 AND user_id = $2")
+    sqlx::query_as("SELECT path, on_conflict, committed, volume_id, size, chunks, chunk_sizes, mtime FROM uploads WHERE id = $1 AND user_id = $2")
         .bind(id)
         .bind(user_id)
         .fetch_optional(&st.db)
@@ -156,16 +177,28 @@ pub async fn create(
     if sizes.iter().sum::<i64>() != req.size {
         return Err(bad("chunk sizes do not add up to the file size"));
     }
-    if let Ok(n) = vfs::stat(&st, &m, &rel).await
-        && n.is_dir
-    {
-        return Err(conflict("a folder with that name already exists"));
+    match vfs::stat(&st, &m, &rel).await {
+        Ok(n) if n.is_dir && req.on_conflict == OnConflict::Replace => {
+            return Err(conflict(
+                "a folder has that name; keep both instead, or rename the folder",
+            ));
+        }
+        Ok(n) if req.on_conflict == OnConflict::Fail => {
+            return Err(ApiError::Exists(Box::new(Existing {
+                name: n.name,
+                path: path.clone(),
+                is_dir: n.is_dir,
+                size: n.size,
+                mtime: n.mtime,
+            })));
+        }
+        _ => {}
     }
     vfs::check_raw_place(&st, &m, &rel).await?;
     let id = random_token(16);
     sqlx::query(
-        "INSERT INTO uploads (id, user_id, path, volume_id, size, chunks, chunk_sizes, mtime)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        "INSERT INTO uploads (id, user_id, path, volume_id, size, chunks, chunk_sizes, mtime, on_conflict)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
     )
     .bind(&id)
     .bind(u.id)
@@ -175,6 +208,7 @@ pub async fn create(
     .bind(&hashes)
     .bind(&sizes)
     .bind(req.mtime)
+    .bind(req.on_conflict.as_str())
     .execute(&st.db)
     .await?;
     let up = load(&st, u.id, &id).await?;
@@ -188,8 +222,14 @@ pub async fn status(
     Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let up = load(&st, u.id, &id).await?;
+    // (Committed: where it landed.)
+    let path = up
+        .committed
+        .as_ref()
+        .and_then(|c| c["path"].as_str())
+        .unwrap_or(&up.path);
     Ok(Json(
-        json!({ "id": id, "path": up.path, "size": up.size, "missing": missing(&st, u.id, &id, &up).await? }),
+        json!({ "id": id, "path": path, "size": up.size, "missing": missing(&st, u.id, &id, &up).await? }),
     ))
 }
 
@@ -264,13 +304,56 @@ pub async fn commit(
     State(st): State<AppState>,
     AuthUser(u): AuthUser,
     Path(id): Path<String>,
+    body: Bytes,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let up = load(&st, u.id, &id).await?;
-    let miss = missing(&st, u.id, &id, &up).await?;
+    // (No body, `null` or `{}`: as asked at create. A body is JSON, checked
+    // as the `Json` extractor checks any other.)
+    let req = if body.iter().all(u8::is_ascii_whitespace) {
+        CommitReq::default()
+    } else {
+        Json::<Option<CommitReq>>::from_bytes(&body)
+            .map_err(|e| ApiError::BadRequest(e.body_text()))?
+            .0
+            .unwrap_or_default()
+    };
+    load(&st, u.id, &id).await?;
+    // One commit of an upload at a time: a retry sent while the first is
+    // still writing waits for it (and then gets the same answer).
+    // (Past the wait, not a refusal: the first one is still at it.)
+    let one = conflicts::wait_claim(&st, format!("upload:{id}"))
+        .await
+        .ok_or_else(|| {
+            ApiError::Unavailable("this upload is still being saved; try again".into())
+        })?;
+    // (To the end, even if this request goes away.)
+    conflicts::detached(async move {
+        let _one = one;
+        commit_detached(st, u.id, id, req).await
+    })
+    .await
+}
+
+async fn commit_detached(
+    st: AppState,
+    uid: i64,
+    id: String,
+    req: CommitReq,
+) -> ApiResult<Json<serde_json::Value>> {
+    let up = load(&st, uid, &id).await?;
+    if let Some(answer) = up.committed {
+        // Committed already (its answer was lost): the same answer, about
+        // what was uploaded, whatever happened to the file since. (Never
+        // "not found", which would have the client upload it again.)
+        return Ok(Json(answer.0));
+    }
+    let mode = req
+        .on_conflict
+        .unwrap_or_else(|| OnConflict::parse(&up.on_conflict));
+    let miss = missing(&st, uid, &id, &up).await?;
     if !miss.is_empty() {
         return Err(conflict(format!("{} chunks still missing", miss.len())));
     }
-    let (m, rel) = mounts::resolve(&st, u.id, &up.path).await?;
+    let (m, _) = mounts::resolve(&st, uid, &up.path).await?;
     if m.volume_id != up.volume_id {
         return Err(conflict(
             "the destination folder changed; restart the upload",
@@ -281,25 +364,101 @@ pub async fn commit(
         .iter()
         .filter_map(|c| Hash::from_slice(c))
         .collect();
-    if m.is_hashed() {
-        vfs::put_hashed_file(&st, &m, &rel, &hashes, &up.chunk_sizes, up.mtime).await?;
-    } else {
-        let dir = staging_dir(&st, &id);
-        let stream: ByteStream = Box::pin(futures::stream::iter(hashes.clone()).then(move |h| {
-            let f = dir.join(h.hex());
-            async move { tokio::fs::read(f).await.map(Bytes::from) }
-        }));
-        vfs::write_stream(&st, &m, &rel, stream).await?;
-    }
-    sqlx::query("DELETE FROM uploads WHERE id = $1")
+    let path = conflicts::write_at(
+        &st,
+        uid,
+        &up.path,
+        false,
+        mode,
+        Source::Upload,
+        |at, in_place| {
+            let (st, hashes, sizes, dir) = (
+                st.clone(),
+                hashes.clone(),
+                up.chunk_sizes.clone(),
+                staging_dir(&st, &id),
+            );
+            let (mtime, volume) = (up.mtime, up.volume_id);
+            // Saving over the file (its new content, atomically);
+            // otherwise only where nothing is (checked under the volume
+            // lock): a file written meanwhile outside these claims is never
+            // overwritten, even under "replace" (that would skip the trash).
+            let expect = if in_place {
+                vfs::Expect::Any
+            } else {
+                vfs::Expect::Absent
+            };
+            async move {
+                let (m, rel) = mounts::resolve(&st, uid, &at).await?;
+                if m.volume_id != volume {
+                    return Err(conflict(
+                        "the destination folder changed; restart the upload",
+                    ));
+                }
+                if m.is_hashed() {
+                    match vfs::put_hashed_file_if(&st, &m, &rel, &hashes, &sizes, mtime, &expect)
+                        .await
+                    {
+                        Err(ApiError::PreconditionFailed(_)) => {
+                            Err(conflict("something was saved there meanwhile; try again"))
+                        }
+                        r => r.map(|_| ()),
+                    }
+                } else {
+                    let stream: ByteStream =
+                        Box::pin(futures::stream::iter(hashes).then(move |h| {
+                            let f = dir.join(h.hex());
+                            async move { tokio::fs::read(f).await.map(Bytes::from) }
+                        }));
+                    match vfs::write_stream_if(&st, &m, &rel, stream, &expect).await {
+                        Err(ApiError::PreconditionFailed(_)) => {
+                            Err(conflict("something was saved there meanwhile; try again"))
+                        }
+                        r => r.map(|_| ()),
+                    }
+                }
+            }
+        },
+    )
+    .await?;
+    // (Saved: whatever fails from here, the answer says so, and is kept.)
+    let node = match mounts::resolve(&st, uid, &path).await {
+        Ok((m, rel)) => vfs::stat(&st, &m, &rel).await.ok(),
+        Err(_) => None,
+    };
+    let answer = match node {
+        Some(n) => {
+            json!({ "path": path, "name": n.name, "size": n.size, "mtime": n.mtime, "etag": n.etag })
+        }
+        None => json!({
+            "path": path, "name": paths::split(&path).map_or("", |(_, n)| n), "size": up.size,
+            "mtime": up.mtime.unwrap_or_else(Utc::now), "etag": null
+        }),
+    };
+    // Kept (without its chunks) until the uploads expire, so a commit sent
+    // again gets this answer instead of writing a second copy. (The file is
+    // saved either way: a failure here doesn't make this one fail.)
+    // (Twice if need be; if it still fails, the chunks stay, so a commit
+    // sent again can still save it.)
+    let record = || {
+        sqlx::query(
+            "UPDATE uploads SET committed = $2, chunks = '{}', chunk_sizes = '{}' WHERE id = $1",
+        )
         .bind(&id)
+        .bind(sqlx::types::Json(&answer))
         .execute(&st.db)
-        .await?;
-    let _ = tokio::fs::remove_dir_all(staging_dir(&st, &id)).await;
-    let node = vfs::stat(&st, &m, &rel).await?;
-    Ok(Json(
-        json!({ "path": up.path, "name": node.name, "size": node.size, "mtime": node.mtime, "etag": node.etag }),
-    ))
+    };
+    let recorded = match record().await {
+        Ok(r) => Ok(r),
+        Err(_) => record().await,
+    };
+    match recorded {
+        Ok(_) => {
+            let _ = tokio::fs::remove_dir_all(staging_dir(&st, &id)).await;
+        }
+        Err(e) => tracing::warn!("upload {id} saved at {path}, but not recorded: {e}"),
+    }
+    Ok(Json(answer))
 }
 
 pub async fn cancel(

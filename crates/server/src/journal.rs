@@ -394,24 +394,24 @@ pub async fn feed(st: &AppState, user_id: i64, cursor: Cursor, limit: i64) -> Ap
                         continue;
                     }
                     let j = |p: &str| paths::join(&m.path, p);
-                    changes.push(FeedEntry {
+                    changes.extend(unstaged(FeedEntry {
                         op: r.op.clone(),
                         path: j(&r.path),
                         new_path: r.new_path.as_deref().map(j),
                         is_dir: r.is_dir,
                         at: r.at,
-                    });
+                    }));
                 }
             }
             None => {
                 next.u = r.seq;
-                changes.push(FeedEntry {
+                changes.extend(unstaged(FeedEntry {
                     op: r.op,
                     path: r.path,
                     new_path: r.new_path,
                     is_dir: r.is_dir,
                     at: r.at,
-                });
+                }));
             }
         }
     }
@@ -420,6 +420,28 @@ pub async fn feed(st: &AppState, user_id: i64, cursor: Cursor, limit: i64) -> Ap
         more,
         changes,
     })
+}
+
+/// A change as clients see it: what happens to an item a replace is staging
+/// is left out, so moving into one reads as a delete and moving out of one
+/// as a create.
+fn unstaged(mut e: FeedEntry) -> Option<FeedEntry> {
+    use crate::conflicts::is_staged;
+    let to = e.new_path.as_deref().map(is_staged);
+    match (is_staged(&e.path), to) {
+        (false, None | Some(false)) => Some(e),
+        (true, None | Some(true)) => None,
+        (false, Some(true)) => {
+            e.op = "delete".into();
+            e.new_path = None;
+            Some(e)
+        }
+        (true, Some(false)) => {
+            e.op = "create".into();
+            e.path = e.new_path.take().unwrap();
+            Some(e)
+        }
+    }
 }
 
 /// `GET /api/changes?cursor=TOKEN`: changes after the cursor. Without a cursor
@@ -618,6 +640,40 @@ async fn ws_loop(st: AppState, user_id: i64, mut socket: WebSocket) {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn staged_items_are_left_out_of_the_feed() {
+        let e = |op: &str, path: &str, new_path: Option<&str>| FeedEntry {
+            op: op.into(),
+            path: path.into(),
+            new_path: new_path.map(str::to_string),
+            is_dir: false,
+            at: Utc::now(),
+        };
+        let s = "d/.strata-0123456789abcdef01";
+        let show = |f: Option<FeedEntry>| f.map(|f| (f.op, f.path, f.new_path));
+        assert_eq!(
+            show(unstaged(e("move", "a", Some("b")))),
+            Some(("move".into(), "a".into(), Some("b".into())))
+        );
+        assert_eq!(show(unstaged(e("create", s, None))), None);
+        assert_eq!(show(unstaged(e("modify", &format!("{s}/x"), None))), None);
+        assert_eq!(show(unstaged(e("move", s, Some(&format!("{s}/y"))))), None);
+        assert_eq!(
+            show(unstaged(e("move", "src/f", Some(s)))),
+            Some(("delete".into(), "src/f".into(), None))
+        );
+        assert_eq!(
+            show(unstaged(e("move", s, Some("d/f")))),
+            Some(("create".into(), "d/f".into(), None))
+        );
+        // (Only the exact staged form.)
+        assert_eq!(
+            show(unstaged(e("create", "d/.strata-notes", None))),
+            Some(("create".into(), "d/.strata-notes".into(), None))
+        );
+    }
+
     use super::*;
 
     #[test]

@@ -451,7 +451,10 @@ export async function run(job: Job, d: Deps, signal?: AbortSignal, restarts = 0)
             path: j.path,
             size: j.size,
             mtime: new Date(j.lastModified).toISOString(),
-            chunks: j.chunks!.map((c) => ({ hash: c.hash, size: c.size }))
+            chunks: j.chunks!.map((c) => ({ hash: c.hash, size: c.size })),
+            // An upload saves over a file of that name. (Asking first comes
+            // with the conflict dialog.)
+            on_conflict: 'replace'
           }),
           signal
         });
@@ -515,7 +518,7 @@ export async function run(job: Job, d: Deps, signal?: AbortSignal, restarts = 0)
     if (j.state === 'committing') {
       live();
       try {
-        await call(d, `/api/uploads/${j.session}/commit`, { ...json({}), signal });
+        await call(d, `/api/uploads/${j.session}/commit`, { ...json({ on_conflict: 'replace' }), signal });
         await go({ t: 'committed' });
       } catch (e) {
         if (!(e instanceof HttpError && e.status === 404)) throw e;

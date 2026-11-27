@@ -95,7 +95,7 @@ async fn hashed_root_file_lifecycle() {
     )
     .await;
     assert_eq!(t.download("Archive/Docs/Sub/hi.txt").await, b"hello world");
-    t.upload("Archive/Docs/Sub/hi.txt", b"v2").await;
+    t.upload_replacing("Archive/Docs/Sub/hi.txt", b"v2").await;
     assert_eq!(t.download("Archive/Docs/Sub/hi.txt").await, b"v2");
     let (s, _) = t
         .json(
@@ -1159,6 +1159,7 @@ fn state_dir_inside_storage_base_is_refused() {
         raw_ttl_secs: 1,
         probe_secs: 60,
         trash_days: 30,
+        busy_wait_ms: 60_000,
     };
     assert!(cfg.clone().checked().is_err());
     cfg.data_dir = "/var/lib/strata".into();
