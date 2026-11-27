@@ -8,11 +8,15 @@
   import Input from './input/input.svelte';
   import CopyIcon from '@lucide/svelte/icons/copy';
   import CheckIcon from '@lucide/svelte/icons/check';
+  import { bytes, when } from '$lib/format';
+  import type { Side } from '$lib/dialogs.svelte';
 
   let el = $state<HTMLDialogElement | null>(null);
   let req = $derived<Request | undefined>(dialogs.queue[0]);
   let values = $state<Record<string, string>>({});
   let copied = $state(false);
+  // A conflict's "apply to the rest".
+  let all = $state(false);
   // A click only cancels when it also started on the backdrop, not when a
   // text selection inside the dialog ends outside it.
   let downOnBackdrop = false;
@@ -44,6 +48,7 @@
     const r = req;
     values = r?.kind === 'form' ? Object.fromEntries(r.opts.fields.map((f) => [f.name, f.value ?? ''])) : {};
     copied = false;
+    all = false;
   });
 
   // Each new request reopens the dialog so autofocus lands in it.
@@ -95,6 +100,12 @@
     }
   }
 
+  /** "1.2 MB, 3 May 2026", or "Folder, ...". */
+  function describe(x: Side) {
+    const parts = [x.is_dir ? 'Folder' : x.size != null ? bytes(x.size) : null, x.mtime ? when(x.mtime) : null];
+    return parts.filter(Boolean).join(', ') || (x.is_dir ? 'Folder' : 'File');
+  }
+
   const titleId = 'strata-dialog-title';
   const bodyId = 'strata-dialog-body';
 </script>
@@ -107,7 +118,7 @@
 <dialog
   bind:this={el}
   aria-labelledby={titleId}
-  aria-describedby={req?.opts.body ? bodyId : undefined}
+  aria-describedby={req?.opts.body || req?.kind === 'conflict' ? bodyId : undefined}
   oncancel={(e) => { e.preventDefault(); cancel(); }}
   onkeydown={(e) => {
     e.stopPropagation();
@@ -132,6 +143,39 @@
       {:else}
         <h2 id={titleId} class="p-6 text-lg leading-none font-semibold">{req.opts.title}</h2>
       {/if}
+    {/key}
+  {:else if req?.kind === 'conflict'}
+    {#key req.id}
+      {@const r = req}
+      {@const o = r.opts}
+      <!-- A folder onto a folder merges; a file and a folder can't replace
+           each other (only keep both or skip). -->
+      {@const merge = o.existing.is_dir && o.incoming.is_dir}
+      {@const canReplace = o.existing.is_dir === o.incoming.is_dir}
+      <form class="grid gap-4 p-6" onsubmit={(e) => { e.preventDefault(); r.done({ action: 'rename', all }); }}>
+        <div class="grid gap-2">
+          <h2 id={titleId} class="text-lg leading-none font-semibold">{o.title}</h2>
+          <p id={bodyId} class="text-sm text-muted-foreground">{o.body ?? `There is already ${o.existing.is_dir ? 'a folder' : 'a file'} named “${o.name}” here.`}</p>
+        </div>
+        <dl class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm" data-testid="conflict-sides">
+          <dt class="text-muted-foreground">There now</dt><dd>{describe(o.existing)}</dd>
+          <dt class="text-muted-foreground">{merge ? 'Coming in' : 'New'}</dt><dd>{describe(o.incoming)}</dd>
+        </dl>
+        {#if o.remaining}
+          <label class="flex items-center gap-2 text-sm">
+            <input type="checkbox" bind:checked={all} class="size-4 accent-primary" />
+            Apply to the other {o.remaining === 1 ? 'conflict' : `${o.remaining} conflicts`}
+          </label>
+        {/if}
+        <div class="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+          <Button variant="outline" onclick={() => r.done({ action: 'skip', all })}>Skip</Button>
+          <!-- Keep both is the default (Enter): it never loses anything. -->
+          <Button type="submit" variant={canReplace ? 'outline' : 'default'} data-autofocus>Keep both</Button>
+          {#if canReplace}
+            <Button onclick={() => r.done({ action: 'replace', all })} title={merge ? 'Put what is inside into the folder that is there, asking again for each name taken' : undefined}>{merge ? 'Merge' : 'Replace'}</Button>
+          {/if}
+        </div>
+      </form>
     {/key}
   {:else if req}
     {#key req.id}

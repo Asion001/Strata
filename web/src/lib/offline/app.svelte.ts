@@ -148,6 +148,8 @@ function changed(j: Job) {
   const i = uploads.jobs.findIndex((x) => x.id === j.id);
   if (i >= 0) uploads.jobs[i] = j;
   else uploads.jobs.push(j);
+  // (Asked when it comes to that, in a tab the user is looking at.)
+  if (j.state === 'decide' && typeof document !== 'undefined' && document.visibilityState === 'visible') void askAboutUploads();
 }
 
 let queueUser: number | null = null;
@@ -233,6 +235,7 @@ export async function startQueue(user: number, done: (j: Job) => void) {
   const known = new Set(uploads.jobs.map((j) => j.id));
   uploads.jobs = [...uploads.jobs, ...loaded.filter((j) => !known.has(j.id))];
   pump();
+  if (uploads.jobs.some((j) => j.state === 'decide')) void askAboutUploads();
 }
 if (typeof window !== 'undefined') window.addEventListener('online', () => pump());
 
@@ -334,6 +337,60 @@ export async function retryUpload(id: string): Promise<boolean> {
   changed(n);
   pump();
   return true;
+}
+
+/** The answer to an upload whose name is taken: go on replacing or keeping
+ *  both, or (skip) drop it. False if it can't go on (gone meanwhile). */
+export async function resolveUpload(id: string, choice: 'replace' | 'rename' | 'skip'): Promise<boolean> {
+  if (choice === 'skip') return cancelUpload(id);
+  const queue = await Queue();
+  const j = await queue.load(id);
+  if (!j || j.state !== 'decide') return false;
+  const n = queue.step(j, { t: 'resolve', choice });
+  if (!(await queue.update(n))) {
+    uploads.jobs = uploads.jobs.filter((x) => x.id !== id);
+    return false;
+  }
+  changed(n);
+  pump();
+  return true;
+}
+
+/** Uploads waiting for a decision are asked about, one dialog at a time;
+ *  "apply to all" answers the others waiting then. */
+let asking = false;
+async function askAboutUploads() {
+  if (asking) return;
+  asking = true;
+  try {
+    const { conflictDialog } = await import('$lib/dialogs.svelte');
+    const asked = new Set<string>();
+    for (;;) {
+      const waiting = uploads.jobs.filter((j) => j.state === 'decide' && !asked.has(j.id));
+      const j = waiting[0];
+      if (!j) break;
+      asked.add(j.id);
+      const name = j.path.slice(j.path.lastIndexOf('/') + 1);
+      const c = await conflictDialog({
+        title: `A ${j.existing?.is_dir ? 'folder' : 'file'} named “${name}” is already there`,
+        name,
+        existing: j.existing ?? { is_dir: false },
+        incoming: { is_dir: false, size: j.size, mtime: new Date(j.lastModified).toISOString() },
+        remaining: waiting.length - 1
+      });
+      // Closed: they wait in the uploads panel.
+      if (!c) break;
+      const these = c.all ? waiting : [j];
+      for (const w of these) {
+        asked.add(w.id);
+        // (A folder can't be replaced by a file: that one keeps both.)
+        const choice = c.action === 'replace' && w.existing?.is_dir ? 'rename' : c.action;
+        await resolveUpload(w.id, choice);
+      }
+    }
+  } finally {
+    asking = false;
+  }
 }
 
 /** Done, failed and cancelled jobs leave the list (failed ones the queue too). */

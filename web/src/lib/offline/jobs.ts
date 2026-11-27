@@ -7,7 +7,9 @@ export interface Chunk {
   hash: string;
 }
 
-export type State = 'queued' | 'hashing' | 'uploading' | 'committing' | 'done' | 'failed' | 'cancelled';
+/** `decide`: its name is taken; it waits for the user (Replace, Keep both
+ *  or Skip) without holding up the others. */
+export type State = 'queued' | 'hashing' | 'uploading' | 'committing' | 'decide' | 'done' | 'failed' | 'cancelled';
 
 export interface Job {
   id: string;
@@ -27,9 +29,14 @@ export interface Job {
   skipped: number;
   error?: string;
   created: number;
+  /** The user's answer to a taken name (none yet: ask). */
+  conflict?: 'replace' | 'rename';
+  /** In `decide`: what is there. */
+  existing?: { is_dir: boolean; size?: number | null; mtime?: string | null };
 }
 
-export const ACTIVE: State[] = ['queued', 'hashing', 'uploading', 'committing'];
+/** Not finished (a job waiting for a decision too: it keeps its bytes). */
+export const ACTIVE: State[] = ['queued', 'hashing', 'uploading', 'committing', 'decide'];
 export const isActive = (j: Job) => ACTIVE.includes(j.state);
 
 /** Bytes of the job's chunks the server has. */

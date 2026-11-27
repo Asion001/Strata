@@ -28,12 +28,25 @@ export type ConfirmOpts = Common & { confirm?: string; cancel?: string; danger?:
 export type FormOpts = Common & { fields: Field[]; confirm?: string; cancel?: string };
 export type AlertOpts = Common & { ok?: string; /** Shown read-only with a Copy button. */ copy?: string };
 export type FolderOpts = Common & PickRules & { confirm?: string; /** The folder it opens at. */ start: string };
+/** One side of a name conflict (what is there, what comes). */
+export type Side = { is_dir: boolean; size?: number | null; mtime?: string | null };
+export type ConflictOpts = Common & {
+  name: string;
+  existing: Side;
+  incoming: Side;
+  /** Conflicts still to come in this batch (offers "apply to all"). */
+  remaining?: number;
+};
+/** Replace (Merge, for a folder onto a folder), keep both or skip; `all`:
+ *  the same for the rest of the batch. */
+export type Choice = { action: 'replace' | 'rename' | 'skip'; all: boolean };
 
 export type Request = { id: number } & (
   | { kind: 'confirm'; opts: ConfirmOpts; done: (v: boolean) => void }
   | { kind: 'form'; opts: FormOpts; done: (v: Record<string, string> | null) => void }
   | { kind: 'alert'; opts: AlertOpts; done: () => void }
   | { kind: 'folder'; opts: FolderOpts; done: (v: string | null) => void }
+  | { kind: 'conflict'; opts: ConflictOpts; done: (v: Choice | null) => void }
 );
 
 export const dialogs = $state<{ queue: Request[] }>({ queue: [] });
@@ -60,7 +73,10 @@ function loadHost() {
 export function native(r: Request) {
   const text = r.opts.body ? `${r.opts.title}\n\n${r.opts.body}` : r.opts.title;
   if (r.kind === 'confirm') r.done(window.confirm(text));
-  else if (r.kind === 'folder') {
+  else if (r.kind === 'conflict') {
+    // (The safe answers only: keep both, or skip.)
+    r.done({ action: window.confirm(`${text}\n\nKeep both? (Cancel skips it.)`) ? 'rename' : 'skip', all: false });
+  } else if (r.kind === 'folder') {
     // (The rules stay with the picker, out of the startup bundle: the
     // server refuses a move into itself, and the same folder does nothing.)
     const v = window.prompt(`${text}\n\nTo folder (full path, empty for Home)`, r.opts.start);
@@ -106,7 +122,7 @@ export function native(r: Request) {
 /** Answers a request the way Cancel does. */
 export function cancelRequest(r: Request | undefined) {
   if (r?.kind === 'confirm') r.done(false);
-  else if (r?.kind === 'form' || r?.kind === 'folder') r.done(null);
+  else if (r?.kind === 'form' || r?.kind === 'folder' || r?.kind === 'conflict') r.done(null);
   else r?.done();
 }
 
@@ -173,4 +189,9 @@ export function pickFolder(opts: FolderOpts): Promise<string | null> {
 
 export function alertDialog(opts: AlertOpts): Promise<void> {
   return push((done) => ({ kind: 'alert', opts, done }));
+}
+
+/** What to do about a name that is taken; null when cancelled (stop). */
+export function conflictDialog(opts: ConflictOpts): Promise<Choice | null> {
+  return push((done) => ({ kind: 'conflict', opts, done }));
 }

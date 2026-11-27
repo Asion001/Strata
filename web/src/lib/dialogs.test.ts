@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 vi.mock('$lib/components/ui/DialogHost.svelte', () => ({ default: () => {} }));
 vi.mock('$lib/components/ui/Toaster.svelte', () => ({ default: () => {} }));
 
-const { dialogs, confirmDialog, promptDialog, formDialog, alertDialog, pickFolder, cancelAllDialogs } = await import('./dialogs.svelte');
+const { dialogs, confirmDialog, promptDialog, formDialog, alertDialog, pickFolder, conflictDialog, cancelAllDialogs } = await import('./dialogs.svelte');
 const { toasts, toast, toastError, dismissToast } = await import('./toast.svelte');
 
 describe('dialogs', () => {
@@ -64,10 +64,21 @@ describe('dialogs', () => {
     expect(await confirmDialog({ title: 'late', signal: ac.signal })).toBe(false);
   });
 
+  it('answers a name conflict with the choice', async () => {
+    const side = { is_dir: false, size: 1 };
+    const p = conflictDialog({ title: 'Taken', name: 'x', existing: side, incoming: side, remaining: 2 });
+    const r = dialogs.queue[0];
+    if (r.kind !== 'conflict') throw new Error('expected conflict');
+    expect(r.opts.remaining).toBe(2);
+    r.done({ action: 'replace', all: true });
+    expect(await p).toEqual({ action: 'replace', all: true });
+  });
+
   it('cancels everything queued', async () => {
-    const all = [confirmDialog({ title: 'a' }), formDialog({ title: 'b', fields: [] }), alertDialog({ title: 'c' }), pickFolder({ title: 'd', start: '' })];
+    const side = { is_dir: false };
+    const all = [confirmDialog({ title: 'a' }), formDialog({ title: 'b', fields: [] }), alertDialog({ title: 'c' }), pickFolder({ title: 'd', start: '' }), conflictDialog({ title: 'e', name: 'e', existing: side, incoming: side })];
     cancelAllDialogs();
-    expect(await Promise.all(all)).toEqual([false, null, undefined, null]);
+    expect(await Promise.all(all)).toEqual([false, null, undefined, null, null]);
     expect(dialogs.queue).toHaveLength(0);
   });
 });
