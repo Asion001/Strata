@@ -56,6 +56,18 @@ jobs:
             echo "$(nproc) cores: $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2-)"
             echo
           } >> "$GITHUB_STEP_SUMMARY"
+      # Postgres for timing: no checkpoint during the run, WAL files not
+      # zero-filled, no autovacuum (the db bench vacuums by itself). Shared
+      # by the base and head runs, so it doesn't favour either.
+      - name: Postgres settings
+        env:
+          PGPASSWORD: strata
+        run: |
+          for s in "checkpoint_timeout = '1h'" "max_wal_size = '16GB'" "wal_init_zero = off" "autovacuum = off"; do
+            psql -h localhost -U strata -d strata -qc "ALTER SYSTEM SET $s"
+          done
+          psql -h localhost -U strata -d strata -qAtc "SELECT pg_reload_conf()" >/dev/null
+          psql -h localhost -U strata -d strata -qAtc "SHOW checkpoint_timeout; SHOW wal_init_zero; SHOW autovacuum"
       # (The cache may bring results of an earlier run along.)
       - name: Clear earlier results
         run: rm -rf target/criterion

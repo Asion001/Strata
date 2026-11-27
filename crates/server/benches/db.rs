@@ -9,6 +9,9 @@
 //!   forth: one move per iteration.
 //! * `db/journal_append`: one change appended to a volume's journal.
 //!
+//! Postgres: run it with checkpoints and autovacuum out of the way (see the
+//! Bench workflow); the bench vacuums by itself.
+//!
 //! Cache state: warm. Criterion's warm-up runs every path first, so
 //! Postgres' shared buffers, the OS page cache and the server's own caches
 //! (mounts, sessions) hold what the measured iterations touch. A cold run
@@ -134,13 +137,42 @@ async fn setup() -> Bench {
             .unwrap();
     }
     sqlx::query("ANALYZE nodes").execute(&st.db).await.unwrap();
-    Bench {
+    let b = Bench {
         st,
         router,
         cookie,
         volume,
         _dir: dir,
+    };
+    // Untimed: a few moves (there and back) and appends first. A Postgres
+    // that has just started makes its WAL files on the first heavy writes;
+    // without this, whichever run comes first in a job (the base) is the
+    // slower one (CI showed 5% to 50% on the move).
+    for _ in 0..4 {
+        b.call(
+            "POST",
+            "/api/files/move",
+            Some(json!({"from": "tree", "to": "moved"})),
+        )
+        .await;
+        b.call(
+            "POST",
+            "/api/files/move",
+            Some(json!({"from": "moved", "to": "tree"})),
+        )
+        .await;
     }
+    for n in 0..200 {
+        let path = format!("warmup/{n}");
+        journal::record_volume(&b.st, b.volume, vec![Change::create(&path, false)])
+            .await
+            .unwrap();
+    }
+    sqlx::query("VACUUM ANALYZE nodes")
+        .execute(&b.st.db)
+        .await
+        .unwrap();
+    b
 }
 
 impl Bench {
