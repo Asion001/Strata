@@ -49,7 +49,7 @@ psql "INSERT INTO nodes (volume_id, parent, name, is_dir) VALUES ($VOL, '', 'sma
       SELECT $VOL, 'big', 'f' || i, FALSE, i, md5(i::text) FROM generate_series(1, 10000) i;
       ANALYZE nodes;"
 head -c 1048576 /dev/urandom >"$WORK/1MiB"
-curl -fsS -X PUT "${AUTH[@]}" -H 'x-strata: 1' --data-binary "@$WORK/1MiB" "$B/api/files/content?path=1MiB.bin" >/dev/null
+curl -fsS -X PUT "${AUTH[@]}" -H 'x-strata: 1' -H 'if-none-match: *' --data-binary "@$WORK/1MiB" "$B/api/files/content?path=1MiB.bin" >/dev/null
 # The chunk's BLAKE3, with the web app's own implementation.
 HASH=$(node --experimental-strip-types --no-warnings web/scripts/blake3-hex.ts "$WORK/1MiB")
 UPLOAD=$(curl -fsS -X POST "${AUTH[@]}" -H 'x-strata: 1' -H 'content-type: application/json' \
@@ -66,7 +66,9 @@ name, c, f = sys.argv[1], sys.argv[2], sys.argv[3]
 r = json.load(open(f))
 s, p = r["summary"], r["latencyPercentiles"]
 ok = sum(n for code, n in r.get("statusCodeDistribution", {}).items() if code.startswith("2"))
-total = sum(r.get("statusCodeDistribution", {}).values()) + sum(r.get("errorDistribution", {}).values())
+# (Requests cut off when the run ends are not the server's.)
+errors = {k: n for k, n in r.get("errorDistribution", {}).items() if k != "aborted due to deadline"}
+total = sum(r.get("statusCodeDistribution", {}).values()) + sum(errors.values())
 ms = lambda v: f"{v * 1000:.1f}"
 print(f"| {name} | {c} | {s['requestsPerSec']:.0f} | {ms(p['p50'])} | {ms(p['p95'])} | {ms(p['p99'])} | {ok}/{total} |")
 PY
@@ -83,8 +85,10 @@ PY
   run "upload a 1 MiB chunk" 50 -m PUT -D "$WORK/1MiB" "$B/api/uploads/$UPLOAD/chunks/$HASH"
   echo
   FAN=$(node scripts/ws-fanout.mjs "$B" "$TOKEN" 1000 fanout.txt)
-  echo "WebSocket fan-out to 1,000 clients of one user, one change: $(python3 -c '
+  python3 - "$FAN" <<'PY'
 import json, sys
 r = json.loads(sys.argv[1])
-print(f"{r[\"connected\"]} connected, {r[\"heard\"]} heard it; p50 {r[\"p50_ms\"]} ms, p95 {r[\"p95_ms\"]} ms, p99 {r[\"p99_ms\"]} ms, max {r[\"max_ms\"]} ms")' "$FAN")"
+print(f"WebSocket fan-out to {r['clients']} clients of one user, one change: {r['connected']} connected, "
+      f"{r['heard']} heard it; p50 {r['p50_ms']} ms, p95 {r['p95_ms']} ms, p99 {r['p99_ms']} ms, max {r['max_ms']} ms")
+PY
 } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
