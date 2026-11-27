@@ -1,6 +1,13 @@
 // Thin client for the Strata HTTP API.
 export class ApiError extends Error {
-  constructor(public status: number, message: string) {
+  constructor(
+    public status: number,
+    message: string,
+    /** The error's kind, e.g. "exists" on a 409 for a taken name. */
+    public code?: string | null,
+    /** With "exists": what is there. */
+    public details?: Existing | null
+  ) {
     super(message);
   }
 }
@@ -24,14 +31,19 @@ export async function api<T = any>(method: string, url: string, body?: unknown, 
   if (meta) meta.offlineAt = r.headers.get(OFFLINE_AT);
   if (!r.ok) {
     let msg = r.statusText;
+    let code: string | null = null;
+    let details: Existing | null = null;
     try {
-      msg = (await r.json()).error ?? msg;
+      const b = await r.json();
+      msg = b.error ?? msg;
+      code = b.code ?? null;
+      details = b.details ?? null;
     } catch {}
     if (r.status === 401 && !url.startsWith('/api/public/')) forgetOfflineUser();
     if (r.status === 401 && !url.startsWith('/api/auth/') && !url.startsWith('/api/public/')) {
       location.href = '/login?next=' + encodeURIComponent(location.pathname + location.search);
     }
-    throw new ApiError(r.status, msg);
+    throw new ApiError(r.status, msg, code, details);
   }
   return r.json();
 }
@@ -46,6 +58,8 @@ import type { components, paths } from './openapi';
 export type Schemas = components['schemas'];
 export type Entry = Schemas['Entry'];
 export type User = Schemas['User'];
+/** What is in the way of a write, move or copy (a 409 "exists"). */
+export type Existing = Schemas['Existing'];
 
 type Method = 'get' | 'put' | 'post' | 'delete';
 /** The methods a path has (not `parameters`, nor ones it lacks). */

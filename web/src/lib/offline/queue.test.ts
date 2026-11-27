@@ -23,6 +23,10 @@ class Server {
   dropOnce: ((url: string, method: string) => boolean) | null = null;
   /** Answer with this status for requests matching. */
   fail: ((url: string, method: string) => number | null) | null = null;
+  /** The name is taken: a create (or commit) asking to fail gets 409 "exists". */
+  taken: 'create' | 'commit' | null = null;
+  /** Each create's and commit's on_conflict. */
+  modes: string[] = [];
   fetch = vi.fn(async (input: RequestInfo | URL, init: RequestInit = {}) => {
     const url = String(input);
     const method = init.method ?? 'GET';
@@ -37,7 +41,11 @@ class Server {
     const missing = (id: string) =>
       chunks.map((c, i) => [c, i] as const).filter(([c]) => !this.sessions.get(id)!.has(c.hash) && !this.have.has(c.hash)).map(([, i]) => i);
     let m: RegExpMatchArray | null;
+    const mode = method === 'POST' && init.body ? (JSON.parse(String(init.body)).on_conflict as string) : undefined;
+    if (mode) this.modes.push(mode);
+    const exists = () => Response.json({ error: 'taken', code: 'exists', details: { name: 'f.bin', path: 'dir/f.bin', is_dir: false, size: 3, mtime: '2026-01-01T00:00:00Z' } }, { status: 409 });
     if (url === '/api/uploads' && method === 'POST') {
+      if (this.taken === 'create' && mode === 'fail') return exists();
       const id = `s${++this.n}`;
       this.sessions.set(id, new Set());
       return Response.json({ id, missing: missing(id) });
@@ -59,6 +67,7 @@ class Server {
     if ((m = url.match(/^\/api\/uploads\/(\w+)\/commit$/)) && method === 'POST') {
       if (!this.sessions.has(m[1])) return Response.json({ error: 'gone' }, { status: 404 });
       if (missing(m[1]).length) return Response.json({ error: 'missing' }, { status: 409 });
+      if (this.taken === 'commit' && mode === 'fail') return exists();
       this.sessions.delete(m[1]);
       this.committed.push(m[1]);
       return Response.json({});
@@ -289,6 +298,62 @@ describe('runner', () => {
       throw Object.assign(new Error('aborted'), { name: 'AbortError' });
     }) as unknown as typeof fetch;
     await expect(q.run(await fresh({ chunks }), deps({ fetch: f }), c2.signal)).rejects.toMatchObject({ name: 'AbortError' });
+  });
+});
+
+describe('a taken name', () => {
+  it('waits for a decision at create, before any byte is sent', async () => {
+    srv.taken = 'create';
+    const j = await q.run(await fresh(), deps());
+    expect(j).toMatchObject({ state: 'decide', session: null, existing: { is_dir: false, size: 3 } });
+    expect(srv.puts).toEqual([]);
+    expect(srv.modes).toEqual(['fail']);
+    // It keeps its bytes (it is not finished), but the queue passes it by.
+    expect(q.isActive(j)).toBe(true);
+    expect(await q.drain(1, deps())).toBe('done');
+    expect(srv.modes).toEqual(['fail']);
+    // Replace: on it goes, saying so at create and at commit.
+    const r = q.step((await q.load(j.id))!, { t: 'resolve', choice: 'replace' });
+    expect(r).toMatchObject({ state: 'queued', conflict: 'replace', existing: undefined });
+    await q.update(r);
+    expect(await q.drain(1, deps())).toBe('done');
+    expect(srv.modes).toEqual(['fail', 'replace', 'replace']);
+    expect(srv.committed).toEqual(['s1']);
+  });
+
+  it('waits for a decision at commit, and goes on with the same session', async () => {
+    srv.taken = 'commit';
+    const j = await q.run(await fresh(), deps());
+    expect(j).toMatchObject({ state: 'decide', session: 's1' });
+    const r = q.step(j, { t: 'resolve', choice: 'rename' });
+    await q.update(r);
+    const done = await q.run(await q.load(r.id).then((x) => x!), deps());
+    expect(done.state).toBe('done');
+    expect(srv.modes).toEqual(['fail', 'fail', 'rename']);
+    // (No chunk sent twice.)
+    expect(srv.puts.length).toBe(new Set(chunks.map((c) => c.hash)).size);
+  });
+
+  it('only an upload in flight can wait, only a waiting one be answered; it can be cancelled', () => {
+    const there = { is_dir: false };
+    const queued = job();
+    expect(q.step(queued, { t: 'conflict', existing: there })).toBe(queued);
+    expect(q.step(queued, { t: 'resolve', choice: 'replace' })).toBe(queued);
+    const waiting = q.step({ ...queued, state: 'committing' }, { t: 'conflict', existing: there });
+    expect(waiting.state).toBe('decide');
+    // (Nothing runs it meanwhile, so nothing can fail it.)
+    expect(q.step(waiting, { t: 'fail', error: 'x' })).toBe(waiting);
+    expect(q.step(waiting, { t: 'cancel' }).state).toBe('cancelled');
+  });
+
+  it('a taken name with nothing said about what is there still waits', async () => {
+    const f = (async () => Response.json({ error: 'taken', code: 'exists', details: null }, { status: 409 })) as unknown as typeof fetch;
+    expect(await q.run(await fresh(), deps({ fetch: f }))).toMatchObject({ state: 'decide', existing: { is_dir: false } });
+  });
+
+  it('a 409 that is not about the name fails as before', async () => {
+    srv.fail = (u, m) => (u === '/api/uploads' && m === 'POST' ? 409 : null);
+    expect(await q.run(await fresh(), deps())).toMatchObject({ state: 'failed', error: 'status 409' });
   });
 });
 

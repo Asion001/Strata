@@ -6,13 +6,14 @@ vi.mock('$lib/components/ui/DialogHost.svelte', () => {
   throw new Error('offline');
 });
 
-const { pickFolder } = await import('./dialogs.svelte');
+const { pickFolder, conflictDialog } = await import('./dialogs.svelte');
 
-const stub = (answer: string | null) => {
+const stub = (answer: string | null, yes = true) => {
   const prompt = vi.fn(() => answer);
   const alert = vi.fn();
-  vi.stubGlobal('window', { prompt, alert, confirm: vi.fn(() => true) });
-  return { prompt, alert };
+  const confirm = vi.fn(() => yes);
+  vi.stubGlobal('window', { prompt, alert, confirm });
+  return { prompt, alert, confirm };
 };
 afterEach(() => vi.unstubAllGlobals());
 vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -33,5 +34,16 @@ describe('folder pick without the dialog component', () => {
   it('answers a cancel with null', async () => {
     stub(null);
     expect(await pickFolder({ title: 'Move', start: 'a' })).toBeNull();
+  });
+});
+
+describe('a name conflict without the dialog component', () => {
+  const side = { is_dir: false };
+  it('offers only what loses nothing: keep both, or skip', async () => {
+    const { confirm } = stub(null, true);
+    expect(await conflictDialog({ title: 'Taken', name: 'x', existing: side, incoming: side })).toEqual({ action: 'rename', all: false });
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('Keep both?'));
+    stub(null, false);
+    expect(await conflictDialog({ title: 'Taken', name: 'x', existing: side, incoming: side })).toEqual({ action: 'skip', all: false });
   });
 });

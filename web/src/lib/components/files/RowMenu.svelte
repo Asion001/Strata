@@ -24,6 +24,7 @@
         <button role="menuitem" class="item" onclick={() => c.moveTo(e)}>Move…</button>
       {/if}
       <button role="menuitem" class="item" onclick={() => c.moveTo(e, true)}>Copy…</button>
+      {#if !e.mount_id}<button role="menuitem" class="item" onclick={() => c.duplicate(e)}>Duplicate</button>{/if}
       <button role="menuitem" class="item" onclick={() => c.share(e)}>Share link…</button>
       {#if !e.is_dir}
         <button role="menuitemcheckbox" aria-checked={c.pinned.has(join(c.listedPath, e.name))} class="item" onclick={() => c.togglePin(e)}>Keep offline</button>

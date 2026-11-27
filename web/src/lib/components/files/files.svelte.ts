@@ -302,6 +302,7 @@ export class FilesController {
   newFolder = async () => (await Actions())?.newFolder(this);
   rename = async (e: Entry) => (await Actions())?.rename(this, e);
   moveTo = async (e: Entry, copy = false) => (await Actions())?.moveTo(this, e, copy);
+  duplicate = async (e: Entry) => (await Actions())?.duplicate(this, e);
   share = async (e: Entry) => (await Actions())?.share(this, e);
   togglePin = async (e: Entry) => (await Actions())?.togglePin(this, e);
   remove(e: Entry, permanent = false) {

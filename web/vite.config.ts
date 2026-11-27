@@ -16,7 +16,7 @@ export default defineConfig({
     // The offline queue and cache hold users' data: fully covered, always.
     coverage: {
       provider: 'v8',
-      include: ['src/lib/offline/{queue,jobs,recent,lru,idb,range}.ts'],
+      include: ['src/lib/offline/{queue,jobs,recent,lru,idb,range}.ts', 'src/lib/components/files/transfer.ts'],
       thresholds: { statements: 100, branches: 100, functions: 100, lines: 100 }
     }
   }

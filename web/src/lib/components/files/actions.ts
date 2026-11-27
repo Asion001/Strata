@@ -5,7 +5,7 @@ import { api, contentUrl, type Entry } from '$lib/api';
 import { join } from '$lib/format';
 import { userRecorded } from '$lib/offline/app.svelte';
 import { session } from '$lib/session.svelte';
-import { alertDialog, formDialog, pickFolder, promptDialog } from '$lib/dialogs.svelte';
+import { alertDialog, conflictDialog, formDialog, pickFolder, promptDialog } from '$lib/dialogs.svelte';
 import { toast, toastError } from '$lib/toast.svelte';
 import type { FilesController } from './files.svelte';
 
@@ -19,7 +19,27 @@ export async function rename(c: FilesController, e: Entry) {
   c.menu = null;
   const dir = c.listedPath;
   const name = await promptDialog({ title: `Rename “${e.name}”`, label: 'New name', value: e.name, confirm: 'Rename' });
-  if (name && name !== e.name) void c.act(() => api('POST', '/api/files/move', { from: join(dir, e.name), to: join(dir, name) }));
+  if (name && name !== e.name) void c.act(() => transfer(e, join(dir, e.name), join(dir, name), false));
+}
+
+/** Move or copy one item, asking when its name is taken there. */
+async function transfer(e: Entry, from: string, to: string, copy: boolean) {
+  const { Batch, Stopped, Transfer } = await import('./transfer');
+  const r = await new Transfer(api, new Batch(conflictDialog), copy).one(e, from, to).catch((err) => {
+    if (err instanceof Stopped) return 'skipped' as const;
+    throw err;
+  });
+  if (r !== 'skipped' && r.renamed) toast(`${copy ? 'Copied' : 'Moved'} as “${r.path.slice(r.path.lastIndexOf('/') + 1)}”.`, 'success');
+}
+
+/** A copy beside it, as "name (2)". */
+export async function duplicate(c: FilesController, e: Entry) {
+  c.menu = null;
+  const p = join(c.listedPath, e.name);
+  void c.act(async () => {
+    const r = await api<{ path: string }>('POST', '/api/files/copy', { from: p, to: p, on_conflict: 'rename' });
+    toast(`Duplicated as “${r.path.slice(r.path.lastIndexOf('/') + 1)}”.`, 'success');
+  });
 }
 
 export async function moveTo(c: FilesController, e: Entry, copy = false) {
@@ -34,7 +54,7 @@ export async function moveTo(c: FilesController, e: Entry, copy = false) {
     // A folder can't go inside itself (a copy neither).
     exclude: e.is_dir ? [from] : []
   });
-  if (dest !== null) void c.act(() => api('POST', copy ? '/api/files/copy' : '/api/files/move', { from, to: join(dest, e.name) }));
+  if (dest !== null) void c.act(() => transfer(e, from, join(dest, e.name), copy));
 }
 
 export async function share(c: FilesController, e: Entry) {

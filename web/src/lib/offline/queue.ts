@@ -22,6 +22,10 @@ export type Event =
   /** The server forgot the session (expired, or committed by an attempt
    *  whose answer was lost): start a new one. */
   | { t: 'gone' }
+  /** The name is taken (and nothing was asked yet): wait for the user. */
+  | { t: 'conflict'; existing: NonNullable<Job['existing']> }
+  /** The user's answer: go on, replacing or keeping both. */
+  | { t: 'resolve'; choice: 'replace' | 'rename' }
   | { t: 'fail'; error: string }
   | { t: 'retry' }
   | { t: 'cancel' };
@@ -76,8 +80,15 @@ export function step(j: Job, e: Event): Job {
       // Start over with a new session (the chunks stay hashed). Committing
       // the same bytes again is harmless; guessing "it went through" isn't.
       return { ...j, state: 'uploading', session: null, sent: [], skipped: 0 };
+    case 'conflict':
+      if (j.state !== 'uploading' && j.state !== 'committing') return j;
+      // (Its session and chunks stay: an answer goes on from there.)
+      return { ...j, state: 'decide', existing: e.existing };
+    case 'resolve':
+      if (j.state !== 'decide') return j;
+      return { ...j, state: 'queued', conflict: e.choice, existing: undefined };
     case 'fail':
-      if (!isActive(j)) return j;
+      if (!isActive(j) || j.state === 'decide') return j;
       return { ...j, state: 'failed', error: e.error };
     case 'retry':
       if (j.state !== 'failed') return j;
@@ -338,10 +349,18 @@ export interface Deps {
 export class Offline extends Error {}
 
 class HttpError extends Error {
-  constructor(public status: number, message: string) {
+  constructor(
+    public status: number,
+    message: string,
+    public code?: string,
+    public details?: Job['existing']
+  ) {
     super(message);
   }
 }
+
+/** A 409 for a taken name: what is there. */
+const taken = (e: unknown) => (e instanceof HttpError && e.status === 409 && e.code === 'exists' ? (e.details ?? { is_dir: false }) : null);
 
 const H = { 'x-strata': '1' };
 const RETRIES = 4;
@@ -375,11 +394,8 @@ async function call(d: Deps, url: string, init: RequestInit = {}): Promise<Respo
       if (UNREACHABLE.has(r.status) && !own) throw new Offline(`HTTP ${r.status}`);
       // Signed out meanwhile (the session expired): wait for a sign-in.
       if (r.status === 401) throw new Offline('signed out');
-      const msg = await r
-        .json()
-        .then((b) => (b as { error?: string }).error)
-        .catch(() => undefined);
-      throw new HttpError(r.status, msg ?? `HTTP ${r.status}`);
+      const b = (await r.json().catch(() => ({}))) as { error?: string; code?: string; details?: Job['existing'] };
+      throw new HttpError(r.status, b.error ?? `HTTP ${r.status}`, b.code, b.details ?? undefined);
     }
     await d.sleep(attempt);
   }
@@ -446,18 +462,25 @@ export async function run(job: Job, d: Deps, signal?: AbortSignal, restarts = 0)
         // A new session is opened as whoever the cookie belongs to: only
         // while that is still this job's user.
         if (d.whoami && (await d.whoami()) !== j.user) throw new Offline('signed in as someone else');
-        const r = await call(d, '/api/uploads', {
-          ...json({
-            path: j.path,
-            size: j.size,
-            mtime: new Date(j.lastModified).toISOString(),
-            chunks: j.chunks!.map((c) => ({ hash: c.hash, size: c.size })),
-            // An upload saves over a file of that name. (Asking first comes
-            // with the conflict dialog.)
-            on_conflict: 'replace'
-          }),
-          signal
-        });
+        let r: Response;
+        try {
+          r = await call(d, '/api/uploads', {
+            ...json({
+              path: j.path,
+              size: j.size,
+              mtime: new Date(j.lastModified).toISOString(),
+              chunks: j.chunks!.map((c) => ({ hash: c.hash, size: c.size })),
+              // A taken name is asked about first (before any byte is sent).
+              on_conflict: j.conflict ?? 'fail'
+            }),
+            signal
+          });
+        } catch (e) {
+          const there = taken(e);
+          if (!there) throw e;
+          await go({ t: 'conflict', existing: there });
+          return j;
+        }
         const b = await r.json();
         missing = b.missing;
         await go({ t: 'session', id: b.id, missing: b.missing });
@@ -518,9 +541,15 @@ export async function run(job: Job, d: Deps, signal?: AbortSignal, restarts = 0)
     if (j.state === 'committing') {
       live();
       try {
-        await call(d, `/api/uploads/${j.session}/commit`, { ...json({ on_conflict: 'replace' }), signal });
+        await call(d, `/api/uploads/${j.session}/commit`, { ...json({ on_conflict: j.conflict ?? 'fail' }), signal });
         await go({ t: 'committed' });
       } catch (e) {
+        // Taken meanwhile: asked about now (the chunks stay on the server).
+        const there = taken(e);
+        if (there) {
+          await go({ t: 'conflict', existing: there });
+          return j;
+        }
         if (!(e instanceof HttpError && e.status === 404)) throw e;
         if (restarts >= 2) throw e; // (never loop on a server that keeps losing it)
         await go({ t: 'gone' });
@@ -557,7 +586,7 @@ export async function drain(user: number, d: Deps, stop?: AbortSignal): Promise<
       if (!isActive(j)) continue;
       const cur = await load(j.id); // (cancelled meanwhile?)
       if (cur && cur.state === 'failed' && isActive(j)) d.changed?.(cur); // (its bytes are gone)
-      if (!cur || !isActive(cur) || waiting(cur)) continue;
+      if (!cur || !isActive(cur) || cur.state === 'decide' || waiting(cur)) continue;
       if (d.whoami && (await d.whoami()) !== user) return stop?.aborted ? 'done' : 'offline'; // (not theirs now: wait)
       const ctl = new AbortController();
       const abort = () => ctl.abort();

@@ -3,7 +3,7 @@
 import { api, ApiError, type Entry, type Schemas } from '$lib/api';
 import { join } from '$lib/format';
 import { reloadMounts } from '$lib/mounts.svelte';
-import { confirmDialog, pickFolder } from '$lib/dialogs.svelte';
+import { confirmDialog, conflictDialog, pickFolder } from '$lib/dialogs.svelte';
 import { toast, type ToastAction } from '$lib/toast.svelte';
 import { trashInfo } from '$lib/trash-info.svelte';
 import { names, type FilesController } from './files.svelte';
@@ -31,27 +31,6 @@ async function finish(c: FilesController, o: Outcome, verb: string, dir: string,
   }
   // What wasn't done, failed or kept.
   return [...failed, ...o.skipped];
-}
-
-/** Runs `fn` for each item in turn; one failure doesn't stop the rest. */
-async function each(c: FilesController, items: Entry[], verb: string, fn: (e: Entry) => Promise<unknown>) {
-  const dir = c.listedPath;
-  const o = outcome();
-  c.busy = true;
-  try {
-    for (const e of items) {
-      try {
-        await fn(e);
-        o.done.push(e);
-      } catch (err) {
-        o.failed.push(e.name);
-        o.lastError = message(err);
-      }
-    }
-  } finally {
-    c.busy = false;
-  }
-  return finish(c, o, verb, dir, true);
 }
 
 /** Mounts are moved and removed on the Mounts page, never as files. */
@@ -197,5 +176,22 @@ export async function transferPicked(c: FilesController, copy: boolean) {
   });
   if (to === null) return;
   if (c.busy) return c.waitForBusy();
-  await each(c, items, copy ? 'copy' : 'move', (e) => api('POST', copy ? '/api/files/copy' : '/api/files/move', { from: join(dir, e.name), to: join(to, e.name) }));
+  const { Batch, Transfer } = await import('./transfer');
+  const o = outcome();
+  c.busy = true;
+  let t;
+  try {
+    t = await new Transfer(api, new Batch(conflictDialog), copy).all(items, dir, to);
+  } finally {
+    c.busy = false;
+  }
+  o.done = items.filter((e) => t.done.includes(e.name));
+  o.skipped = t.skipped;
+  o.failed = t.failed.map((f) => f.name);
+  o.lastError = t.failed.at(-1)?.error ?? '';
+  // (Kept both under another name: said so, when it is just one.)
+  const kept = [...t.renamed.values()];
+  const doneText = kept.length === 1 && o.done.length === 1 ? `${copy ? 'Copied' : 'Moved'} as “${kept[0].slice(kept[0].lastIndexOf('/') + 1)}”.` : undefined;
+  if (!o.done.length && !o.failed.length && o.skipped.length) toast(`Nothing ${copy ? 'copied' : 'moved'}: skipped.`, 'info');
+  return finish(c, o, copy ? 'copy' : 'move', dir, true, undefined, doneText);
 }
