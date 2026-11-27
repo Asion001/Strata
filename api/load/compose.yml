@@ -1,0 +1,19 @@
+# The load test (scripts/load-test.sh): Strata built from this checkout with
+# its own Postgres, published on localhost only.
+name: strata-load
+services:
+  strata:
+    build: ../..
+    environment:
+      DATABASE_URL: postgres://strata:strata@db/strata
+      STRATA_SECRET_KEY: ${STRATA_SECRET_KEY:?}
+      STRATA_ADMIN_USER: admin
+      STRATA_ADMIN_PASSWORD: ${STRATA_ADMIN_PASSWORD:?}
+      STRATA_COOKIE_SECURE: "false"
+    ports: ["127.0.0.1:${STRATA_PORT:-18091}:8080"]
+    depends_on:
+      db: { condition: service_healthy }
+  db:
+    image: postgres:18-alpine
+    environment: { POSTGRES_USER: strata, POSTGRES_PASSWORD: strata, POSTGRES_DB: strata }
+    healthcheck: { test: ["CMD", "pg_isready", "-U", "strata"], interval: 2s, retries: 30 }
